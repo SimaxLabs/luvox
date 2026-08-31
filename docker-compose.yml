@@ -1,0 +1,13 @@
+services:
+  motion-lab:
+    build: .
+    init: true
+    ports:
+      - "127.0.0.1:3000:3000"
+    env_file:
+      - .env
+    environment:
+      PORT: 3000
+      HOST: 0.0.0.0
+      NODE_ENV: production
+    restart: unless-stopped
