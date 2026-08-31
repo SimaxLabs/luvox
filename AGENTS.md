@@ -1,0 +1,31 @@
+# Repository Guide
+
+## Commands
+
+- Use Node.js `>=22.12.0` and the npm lockfile. Use `npm ci` for a clean install; use `npm install` when intentionally changing dependencies.
+- `npm run dev` starts Vite on `127.0.0.1:3000` and Express via `tsx watch` on `127.0.0.1:3001`; Vite proxies `/api` to Express.
+- Run `npm run typecheck` for focused verification. Run `npm run build` before finishing; it repeats both TypeScript checks, builds the Vite client to `dist/`, and compiles the server to `dist-server/`.
+- There are currently no test, lint, formatter, codegen, or CI commands. Do not claim those checks ran.
+- `npm start` alone does not serve the production UI. Run `npm run build`, then `NODE_ENV=production npm start` so Express serves `dist/` on port 3000.
+
+## Architecture
+
+- `src/` is the React client; it must call only the local `/api` routes. `server/index.ts` owns Express routes and static production serving. Keep all OpenRouter HTTP/auth logic in `server/openrouter.ts`.
+- `shared/videoModels.ts` is the single capability registry used by both UI controls and server validation. Add or change model options there rather than duplicating capability checks.
+- Client TypeScript uses bundler resolution, while server TypeScript uses NodeNext. Relative imports in `server/` must use emitted `.js` suffixes even though the sources are `.ts`.
+- Tailwind is v4 through `@tailwindcss/vite` and `src/styles.css`; there is intentionally no `tailwind.config.*` or PostCSS config.
+
+## OpenRouter Constraints
+
+- `OPENROUTER_API_KEY` is server-only via `dotenv/config`. Never add it to Vite env variables, client code, API payloads, logs, or browser storage.
+- Before changing requests or capabilities, re-check the official sources linked under `README.md`'s OpenRouter contract. Use the dedicated asynchronous `/api/v1/videos` API; do not infer chat-completions fields or provider fields.
+- Hailuo 3 currently accepts public HTTPS first/last-frame URLs through `frame_images`. Do not add multipart, local-file, or base64 submission unless the dedicated video-generation docs explicitly add support.
+- Provider `pending` and `in_progress` map to local `queued` and `processing`; `failed`, `cancelled`, and `expired` map to local `failed`. Polling transport/auth errors are not proof that provider generation failed.
+- Preview and download must stay behind `/api/video/content/:id`; that server proxy attaches authentication and forwards range headers. Do not expose the API key or assume `unsigned_urls` are permanently public.
+- OpenRouter documents no cancellation endpoint. The client persists the active job under `motion-lab:video-job`; "Stop watching" only stops local polling and does not stop paid provider work.
+- Never exercise generation in a smoke test with an inherited shell key. Set `OPENROUTER_API_KEY=` explicitly for local error-path tests; a valid submission can incur cost immediately.
+
+## Container Runtime
+
+- Compose reads the untracked `.env`, listens only on host `127.0.0.1:3000`, and sets container `HOST=0.0.0.0`. Preserve that split so the local paid API is not exposed to the LAN by default.
+- The runtime image contains only production dependencies plus `dist/` and `dist-server/`; server runtime imports must not depend on devDependencies or source files.
