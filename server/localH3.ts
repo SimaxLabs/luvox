@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { access, chmod, lstat, mkdir, open, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { access, chmod, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   getLocalH3QualityPreset,
@@ -13,10 +13,10 @@ import type { VideoStatusResponse } from "./videoTypes.js";
 
 const LOCAL_JOB_PREFIX = "local_";
 const LOCAL_JOB_ID = /^local_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const TERMINAL_MARKER = "terminal-status";
 const MAX_DIAGNOSTIC_CHARS = 16_000;
 const MAX_PROGRESS_CARRY_CHARS = 4_096;
 const MAX_QUEUED_JOBS = 3;
-const MAX_RETAINED_JOBS = 20;
 const MAX_REFERENCE_IMAGE_BYTES = 25 * 1024 * 1024;
 const MAX_REFERENCE_IMAGE_PIXELS = 50_000_000;
 const MAX_REFERENCE_ASPECT_RATIO = 16;
@@ -68,6 +68,7 @@ let activeChild: ChildProcess | undefined;
 let pendingJobReservations = 0;
 let referenceUploadTail: Promise<void> = Promise.resolve();
 let referenceProcessingTail: Promise<void> = Promise.resolve();
+const referenceUploads = new Map<string, string>();
 
 process.once("exit", () => activeChild?.kill("SIGTERM"));
 
@@ -476,7 +477,7 @@ async function processReferenceImage(
   return output;
 }
 
-async function prepareReferenceDirectory(directory: string): Promise<void> {
+async function prepareReferenceDirectory(directory: string, allowReplacement: boolean): Promise<void> {
   await mkdir(directory, { recursive: true });
   const directoryInfo = await lstat(directory);
   if (!directoryInfo.isDirectory() || directoryInfo.isSymbolicLink()) {
@@ -500,7 +501,11 @@ async function prepareReferenceDirectory(directory: string): Promise<void> {
   const cutoff = Date.now() - REFERENCE_IMAGE_TTL_MS;
   const expired = retained.filter((file) => file.modifiedAt < cutoff);
   await Promise.all(expired.map((file) => rm(file.path, { force: true })));
-  if (retained.length - expired.length >= MAX_RETAINED_REFERENCE_IMAGES) {
+  const expiredPaths = new Set(expired.map((file) => file.path));
+  for (const [token, filePath] of referenceUploads) {
+    if (expiredPaths.has(filePath)) referenceUploads.delete(token);
+  }
+  if (!allowReplacement && retained.length - expired.length >= MAX_RETAINED_REFERENCE_IMAGES) {
     throw new LocalH3Error(
       "The local reference-image staging area is full. Remove unused images or wait for staged images to expire.",
       429,
@@ -510,7 +515,29 @@ async function prepareReferenceDirectory(directory: string): Promise<void> {
   }
 }
 
-async function storeLocalReferenceImage(data: Buffer): Promise<{ path: string }> {
+async function ownedReferenceUpload(token: string | undefined, directory: string): Promise<string | undefined> {
+  if (!token) return undefined;
+  const candidate = referenceUploads.get(token);
+  if (
+    !candidate ||
+    path.dirname(candidate) !== path.resolve(directory) ||
+    !REFERENCE_IMAGE_NAME.test(path.basename(candidate))
+  ) {
+    return undefined;
+  }
+  const file = await lstat(candidate).catch(() => undefined);
+  if (!file?.isFile() || file.isSymbolicLink()) {
+    referenceUploads.delete(token);
+    return undefined;
+  }
+  return candidate;
+}
+
+async function storeLocalReferenceImage(
+  data: Buffer,
+  uploadToken: string,
+  previousToken?: string,
+): Promise<{ path: string; token: string }> {
   if (data.length < 1) {
     throw new LocalH3Error("Select a non-empty reference image.", 400, "local_reference_error", false);
   }
@@ -535,20 +562,49 @@ async function storeLocalReferenceImage(data: Buffer): Promise<{ path: string }>
 
   const jobsDirectory = await resolveJobsDirectory();
   const directory = path.join(jobsDirectory, "reference-images");
-  await prepareReferenceDirectory(directory);
+  const existingPath = await ownedReferenceUpload(uploadToken, directory);
+  if (existingPath) return { path: existingPath, token: uploadToken };
+  const previousPath = await ownedReferenceUpload(previousToken, directory);
   const output = path.join(directory, `${randomUUID()}${extension}`);
-  await writeFile(output, data, { flag: "wx", mode: 0o600 });
   try {
-    await serializeReferenceProcessing(() => probeReferenceImage(output));
-    return { path: output };
+    await serializeReferenceProcessing(async () => {
+      await prepareReferenceDirectory(directory, Boolean(previousPath));
+      await writeFile(output, data, { flag: "wx", mode: 0o600 });
+      await probeReferenceImage(output);
+      if (previousPath) await rm(previousPath, { force: true });
+    });
   } catch (error) {
     await rm(output, { force: true }).catch(() => undefined);
     throw error;
   }
+
+  if (previousToken && previousPath) referenceUploads.delete(previousToken);
+  referenceUploads.set(uploadToken, output);
+  return { path: output, token: uploadToken };
 }
 
-export function uploadLocalReferenceImage(data: Buffer): Promise<{ path: string }> {
-  const operation = referenceUploadTail.then(() => storeLocalReferenceImage(data));
+export function uploadLocalReferenceImage(
+  data: Buffer,
+  uploadToken: string,
+  previousToken?: string,
+): Promise<{ path: string; token: string }> {
+  const operation = referenceUploadTail.then(() => storeLocalReferenceImage(data, uploadToken, previousToken));
+  referenceUploadTail = operation.then(() => undefined, () => undefined);
+  return operation;
+}
+
+async function deleteStoredReferenceImage(token: string): Promise<{ deleted: boolean }> {
+  const jobsDirectory = await resolveJobsDirectory();
+  const directory = path.join(jobsDirectory, "reference-images");
+  const candidate = await ownedReferenceUpload(token, directory);
+  if (!candidate) return { deleted: false };
+  await serializeReferenceProcessing(() => rm(candidate, { force: true }));
+  referenceUploads.delete(token);
+  return { deleted: true };
+}
+
+export function deleteLocalReferenceImage(token: string): Promise<{ deleted: boolean }> {
+  const operation = referenceUploadTail.then(() => deleteStoredReferenceImage(token));
   referenceUploadTail = operation.then(() => undefined, () => undefined);
   return operation;
 }
@@ -675,12 +731,20 @@ function failureDetails(job: LocalJob, code: number | null, signal: NodeJS.Signa
   return details ? `h3.c failed with ${exit}: ${details}` : `h3.c failed with ${exit}.`;
 }
 
+async function writeTerminalMarker(job: LocalJob, status: "completed" | "failed"): Promise<void> {
+  const temporary = path.join(job.directory, `${TERMINAL_MARKER}.tmp`);
+  const marker = path.join(job.directory, TERMINAL_MARKER);
+  await writeFile(temporary, `${status}\n`, { flag: "w", mode: 0o600 });
+  await rename(temporary, marker);
+}
+
 async function executeJob(job: LocalJob): Promise<void> {
   const resolution = getLocalH3Resolution(job.input.resolution);
   const quality = getLocalH3QualityPreset(job.input.quality);
   if (!resolution || !quality) {
     job.status = "failed";
     job.error = "The selected local generation preset is no longer available.";
+    await writeTerminalMarker(job, "failed").catch(() => undefined);
     return;
   }
 
@@ -777,11 +841,13 @@ async function executeJob(job: LocalJob): Promise<void> {
     job.status = "completed";
     job.phase = "Completed";
     job.progress = 100;
+    await writeTerminalMarker(job, "completed").catch(() => undefined);
   } catch (error) {
     await rm(job.temporaryOutput, { force: true }).catch(() => undefined);
     job.status = "failed";
     job.phase = "Failed";
     job.error = error instanceof Error ? error.message : "Local h3.c generation failed.";
+    await writeTerminalMarker(job, "failed").catch(() => undefined);
   }
 }
 
@@ -801,6 +867,22 @@ function startNextJob(): void {
     activeJobId = undefined;
     startNextJob();
   });
+}
+
+async function removePreviousGenerationDirectory(jobsDirectory: string, id: string): Promise<void> {
+  if (!LOCAL_JOB_ID.test(id) || id === activeJobId || queue.includes(id)) return;
+
+  const knownJob = jobs.get(id);
+  if (knownJob && knownJob.status !== "completed" && knownJob.status !== "failed") return;
+  if (!knownJob) {
+    const completedOutput = await stat(path.join(jobsDirectory, id, "result.mp4")).catch(() => undefined);
+    const terminalStatus = await readFile(path.join(jobsDirectory, id, TERMINAL_MARKER), "utf8")
+      .catch(() => undefined);
+    if (!completedOutput?.isFile() && terminalStatus !== "completed\n" && terminalStatus !== "failed\n") return;
+  }
+
+  await rm(path.join(jobsDirectory, id), { recursive: true, force: true });
+  jobs.delete(id);
 }
 
 export function isLocalJobId(id: string): boolean {
@@ -842,19 +924,9 @@ export async function generateLocalVideo(
     );
   }
   pendingJobReservations += 1;
+  const id = `${LOCAL_JOB_PREFIX}${randomUUID()}`;
 
   try {
-    const terminalJobs = [...jobs.values()]
-      .filter((job) => job.status === "completed" || job.status === "failed")
-      .sort((left, right) => left.createdAt - right.createdAt);
-    while (jobs.size >= MAX_RETAINED_JOBS && terminalJobs.length > 0) {
-      const expired = terminalJobs.shift();
-      if (!expired) break;
-      jobs.delete(expired.id);
-      await rm(expired.directory, { recursive: true, force: true }).catch(() => undefined);
-    }
-
-    const id = `${LOCAL_JOB_PREFIX}${randomUUID()}`;
     const directory = path.join(runtime.jobsDirectory, id);
     await mkdir(directory, { recursive: false, mode: 0o700 });
 
@@ -911,6 +983,9 @@ export async function generateLocalVideo(
 
     jobs.set(id, job);
     queue.push(id);
+    if (input.previousJobId) {
+      await removePreviousGenerationDirectory(runtime.jobsDirectory, input.previousJobId).catch(() => undefined);
+    }
     startNextJob();
     return toResponse(job);
   } finally {

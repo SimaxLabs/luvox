@@ -15,6 +15,7 @@ import {
 } from "../shared/localH3";
 import {
   ApiError,
+  deleteLocalReferenceImage,
   generateVideo,
   getAppConfig,
   getVideoContent,
@@ -339,9 +340,12 @@ export default function App() {
   const [appConfig, setAppConfig] = useState<AppConfig | null>(null);
   const [uploadingReference, setUploadingReference] = useState<"first" | "last" | null>(null);
   const [referenceUploadStatus, setReferenceUploadStatus] = useState("");
+  const [referenceUploadTokens, setReferenceUploadTokens] = useState<Partial<Record<"first" | "last", string>>>({});
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const firstFramePicker = useRef<HTMLInputElement>(null);
   const lastFramePicker = useRef<HTMLInputElement>(null);
+  const firstFramePathOnFocus = useRef("");
+  const lastFramePathOnFocus = useRef("");
 
   const selectedModel = getVideoModel(form.model) || defaultModel;
   const selectedLocalQuality = getLocalH3QualityPreset(form.localQuality);
@@ -485,6 +489,30 @@ export default function App() {
     }));
   };
 
+  const releaseChangedReference = (
+    position: "first" | "last",
+    previousPath: string,
+    nextPath: string,
+  ) => {
+    const token = referenceUploadTokens[position];
+    if (!token || !previousPath || previousPath === nextPath) return;
+
+    const otherPosition = position === "first" ? "last" : "first";
+    const otherPath = otherPosition === "first"
+      ? form.localFirstFramePath
+      : form.localLastFramePath;
+    setReferenceUploadTokens((current) => {
+      const next = { ...current, [position]: undefined };
+      if (otherPath === previousPath && !current[otherPosition]) {
+        next[otherPosition] = token;
+      }
+      return next;
+    });
+    if (otherPath !== previousPath) {
+      void deleteLocalReferenceImage(token).catch(() => undefined);
+    }
+  };
+
   const selectLocalReference = async (
     event: ChangeEvent<HTMLInputElement>,
     position: "first" | "last",
@@ -497,22 +525,50 @@ export default function App() {
     const supportedType = ["image/png", "image/jpeg", "image/webp"].includes(file.type);
     const supportedExtension = Boolean(extension && ["png", "jpg", "jpeg", "webp"].includes(extension));
     if (!supportedType && !supportedExtension) {
+      setReferenceUploadStatus(`${position === "first" ? "First" : "Last"} frame image upload failed.`);
       setError("Reference images must be PNG, JPEG, or WebP files.");
       return;
     }
     if (file.size < 1 || file.size > 25 * 1024 * 1024) {
+      setReferenceUploadStatus(`${position === "first" ? "First" : "Last"} frame image upload failed.`);
       setError("Reference images must be non-empty and no larger than 25 MB.");
       return;
     }
 
+    const previousPath = position === "first"
+      ? form.localFirstFramePath
+      : form.localLastFramePath;
     setUploadingReference(position);
     setReferenceUploadStatus(`Uploading ${position} frame image.`);
     setError(null);
     try {
-      const result = await uploadLocalReferenceImage(file);
+      const otherPath = position === "first"
+        ? form.localLastFramePath
+        : form.localFirstFramePath;
+      const previousToken = otherPath === previousPath
+        ? undefined
+        : referenceUploadTokens[position];
+      const uploadToken = crypto.randomUUID();
+      const upload = () => uploadLocalReferenceImage(file, uploadToken, previousToken);
+      let result: Awaited<ReturnType<typeof upload>>;
+      try {
+        result = await upload();
+      } catch (firstAttemptError) {
+        const apiError = firstAttemptError instanceof ApiError ? firstAttemptError : null;
+        if (!apiError || (apiError.status !== 0 && apiError.status >= 300)) throw firstAttemptError;
+        result = await upload();
+      }
       setForm((current) => position === "first"
         ? { ...current, localFirstFramePath: result.path, localFrameFit: "contain" }
         : { ...current, localLastFramePath: result.path, localFrameFit: "contain" });
+      setReferenceUploadTokens((current) => {
+        const next = { ...current, [position]: result.token };
+        const otherPosition = position === "first" ? "last" : "first";
+        if (otherPath === previousPath && current[position] && !current[otherPosition]) {
+          next[otherPosition] = current[position];
+        }
+        return next;
+      });
       setReferenceUploadStatus(`${position === "first" ? "First" : "Last"} frame image uploaded.`);
     } catch (uploadError) {
       setReferenceUploadStatus(`${position === "first" ? "First" : "Last"} frame image upload failed.`);
@@ -543,6 +599,7 @@ export default function App() {
             firstFramePath: form.localFirstFramePath || undefined,
             lastFramePath: form.localLastFramePath || undefined,
             frameFit: form.localFrameFit,
+            previousJobId: job?.provider === "local" ? job.id : undefined,
             ssdStreaming: form.localSsdStreaming,
           })
         : await generateVideo(
@@ -940,11 +997,17 @@ export default function App() {
                       <input
                         className="h-11 min-w-0 flex-1 border border-black/15 bg-[#faf9f3] px-3 font-mono text-xs outline-none transition placeholder:text-stone-400 focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
                         id="local-first-frame-path"
+                        onBlur={(event) => {
+                          const previousPath = firstFramePathOnFocus.current;
+                          releaseChangedReference("first", previousPath, event.currentTarget.value);
+                          firstFramePathOnFocus.current = event.currentTarget.value;
+                        }}
                         onChange={(event) => setForm((current) => ({
                           ...current,
                           localFirstFramePath: event.target.value,
                           localFrameFit: event.target.value ? "contain" : current.localFrameFit,
                         }))}
+                        onFocus={(event) => { firstFramePathOnFocus.current = event.currentTarget.value; }}
                         placeholder="/Users/.../opening.png"
                         spellCheck={false}
                         type="text"
@@ -977,11 +1040,17 @@ export default function App() {
                       <input
                         className="h-11 min-w-0 flex-1 border border-black/15 bg-[#faf9f3] px-3 font-mono text-xs outline-none transition placeholder:text-stone-400 focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
                         id="local-last-frame-path"
+                        onBlur={(event) => {
+                          const previousPath = lastFramePathOnFocus.current;
+                          releaseChangedReference("last", previousPath, event.currentTarget.value);
+                          lastFramePathOnFocus.current = event.currentTarget.value;
+                        }}
                         onChange={(event) => setForm((current) => ({
                           ...current,
                           localLastFramePath: event.target.value,
                           localFrameFit: event.target.value ? "contain" : current.localFrameFit,
                         }))}
+                        onFocus={(event) => { lastFramePathOnFocus.current = event.currentTarget.value; }}
                         placeholder="/Users/.../closing.png"
                         spellCheck={false}
                         type="text"

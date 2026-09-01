@@ -36,6 +36,7 @@ export interface LocalGenerateVideoPayload {
   firstFramePath?: string;
   lastFramePath?: string;
   frameFit: LocalH3FrameFitId;
+  previousJobId?: string;
   ssdStreaming: boolean;
 }
 
@@ -126,7 +127,11 @@ export function getAppConfig(): Promise<AppConfig> {
   return request<AppConfig>("/api/config");
 }
 
-export function uploadLocalReferenceImage(file: File): Promise<{ path: string }> {
+export function uploadLocalReferenceImage(
+  file: File,
+  uploadToken: string,
+  previousToken?: string,
+): Promise<{ path: string; token: string }> {
   const extension = file.name.split(".").pop()?.toLowerCase();
   const contentType = ["image/png", "image/jpeg", "image/webp"].includes(file.type)
     ? file.type
@@ -137,10 +142,22 @@ export function uploadLocalReferenceImage(file: File): Promise<{ path: string }>
         : extension === "webp"
           ? "image/webp"
           : "application/octet-stream";
-  return request<{ path: string }>("/api/local/reference-image", {
+  return request<{ path: string; token: string }>("/api/local/reference-image", {
     method: "POST",
-    headers: { "Content-Type": contentType },
+    headers: {
+      "Content-Type": contentType,
+      "X-Reference-Upload-Token": uploadToken,
+      ...(previousToken ? { "X-Previous-Reference-Token": previousToken } : {}),
+    },
     body: file,
+  });
+}
+
+export function deleteLocalReferenceImage(token: string): Promise<{ deleted: boolean }> {
+  return request<{ deleted: boolean }>("/api/local/reference-image", {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token }),
   });
 }
 

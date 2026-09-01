@@ -5,6 +5,7 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import { z, ZodError } from "zod";
 import {
+  deleteLocalReferenceImage,
   generateLocalVideo,
   getLocalVideoPath,
   getLocalVideoStatus,
@@ -31,6 +32,11 @@ const sessionApiKeySchema = z
   .min(1)
   .max(1_024, "The temporary API key is too long.")
   .optional();
+const localReferenceDeleteSchema = z
+  .object({ token: z.string().uuid() })
+  .strict();
+const localReferenceTokenSchema = z.string().uuid();
+const optionalLocalReferenceTokenSchema = localReferenceTokenSchema.optional();
 
 function getSessionApiKey(request: Request): string | undefined {
   return sessionApiKeySchema.parse(request.get("X-OpenRouter-Api-Key"));
@@ -93,7 +99,13 @@ app.post(
           false,
         );
       }
-      const result = await uploadLocalReferenceImage(request.body);
+      const uploadToken = localReferenceTokenSchema.parse(
+        request.get("X-Reference-Upload-Token"),
+      );
+      const previousToken = optionalLocalReferenceTokenSchema.parse(
+        request.get("X-Previous-Reference-Token"),
+      );
+      const result = await uploadLocalReferenceImage(request.body, uploadToken, previousToken);
       response.setHeader("Cache-Control", "private, no-store");
       response.status(201).json(result);
     } catch (error) {
@@ -103,6 +115,21 @@ app.post(
 );
 
 app.use(express.json({ limit: "100kb" }));
+
+app.delete(
+  "/api/local/reference-image",
+  async (request: Request, response: Response, next: NextFunction) => {
+    try {
+      assertLoopbackRequest(request);
+      const input = localReferenceDeleteSchema.parse(request.body);
+      const result = await deleteLocalReferenceImage(input.token);
+      response.setHeader("Cache-Control", "private, no-store");
+      response.json(result);
+    } catch (error) {
+      next(error);
+    }
+  },
+);
 
 app.post(
   "/api/video/generate",
