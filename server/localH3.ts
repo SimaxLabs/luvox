@@ -110,7 +110,7 @@ export function isLocalH3Supported(): boolean {
   );
 }
 
-async function resolveRuntime(): Promise<LocalH3Runtime> {
+function assertLocalH3Supported(): void {
   if (process.platform !== "darwin" || process.arch !== "arm64") {
     throw new LocalH3Error(
       "Local h3.c generation requires macOS on Apple Silicon and is not available inside the Docker container.",
@@ -127,19 +127,11 @@ async function resolveRuntime(): Promise<LocalH3Runtime> {
       false,
     );
   }
+}
 
-  const binary = configuredPath("H3_BINARY");
-  const modelDirectory = configuredPath("H3_MODEL_DIR");
-  const configuredRuntimeDirectory = process.env.H3_RUNTIME_DIR?.trim();
+async function resolveJobsDirectory(): Promise<string> {
+  assertLocalH3Supported();
   const configuredJobsDirectory = process.env.H3_JOBS_DIR?.trim();
-  if (configuredRuntimeDirectory && !path.isAbsolute(configuredRuntimeDirectory)) {
-    throw new LocalH3Error(
-      "H3_RUNTIME_DIR must be an absolute path.",
-      503,
-      "local_configuration_error",
-      false,
-    );
-  }
   if (configuredJobsDirectory && !path.isAbsolute(configuredJobsDirectory)) {
     throw new LocalH3Error(
       "H3_JOBS_DIR must be an absolute path.",
@@ -148,8 +140,38 @@ async function resolveRuntime(): Promise<LocalH3Runtime> {
       false,
     );
   }
-  const runtimeDirectory = configuredRuntimeDirectory || path.dirname(binary);
   const jobsDirectory = configuredJobsDirectory || path.resolve(process.cwd(), ".h3-jobs");
+  try {
+    await mkdir(jobsDirectory, { recursive: true });
+    const jobsInfo = await stat(jobsDirectory);
+    if (!jobsInfo.isDirectory()) throw new Error("not a directory");
+    await access(jobsDirectory, fsConstants.R_OK | fsConstants.W_OK);
+  } catch {
+    throw new LocalH3Error(
+      "H3_JOBS_DIR could not be created or is not writable.",
+      503,
+      "local_configuration_error",
+      false,
+    );
+  }
+  return jobsDirectory;
+}
+
+async function resolveRuntime(): Promise<LocalH3Runtime> {
+  assertLocalH3Supported();
+
+  const binary = configuredPath("H3_BINARY");
+  const modelDirectory = configuredPath("H3_MODEL_DIR");
+  const configuredRuntimeDirectory = process.env.H3_RUNTIME_DIR?.trim();
+  if (configuredRuntimeDirectory && !path.isAbsolute(configuredRuntimeDirectory)) {
+    throw new LocalH3Error(
+      "H3_RUNTIME_DIR must be an absolute path.",
+      503,
+      "local_configuration_error",
+      false,
+    );
+  }
+  const runtimeDirectory = configuredRuntimeDirectory || path.dirname(binary);
 
   try {
     const binaryInfo = await stat(binary);
@@ -191,19 +213,7 @@ async function resolveRuntime(): Promise<LocalH3Runtime> {
     );
   }
 
-  try {
-    await mkdir(jobsDirectory, { recursive: true });
-    const jobsInfo = await stat(jobsDirectory);
-    if (!jobsInfo.isDirectory()) throw new Error("not a directory");
-    await access(jobsDirectory, fsConstants.R_OK | fsConstants.W_OK);
-  } catch {
-    throw new LocalH3Error(
-      "H3_JOBS_DIR could not be created or is not writable.",
-      503,
-      "local_configuration_error",
-      false,
-    );
-  }
+  const jobsDirectory = await resolveJobsDirectory();
   return { binary, modelDirectory, runtimeDirectory, jobsDirectory };
 }
 
@@ -343,8 +353,8 @@ async function storeLocalReferenceImage(data: Buffer): Promise<{ path: string }>
     );
   }
 
-  const runtime = await resolveRuntime();
-  const directory = path.join(runtime.jobsDirectory, "reference-images");
+  const jobsDirectory = await resolveJobsDirectory();
+  const directory = path.join(jobsDirectory, "reference-images");
   await prepareReferenceDirectory(directory);
   const output = path.join(directory, `${randomUUID()}${extension}`);
   await writeFile(output, data, { flag: "wx", mode: 0o600 });
