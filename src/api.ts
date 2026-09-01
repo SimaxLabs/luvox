@@ -52,6 +52,7 @@ interface ApiErrorBody {
 }
 
 export interface AppConfig {
+  sessionId: string;
   localH3: {
     supported: boolean;
     configured: boolean;
@@ -123,8 +124,8 @@ export function generateVideo(
   });
 }
 
-export function getAppConfig(): Promise<AppConfig> {
-  return request<AppConfig>("/api/config");
+export function getAppConfig(signal?: AbortSignal): Promise<AppConfig> {
+  return request<AppConfig>("/api/config", { signal });
 }
 
 export function uploadLocalReferenceImage(

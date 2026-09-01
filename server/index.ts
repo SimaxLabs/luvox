@@ -1,17 +1,21 @@
 import "dotenv/config";
 
 import express, { type NextFunction, type Request, type Response } from "express";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { z, ZodError } from "zod";
 import {
+  beginLocalH3Shutdown,
   deleteLocalReferenceImage,
   generateLocalVideo,
   getLocalVideoPath,
   getLocalVideoStatus,
+  initializeLocalH3Storage,
   isLocalJobId,
   isLocalH3Supported,
   LocalH3Error,
+  shutdownLocalH3Storage,
   uploadLocalReferenceImage,
 } from "./localH3.js";
 import {
@@ -26,6 +30,7 @@ const app = express();
 const isProduction = process.env.NODE_ENV === "production";
 const port = Number(process.env.PORT || (isProduction ? 3000 : 3001));
 const host = process.env.HOST?.trim() || "127.0.0.1";
+const serverSessionId = randomUUID();
 const sessionApiKeySchema = z
   .string()
   .trim()
@@ -72,7 +77,9 @@ app.get("/api/health", (_request, response) => {
 });
 
 app.get("/api/config", (_request, response) => {
+  response.setHeader("Cache-Control", "no-store");
   response.json({
+    sessionId: serverSessionId,
     localH3: {
       supported: isLocalH3Supported(),
       configured: Boolean(
@@ -374,6 +381,38 @@ if (!Number.isInteger(port) || port < 1 || port > 65_535) {
   throw new Error("PORT must be a valid TCP port.");
 }
 
-app.listen(port, host, () => {
+await initializeLocalH3Storage();
+
+const server = app.listen(port, host, () => {
   console.log(`Motion Lab server listening on http://${host}:${port}`);
 });
+
+let closing: Promise<void> | undefined;
+function closeServer(): Promise<void> {
+  if (closing) return closing;
+  closing = (async () => {
+    beginLocalH3Shutdown();
+    const closed = new Promise<void>((resolve) => server.close(() => resolve()));
+    const closeTimeout = new Promise<void>((resolve) => {
+      const timeout = setTimeout(() => {
+        server.closeAllConnections();
+        resolve();
+      }, 15_000);
+      timeout.unref();
+    });
+    await Promise.race([closed, closeTimeout]);
+    await shutdownLocalH3Storage();
+  })();
+  return closing;
+}
+
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  process.once(signal, () => {
+    void closeServer()
+      .then(() => process.exit(0))
+      .catch((error) => {
+        console.error(error);
+        process.exit(1);
+      });
+  });
+}

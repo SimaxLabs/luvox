@@ -1,8 +1,14 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { constants as fsConstants } from "node:fs";
+import {
+  constants as fsConstants,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { access, chmod, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { promisify } from "node:util";
 import {
   getLocalH3QualityPreset,
   getLocalH3Resolution,
@@ -14,6 +20,11 @@ import type { VideoStatusResponse } from "./videoTypes.js";
 const LOCAL_JOB_PREFIX = "local_";
 const LOCAL_JOB_ID = /^local_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const TERMINAL_MARKER = "terminal-status";
+const STORAGE_LOCK = ".motion-lab.lock";
+const STORAGE_LOCK_OWNER = "owner.json";
+const STORAGE_LOCK_TOMBSTONE = /^\.motion-lab\.lock\.stale-(\d+)-(\d+)$/;
+const STORAGE_OWNER = ".motion-lab-owned";
+const STORAGE_OWNER_CONTENT = "motion-lab-h3-jobs-v1\n";
 const MAX_DIAGNOSTIC_CHARS = 16_000;
 const MAX_PROGRESS_CARRY_CHARS = 4_096;
 const MAX_QUEUED_JOBS = 3;
@@ -29,6 +40,19 @@ interface LocalH3Runtime {
   modelDirectory: string;
   runtimeDirectory: string;
   jobsDirectory: string;
+}
+
+interface StorageLockOwner {
+  pid: number;
+  token: string;
+  serverStartedAt?: string;
+  activeGroups?: StorageProcessGroup[];
+}
+
+interface StorageProcessGroup {
+  pid: number;
+  startedAt: string;
+  executable: string;
 }
 
 interface LocalJob {
@@ -62,15 +86,102 @@ export class LocalH3Error extends Error {
 }
 
 const jobs = new Map<string, LocalJob>();
+const execFileAsync = promisify(execFile);
 const queue: string[] = [];
 let activeJobId: string | undefined;
 let activeChild: ChildProcess | undefined;
+let activeExecution: Promise<void> | undefined;
 let pendingJobReservations = 0;
 let referenceUploadTail: Promise<void> = Promise.resolve();
 let referenceProcessingTail: Promise<void> = Promise.resolve();
 const referenceUploads = new Map<string, string>();
+const storageLockToken = randomUUID();
+let storageLockPath: string | undefined;
+let storageServerStartedAt: string | undefined;
+let shuttingDown = false;
+let storageReady = false;
+let inFlightOperations = 0;
+const idleResolvers = new Set<() => void>();
+const childProcessGroups = new Set<number>();
+const persistedProcessGroups = new Map<number, StorageProcessGroup>();
 
-process.once("exit", () => activeChild?.kill("SIGTERM"));
+function trackChildProcess(child: ChildProcess): void {
+  if (!child.pid) return;
+  const group = child.pid;
+  childProcessGroups.add(group);
+  const remove = () => childProcessGroups.delete(group);
+  child.once("error", remove);
+  child.once("close", remove);
+}
+
+function signalProcessGroup(child: ChildProcess, signal: NodeJS.Signals): void {
+  if (!child.pid) return;
+  try {
+    process.kill(-child.pid, signal);
+  } catch {
+    // The process group may already be gone.
+  }
+}
+
+async function activateProcessGroup(child: ChildProcess, expectedExecutable: string): Promise<void> {
+  if (!child.pid) return;
+  signalProcessGroup(child, "SIGSTOP");
+  persistedProcessGroups.set(child.pid, {
+    pid: child.pid,
+    startedAt: "pending",
+    executable: expectedExecutable,
+  });
+  try {
+    writeStorageLockOwnerSync();
+  } catch (error) {
+    persistedProcessGroups.delete(child.pid);
+    signalProcessGroup(child, "SIGKILL");
+    throw error;
+  }
+  const identity = await readProcessIdentity(child.pid);
+  if (!identity) {
+    if (!processGroupIsRunning(child.pid)) {
+      persistedProcessGroups.delete(child.pid);
+      await updateStorageLockOwner();
+      return;
+    }
+    signalProcessGroup(child, "SIGKILL");
+    throw new Error("The local child process identity could not be recorded safely.");
+  }
+  persistedProcessGroups.set(child.pid, {
+    pid: child.pid,
+    startedAt: identity.startedAt,
+    executable: identity.executable,
+  });
+  try {
+    await updateStorageLockOwner();
+  } catch (error) {
+    persistedProcessGroups.delete(child.pid);
+    signalProcessGroup(child, "SIGKILL");
+    throw error;
+  }
+  signalProcessGroup(child, "SIGCONT");
+}
+
+async function deactivateProcessGroup(child: ChildProcess): Promise<void> {
+  if (!child.pid || !persistedProcessGroups.delete(child.pid)) return;
+  await updateStorageLockOwner();
+}
+
+function signalChildProcessGroups(
+  signal: NodeJS.Signals,
+  groups: Iterable<number> = childProcessGroups,
+): void {
+  for (const group of groups) {
+    try {
+      process.kill(-group, signal);
+    } catch {
+      // The process may have exited between the tracked-set snapshot and this signal.
+    }
+  }
+}
+
+process.once("exit", () => signalChildProcessGroups("SIGTERM"));
 
 function configuredPath(name: string): string {
   const value = process.env[name]?.trim();
@@ -99,6 +210,115 @@ function localProcessEnvironment(): NodeJS.ProcessEnv {
     if (process.env[name]) childEnvironment[name] = process.env[name];
   }
   return childEnvironment;
+}
+
+async function readProcessIdentity(
+  pid: number,
+): Promise<{ executable: string; startedAt: string } | undefined> {
+  if (!Number.isInteger(pid) || pid < 1) return undefined;
+  try {
+    const options = {
+      encoding: "utf8" as const,
+      env: { ...localProcessEnvironment(), LANG: "C", LC_ALL: "C", TZ: "UTC" },
+      maxBuffer: 8_192,
+      timeout: 2_000,
+    };
+    const [started, command] = await Promise.all([
+      execFileAsync("/bin/ps", ["-p", String(pid), "-o", "lstart="], options),
+      execFileAsync("/bin/ps", ["-p", String(pid), "-o", "comm="], options),
+    ]);
+    const startedAt = started.stdout.trim();
+    const executable = command.stdout.trim();
+    return startedAt && executable ? { executable, startedAt } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function processGroupIsRunning(group: number): boolean {
+  try {
+    process.kill(-group, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+async function terminateOrphanedProcessGroups(owner: StorageLockOwner): Promise<void> {
+  for (const group of owner.activeGroups || []) {
+    if (!processGroupIsRunning(group.pid)) continue;
+    const identity = await readProcessIdentity(group.pid);
+    const pendingExecutableMatches = group.startedAt === "pending" && Boolean(
+      identity && (
+        path.isAbsolute(group.executable)
+          ? identity.executable === group.executable
+          : path.basename(identity.executable) === path.basename(group.executable)
+      )
+    );
+    const recordedIdentityMatches = Boolean(
+      identity &&
+      identity.startedAt === group.startedAt &&
+      identity.executable === group.executable
+    );
+    if (!pendingExecutableMatches && !recordedIdentityMatches) {
+      throw new LocalH3Error(
+        "A stale storage lock references a process group that cannot be safely identified.",
+        503,
+        "local_storage_locked",
+        false,
+      );
+    }
+    try {
+      process.kill(-group.pid, "SIGKILL");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+    }
+  }
+  for (const group of owner.activeGroups || []) {
+    for (let attempt = 0; attempt < 20 && processGroupIsRunning(group.pid); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    if (processGroupIsRunning(group.pid)) {
+      throw new LocalH3Error(
+        "An orphaned local process group could not be stopped before storage cleanup.",
+        503,
+        "local_storage_locked",
+        true,
+      );
+    }
+  }
+}
+
+function storageLockOwner(): StorageLockOwner {
+  return {
+    pid: process.pid,
+    token: storageLockToken,
+    serverStartedAt: storageServerStartedAt,
+    activeGroups: [...persistedProcessGroups.values()],
+  };
+}
+
+function writeStorageLockOwnerSync(): void {
+  if (!storageLockPath) throw new Error("H3_JOBS_DIR lock is not held.");
+  const temporary = path.join(storageLockPath, `.owner-${randomUUID()}.tmp`);
+  try {
+    writeFileSync(temporary, `${JSON.stringify(storageLockOwner())}\n`, {
+      flag: "wx",
+      mode: 0o600,
+    });
+    renameSync(temporary, path.join(storageLockPath, STORAGE_LOCK_OWNER));
+  } finally {
+    try {
+      rmSync(temporary, { force: true });
+    } catch {
+      // The atomic rename normally consumes the temporary file.
+    }
+  }
+}
+
+function updateStorageLockOwner(): Promise<void> {
+  writeStorageLockOwnerSync();
+  return Promise.resolve();
 }
 
 function jobTimeoutMs(): number {
@@ -161,6 +381,301 @@ async function resolveJobsDirectory(): Promise<string> {
     );
   }
   return jobsDirectory;
+}
+
+function processIsRunning(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid < 1) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+function beginLocalOperation(): () => void {
+  assertLocalOperationMayContinue();
+  inFlightOperations += 1;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    inFlightOperations -= 1;
+    if (inFlightOperations === 0) {
+      for (const resolve of idleResolvers) resolve();
+      idleResolvers.clear();
+    }
+  };
+}
+
+function assertLocalOperationMayContinue(): void {
+  if (shuttingDown || !storageReady) {
+    throw new LocalH3Error(
+      shuttingDown
+        ? "The local h3.c service is shutting down."
+        : "The local h3.c storage lifecycle is not available.",
+      503,
+      shuttingDown ? "local_service_stopping" : "local_storage_unavailable",
+      true,
+    );
+  }
+}
+
+function waitForLocalOperations(): Promise<void> {
+  if (inFlightOperations === 0) return Promise.resolve();
+  return new Promise((resolve) => idleResolvers.add(resolve));
+}
+
+async function acquireStorageLock(jobsDirectory: string): Promise<void> {
+  const lockPath = path.join(jobsDirectory, STORAGE_LOCK);
+  const ownerPath = path.join(lockPath, STORAGE_LOCK_OWNER);
+  const candidatePath = `${lockPath}.candidate-${storageLockToken}`;
+  storageServerStartedAt = (await readProcessIdentity(process.pid))?.startedAt;
+  const contents = `${JSON.stringify(storageLockOwner())}\n`;
+  await mkdir(candidatePath, { mode: 0o700 });
+  try {
+    await writeFile(path.join(candidatePath, STORAGE_LOCK_OWNER), contents, { flag: "wx", mode: 0o600 });
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      try {
+        await rename(candidatePath, lockPath);
+        storageLockPath = lockPath;
+        return;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== "EEXIST" && code !== "ENOTEMPTY") throw error;
+      }
+
+      const observedLock = await lstat(lockPath).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return undefined;
+        throw error;
+      });
+      if (!observedLock) continue;
+      if (observedLock.isSymbolicLink()) {
+        throw new LocalH3Error(
+          "H3_JOBS_DIR contains an unsafe storage lock.",
+          503,
+          "local_storage_locked",
+          false,
+        );
+      }
+      let existing: string;
+      try {
+        existing = await readFile(ownerPath, "utf8");
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+        try {
+          existing = await readFile(lockPath, "utf8");
+        } catch (legacyError) {
+          if ((legacyError as NodeJS.ErrnoException).code === "ENOENT") continue;
+          if ((legacyError as NodeJS.ErrnoException).code !== "EISDIR") throw legacyError;
+          existing = "";
+        }
+      }
+      let owner: StorageLockOwner | undefined;
+      let pid = 0;
+      try {
+        const parsed = JSON.parse(existing) as Partial<StorageLockOwner>;
+        if (typeof parsed.pid === "number") {
+          pid = parsed.pid;
+          owner = {
+            pid,
+            token: typeof parsed.token === "string" ? parsed.token : "",
+            serverStartedAt:
+              typeof parsed.serverStartedAt === "string" ? parsed.serverStartedAt : undefined,
+            activeGroups: Array.isArray(parsed.activeGroups)
+              ? parsed.activeGroups.filter((group): group is StorageProcessGroup => (
+                  typeof group === "object" &&
+                  group !== null &&
+                  typeof group.pid === "number" &&
+                  typeof group.startedAt === "string" &&
+                  typeof group.executable === "string"
+                ))
+              : undefined,
+          };
+        }
+      } catch {
+        const legacyPid = Number(existing.trim());
+        if (Number.isInteger(legacyPid)) pid = legacyPid;
+      }
+      if (pid < 1) {
+        throw new LocalH3Error(
+          "H3_JOBS_DIR contains an ownerless or malformed storage lock.",
+          503,
+          "local_storage_locked",
+          false,
+        );
+      }
+      if (processIsRunning(pid)) {
+        if (!owner?.serverStartedAt) {
+          throw new LocalH3Error(
+            "H3_JOBS_DIR is already owned by another running Motion Lab server.",
+            503,
+            "local_storage_locked",
+            true,
+          );
+        }
+        const identity = await readProcessIdentity(pid);
+        if (!identity || identity.startedAt === owner.serverStartedAt) {
+          throw new LocalH3Error(
+            "H3_JOBS_DIR is already owned by another running Motion Lab server.",
+            503,
+            "local_storage_locked",
+            true,
+          );
+        }
+        await terminateOrphanedProcessGroups(owner);
+      } else if (owner) {
+        await terminateOrphanedProcessGroups(owner);
+      }
+
+      const stalePath = `${lockPath}.stale-${observedLock.dev}-${observedLock.ino}`;
+      try {
+        await rename(lockPath, stalePath);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "ENOENT" || code === "EEXIST" || code === "ENOTEMPTY") continue;
+        throw error;
+      }
+    }
+  } finally {
+    await rm(candidatePath, { recursive: true, force: true }).catch(() => undefined);
+  }
+  throw new LocalH3Error(
+    "H3_JOBS_DIR could not be locked for this server.",
+    503,
+    "local_storage_locked",
+    true,
+  );
+}
+
+async function releaseStorageLock(): Promise<void> {
+  if (!storageLockPath) return;
+  const lockPath = storageLockPath;
+  const contents = await readFile(path.join(lockPath, STORAGE_LOCK_OWNER), "utf8");
+  if (contents.includes(`"token":"${storageLockToken}"`)) {
+    const lockInfo = await lstat(lockPath);
+    const tombstone = `${lockPath}.stale-${lockInfo.dev}-${lockInfo.ino}`;
+    await rename(lockPath, tombstone);
+    storageLockPath = undefined;
+    return;
+  }
+  throw new Error("H3_JOBS_DIR lock ownership changed before release.");
+}
+
+async function ensureStorageOwnership(jobsDirectory: string): Promise<void> {
+  const marker = path.join(jobsDirectory, STORAGE_OWNER);
+  try {
+    const contents = await readFile(marker, "utf8");
+    if (contents !== STORAGE_OWNER_CONTENT) throw new Error("unexpected ownership marker");
+    return;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw new LocalH3Error(
+        "H3_JOBS_DIR has an invalid Motion Lab ownership marker.",
+        503,
+        "local_storage_ownership_error",
+        false,
+      );
+    }
+  }
+
+  const entries = await readdir(jobsDirectory, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.name === STORAGE_LOCK && entry.isDirectory()) continue;
+    const tombstoneMatch = entry.name.match(STORAGE_LOCK_TOMBSTONE);
+    if (tombstoneMatch && (entry.isDirectory() || entry.isFile())) {
+      const tombstonePath = path.join(jobsDirectory, entry.name);
+      const tombstoneInfo = await lstat(tombstonePath);
+      const expectedName = `${STORAGE_LOCK}.stale-${tombstoneInfo.dev}-${tombstoneInfo.ino}`;
+      let owner = "";
+      if (entry.isDirectory() && !tombstoneInfo.isSymbolicLink()) {
+        owner = await readFile(path.join(tombstonePath, STORAGE_LOCK_OWNER), "utf8").catch(() => "");
+      } else if (entry.isFile()) {
+        owner = await readFile(tombstonePath, "utf8").catch(() => "");
+      }
+      if (entry.name === expectedName && owner.trim()) continue;
+    }
+    if (entry.name === "reference-images" && entry.isDirectory()) {
+      const references = await readdir(path.join(jobsDirectory, entry.name));
+      if (references.length === 0) continue;
+    }
+    throw new LocalH3Error(
+      "H3_JOBS_DIR is not empty and is not marked as Motion Lab-owned storage.",
+      503,
+      "local_storage_ownership_error",
+      false,
+    );
+  }
+  await writeFile(marker, STORAGE_OWNER_CONTENT, { flag: "wx", mode: 0o600 });
+}
+
+async function cleanOwnedStorage(jobsDirectory: string): Promise<void> {
+  const entries = await readdir(jobsDirectory, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.isDirectory() && LOCAL_JOB_ID.test(entry.name)) {
+      await rm(path.join(jobsDirectory, entry.name), { recursive: true, force: true });
+    }
+  }
+
+  const referenceDirectory = path.join(jobsDirectory, "reference-images");
+  const referenceInfo = await lstat(referenceDirectory).catch(() => undefined);
+  if (referenceInfo?.isDirectory() && !referenceInfo.isSymbolicLink()) {
+    const references = await readdir(referenceDirectory, { withFileTypes: true });
+    for (const reference of references) {
+      if (reference.isFile() && REFERENCE_IMAGE_NAME.test(reference.name)) {
+        await rm(path.join(referenceDirectory, reference.name), { force: true });
+      }
+    }
+  }
+
+  jobs.clear();
+  queue.length = 0;
+  referenceUploads.clear();
+}
+
+export async function initializeLocalH3Storage(): Promise<void> {
+  if (!isLocalH3Supported()) return;
+  const jobsDirectory = await resolveJobsDirectory();
+  await acquireStorageLock(jobsDirectory);
+  try {
+    await ensureStorageOwnership(jobsDirectory);
+    await cleanOwnedStorage(jobsDirectory);
+    storageReady = true;
+  } catch (error) {
+    await releaseStorageLock();
+    throw error;
+  }
+}
+
+export function beginLocalH3Shutdown(): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  storageReady = false;
+  queue.length = 0;
+}
+
+export async function shutdownLocalH3Storage(): Promise<void> {
+  beginLocalH3Shutdown();
+
+  const shutdownGroups = [...childProcessGroups];
+  signalChildProcessGroups("SIGTERM", shutdownGroups);
+  const forceKill = setTimeout(() => signalChildProcessGroups("SIGKILL", shutdownGroups), 10_000);
+  forceKill.unref();
+  try {
+    await activeExecution?.catch(() => undefined);
+    await waitForLocalOperations();
+  } finally {
+    clearTimeout(forceKill);
+    signalChildProcessGroups("SIGKILL", shutdownGroups);
+  }
+
+  const jobsDirectory = storageLockPath ? path.dirname(storageLockPath) : undefined;
+  try {
+    if (jobsDirectory) await cleanOwnedStorage(jobsDirectory);
+  } finally {
+    await releaseStorageLock();
+  }
 }
 
 async function resolveRuntime(): Promise<LocalH3Runtime> {
@@ -244,143 +759,202 @@ function referenceImageExtension(data: Buffer): string | undefined {
 }
 
 function serializeReferenceProcessing<T>(work: () => Promise<T>): Promise<T> {
-  const operation = referenceProcessingTail.then(work);
+  const operation = referenceProcessingTail.then(() => {
+    assertLocalOperationMayContinue();
+    return work();
+  });
   referenceProcessingTail = operation.then(() => undefined, () => undefined);
   return operation;
 }
 
 async function inspectReferenceImage(filePath: string): Promise<void> {
+  assertLocalOperationMayContinue();
   const command = process.env.H3_FFPROBE?.trim() || "ffprobe";
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn(command, [
-      "-v",
-      "error",
-      "-select_streams",
-      "v:0",
-      "-show_entries",
-      "stream=width,height",
-      "-of",
-      "csv=p=0:s=x",
-      filePath,
-    ], {
-      env: localProcessEnvironment(),
-      shell: false,
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    let output = "";
-    let settled = false;
-    const finish = (error?: LocalH3Error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      if (error) reject(error);
-      else resolve();
-    };
-    const timeout = setTimeout(() => {
-      child.kill("SIGKILL");
-      finish(new LocalH3Error(
-        "The reference image could not be inspected within 15 seconds.",
-        400,
-        "local_reference_error",
-        false,
-      ));
-    }, 15_000);
-    timeout.unref();
+  let child: ChildProcess | undefined;
+  let activation: Promise<void> | undefined;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      child = spawn(command, [
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=width,height",
+        "-of",
+        "csv=p=0:s=x",
+        filePath,
+      ], {
+        detached: true,
+        env: localProcessEnvironment(),
+        shell: false,
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      trackChildProcess(child);
+      let output = "";
+      let settled = false;
+      let terminationError: LocalH3Error | undefined;
+      const finish = (error?: LocalH3Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        if (error) reject(error);
+        else resolve();
+      };
+      const timeout = setTimeout(() => {
+        terminationError = new LocalH3Error(
+          "The reference image could not be inspected within 15 seconds.",
+          400,
+          "local_reference_error",
+          false,
+        );
+        signalProcessGroup(child!, "SIGKILL");
+      }, 15_000);
+      timeout.unref();
 
-    child.stdout.on("data", (chunk: Buffer) => {
-      output = `${output}${chunk.toString("utf8")}`.slice(-1_024);
-    });
-    child.once("error", () => finish(new LocalH3Error(
-      "FFprobe is required to inspect local reference images.",
-      503,
-      "local_configuration_error",
-      false,
-    )));
-    child.once("close", (code) => {
-      const match = output.trim().match(/^(\d+)x(\d+)$/);
-      const width = Number(match?.[1]);
-      const height = Number(match?.[2]);
-      const aspect = Math.max(width / height, height / width);
-      if (
-        code === 0 &&
-        Number.isInteger(width) &&
-        Number.isInteger(height) &&
-        width > 0 &&
-        height > 0 &&
-        width * height <= MAX_REFERENCE_IMAGE_PIXELS &&
-        aspect <= MAX_REFERENCE_ASPECT_RATIO
-      ) {
-        finish();
-        return;
-      }
-      finish(new LocalH3Error(
-        "Reference images must be decodable, at most 50 megapixels, and no more extreme than a 16:1 aspect ratio.",
-        400,
-        "local_reference_error",
+      child.stdout!.on("data", (chunk: Buffer) => {
+        output = `${output}${chunk.toString("utf8")}`.slice(-1_024);
+      });
+      child.once("error", () => finish(new LocalH3Error(
+        "FFprobe is required to inspect local reference images.",
+        503,
+        "local_configuration_error",
         false,
-      ));
+      )));
+      child.once("close", (code) => {
+        if (terminationError) {
+          finish(terminationError);
+          return;
+        }
+        const match = output.trim().match(/^(\d+)x(\d+)$/);
+        const width = Number(match?.[1]);
+        const height = Number(match?.[2]);
+        const aspect = Math.max(width / height, height / width);
+        if (
+          code === 0 &&
+          Number.isInteger(width) &&
+          Number.isInteger(height) &&
+          width > 0 &&
+          height > 0 &&
+          width * height <= MAX_REFERENCE_IMAGE_PIXELS &&
+          aspect <= MAX_REFERENCE_ASPECT_RATIO
+        ) {
+          finish();
+          return;
+        }
+        finish(new LocalH3Error(
+          "Reference images must be decodable, at most 50 megapixels, and no more extreme than a 16:1 aspect ratio.",
+          400,
+          "local_reference_error",
+          false,
+        ));
+      });
+      activation = activateProcessGroup(child, command);
+      void activation.catch((error) => {
+        terminationError = new LocalH3Error(
+          error instanceof Error ? error.message : "The FFprobe process could not be supervised.",
+          503,
+          "local_storage_error",
+          true,
+        );
+        signalProcessGroup(child!, "SIGKILL");
+      });
     });
-  });
+  } finally {
+    try {
+      await activation;
+    } finally {
+      if (child) await deactivateProcessGroup(child);
+    }
+  }
 }
 
 async function probeReferenceImage(filePath: string): Promise<void> {
   await inspectReferenceImage(filePath);
+  assertLocalOperationMayContinue();
   const command = process.env.H3_FFMPEG?.trim() || "ffmpeg";
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn(command, [
-      "-v",
-      "error",
-      "-nostdin",
-      "-i",
-      filePath,
-      "-frames:v",
-      "1",
-      "-f",
-      "null",
-      "-",
-    ], {
-      env: localProcessEnvironment(),
-      shell: false,
-      stdio: ["ignore", "ignore", "ignore"],
-    });
-    let settled = false;
-    const finish = (error?: LocalH3Error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      if (error) reject(error);
-      else resolve();
-    };
-    const timeout = setTimeout(() => {
-      child.kill("SIGKILL");
-      finish(new LocalH3Error(
-        "The reference image could not be decoded within 15 seconds.",
-        400,
-        "local_reference_error",
-        false,
-      ));
-    }, 15_000);
-    timeout.unref();
+  let child: ChildProcess | undefined;
+  let activation: Promise<void> | undefined;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      child = spawn(command, [
+        "-v",
+        "error",
+        "-nostdin",
+        "-i",
+        filePath,
+        "-frames:v",
+        "1",
+        "-f",
+        "null",
+        "-",
+      ], {
+        detached: true,
+        env: localProcessEnvironment(),
+        shell: false,
+        stdio: ["ignore", "ignore", "ignore"],
+      });
+      trackChildProcess(child);
+      let settled = false;
+      let terminationError: LocalH3Error | undefined;
+      const finish = (error?: LocalH3Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        if (error) reject(error);
+        else resolve();
+      };
+      const timeout = setTimeout(() => {
+        terminationError = new LocalH3Error(
+          "The reference image could not be decoded within 15 seconds.",
+          400,
+          "local_reference_error",
+          false,
+        );
+        signalProcessGroup(child!, "SIGKILL");
+      }, 15_000);
+      timeout.unref();
 
-    child.once("error", () => finish(new LocalH3Error(
-      "FFmpeg is required to validate local reference images.",
-      503,
-      "local_configuration_error",
-      false,
-    )));
-    child.once("close", (code) => {
-      if (code === 0) {
-        finish();
-        return;
-      }
-      finish(new LocalH3Error(
-        "Reference images must contain decodable PNG, JPEG, or WebP data.",
-        400,
-        "local_reference_error",
+      child.once("error", () => finish(new LocalH3Error(
+        "FFmpeg is required to validate local reference images.",
+        503,
+        "local_configuration_error",
         false,
-      ));
+      )));
+      child.once("close", (code) => {
+        if (terminationError) {
+          finish(terminationError);
+          return;
+        }
+        if (code === 0) {
+          finish();
+          return;
+        }
+        finish(new LocalH3Error(
+          "Reference images must contain decodable PNG, JPEG, or WebP data.",
+          400,
+          "local_reference_error",
+          false,
+        ));
+      });
+      activation = activateProcessGroup(child, command);
+      void activation.catch((error) => {
+        terminationError = new LocalH3Error(
+          error instanceof Error ? error.message : "The FFmpeg process could not be supervised.",
+          503,
+          "local_storage_error",
+          true,
+        );
+        signalProcessGroup(child!, "SIGKILL");
+      });
     });
-  });
+  } finally {
+    try {
+      await activation;
+    } finally {
+      if (child) await deactivateProcessGroup(child);
+    }
+  }
 }
 
 async function processReferenceImage(
@@ -391,78 +965,106 @@ async function processReferenceImage(
   height: number,
   fit: LocalH3FrameFitId,
 ): Promise<string> {
+  assertLocalOperationMayContinue();
   const command = process.env.H3_FFMPEG?.trim() || "ffmpeg";
   const output = path.join(directory, `${name}-framed.png`);
   const filter = fit === "cover"
     ? `setsar=1,crop='if(gt(iw/ih,${width}/${height}),ih*${width}/${height},iw)':'if(gt(iw/ih,${width}/${height}),ih,iw*${height}/${width})',scale=${width}:${height},setsar=1`
     : `setsar=1,scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1`;
 
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn(command, [
-      "-v",
-      "error",
-      "-nostdin",
-      "-i",
-      source,
-      "-vf",
-      filter,
-      "-frames:v",
-      "1",
-      "-an",
-      "-sn",
-      "-pix_fmt",
-      "rgb24",
-      output,
-    ], {
-      env: localProcessEnvironment(),
-      shell: false,
-      stdio: ["ignore", "ignore", "pipe"],
-    });
-    let diagnostics = "";
-    let settled = false;
-    const finish = (error?: LocalH3Error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      if (error) reject(error);
-      else resolve();
-    };
-    const timeout = setTimeout(() => {
-      child.kill("SIGKILL");
-      finish(new LocalH3Error(
-        "Reference-image framing exceeded 30 seconds.",
-        400,
-        "local_reference_error",
-        false,
-      ));
-    }, 30_000);
-    timeout.unref();
+  let child: ChildProcess | undefined;
+  let activation: Promise<void> | undefined;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      child = spawn(command, [
+        "-v",
+        "error",
+        "-nostdin",
+        "-i",
+        source,
+        "-vf",
+        filter,
+        "-frames:v",
+        "1",
+        "-an",
+        "-sn",
+        "-pix_fmt",
+        "rgb24",
+        output,
+      ], {
+        detached: true,
+        env: localProcessEnvironment(),
+        shell: false,
+        stdio: ["ignore", "ignore", "pipe"],
+      });
+      trackChildProcess(child);
+      let diagnostics = "";
+      let settled = false;
+      let terminationError: LocalH3Error | undefined;
+      const finish = (error?: LocalH3Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        if (error) reject(error);
+        else resolve();
+      };
+      const timeout = setTimeout(() => {
+        terminationError = new LocalH3Error(
+          "Reference-image framing exceeded 30 seconds.",
+          400,
+          "local_reference_error",
+          false,
+        );
+        signalProcessGroup(child!, "SIGKILL");
+      }, 30_000);
+      timeout.unref();
 
-    child.stderr.on("data", (chunk: Buffer) => {
-      diagnostics = `${diagnostics}${chunk.toString("utf8")}`.slice(-2_000);
-    });
-    child.once("error", () => finish(new LocalH3Error(
-      "FFmpeg is required to frame local reference images.",
-      503,
-      "local_configuration_error",
-      false,
-    )));
-    child.once("close", (code) => {
-      if (code === 0) {
-        finish();
-        return;
-      }
-      const detail = diagnostics.trim();
-      finish(new LocalH3Error(
-        detail
-          ? `The reference image could not be framed: ${detail}`
-          : "The reference image could not be framed for the selected resolution.",
-        400,
-        "local_reference_error",
+      child.stderr!.on("data", (chunk: Buffer) => {
+        diagnostics = `${diagnostics}${chunk.toString("utf8")}`.slice(-2_000);
+      });
+      child.once("error", () => finish(new LocalH3Error(
+        "FFmpeg is required to frame local reference images.",
+        503,
+        "local_configuration_error",
         false,
-      ));
+      )));
+      child.once("close", (code) => {
+        if (terminationError) {
+          finish(terminationError);
+          return;
+        }
+        if (code === 0) {
+          finish();
+          return;
+        }
+        const detail = diagnostics.trim();
+        finish(new LocalH3Error(
+          detail
+            ? `The reference image could not be framed: ${detail}`
+            : "The reference image could not be framed for the selected resolution.",
+          400,
+          "local_reference_error",
+          false,
+        ));
+      });
+      activation = activateProcessGroup(child, command);
+      void activation.catch((error) => {
+        terminationError = new LocalH3Error(
+          error instanceof Error ? error.message : "The FFmpeg process could not be supervised.",
+          503,
+          "local_storage_error",
+          true,
+        );
+        signalProcessGroup(child!, "SIGKILL");
+      });
     });
-  });
+  } finally {
+    try {
+      await activation;
+    } finally {
+      if (child) await deactivateProcessGroup(child);
+    }
+  }
 
   const framed = await stat(output).catch(() => undefined);
   if (!framed?.isFile() || framed.size < 1) {
@@ -588,9 +1190,13 @@ export function uploadLocalReferenceImage(
   uploadToken: string,
   previousToken?: string,
 ): Promise<{ path: string; token: string }> {
-  const operation = referenceUploadTail.then(() => storeLocalReferenceImage(data, uploadToken, previousToken));
+  const release = beginLocalOperation();
+  const operation = referenceUploadTail.then(() => {
+    assertLocalOperationMayContinue();
+    return storeLocalReferenceImage(data, uploadToken, previousToken);
+  });
   referenceUploadTail = operation.then(() => undefined, () => undefined);
-  return operation;
+  return operation.finally(release);
 }
 
 async function deleteStoredReferenceImage(token: string): Promise<{ deleted: boolean }> {
@@ -604,9 +1210,13 @@ async function deleteStoredReferenceImage(token: string): Promise<{ deleted: boo
 }
 
 export function deleteLocalReferenceImage(token: string): Promise<{ deleted: boolean }> {
-  const operation = referenceUploadTail.then(() => deleteStoredReferenceImage(token));
+  const release = beginLocalOperation();
+  const operation = referenceUploadTail.then(() => {
+    assertLocalOperationMayContinue();
+    return deleteStoredReferenceImage(token);
+  });
   referenceUploadTail = operation.then(() => undefined, () => undefined);
-  return operation;
+  return operation.finally(release);
 }
 
 async function copyReferenceImage(source: string, directory: string, name: string): Promise<string> {
@@ -780,34 +1390,36 @@ async function executeJob(job: LocalJob): Promise<void> {
 
   try {
     let timedOut = false;
-    const result = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
-      (resolve, reject) => {
-        const child = spawn(job.runtime.binary, args, {
-          cwd: job.runtime.runtimeDirectory,
-          env: localProcessEnvironment(),
-          shell: false,
-          stdio: ["ignore", "pipe", "pipe"],
-        });
-        activeChild = child;
-        let forceKill: ReturnType<typeof setTimeout> | undefined;
-        const timeout = setTimeout(() => {
-          timedOut = true;
-          child.kill("SIGTERM");
-          forceKill = setTimeout(() => child.kill("SIGKILL"), 10_000);
-          forceKill.unref();
-        }, jobTimeoutMs());
-        timeout.unref();
+    const child = spawn(job.runtime.binary, args, {
+      cwd: job.runtime.runtimeDirectory,
+      detached: true,
+      env: localProcessEnvironment(),
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    trackChildProcess(child);
+    activeChild = child;
+    let forceKill: ReturnType<typeof setTimeout> | undefined;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      signalProcessGroup(child, "SIGTERM");
+      forceKill = setTimeout(() => signalProcessGroup(child, "SIGKILL"), 10_000);
+      forceKill.unref();
+    }, jobTimeoutMs());
+    timeout.unref();
 
-        child.stdout.on("data", (chunk: Buffer) => {
-          const text = chunk.toString("utf8");
-          appendDiagnostics(job, text);
-          consumeProgress(job, text);
-        });
-        child.stderr.on("data", (chunk: Buffer) => {
-          const text = chunk.toString("utf8");
-          appendDiagnostics(job, text);
-          consumeProgress(job, text);
-        });
+    child.stdout.on("data", (chunk: Buffer) => {
+      const text = chunk.toString("utf8");
+      appendDiagnostics(job, text);
+      consumeProgress(job, text);
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      const text = chunk.toString("utf8");
+      appendDiagnostics(job, text);
+      consumeProgress(job, text);
+    });
+    const resultPromise = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+      (resolve, reject) => {
         child.once("error", (error) => {
           clearTimeout(timeout);
           if (forceKill) clearTimeout(forceKill);
@@ -816,12 +1428,29 @@ async function executeJob(job: LocalJob): Promise<void> {
         });
         child.once("close", (code, signal) => {
           clearTimeout(timeout);
-          if (forceKill) clearTimeout(forceKill);
+          if (forceKill) {
+            clearTimeout(forceKill);
+            signalProcessGroup(child, "SIGKILL");
+          }
           activeChild = undefined;
           resolve({ code, signal });
         });
       },
     );
+
+    let result: { code: number | null; signal: NodeJS.Signals | null };
+    try {
+      try {
+        await activateProcessGroup(child, job.runtime.binary);
+      } catch (error) {
+        signalProcessGroup(child, "SIGKILL");
+        await resultPromise.catch(() => undefined);
+        throw error;
+      }
+      result = await resultPromise;
+    } finally {
+      await deactivateProcessGroup(child);
+    }
 
     if (job.progressCarry) parseProgressLine(job, job.progressCarry);
     if (timedOut) {
@@ -852,7 +1481,7 @@ async function executeJob(job: LocalJob): Promise<void> {
 }
 
 function startNextJob(): void {
-  if (activeJobId) return;
+  if (shuttingDown || activeJobId) return;
   const id = queue.shift();
   if (!id) return;
 
@@ -863,10 +1492,13 @@ function startNextJob(): void {
   }
 
   activeJobId = id;
-  void executeJob(job).finally(() => {
+  const execution = executeJob(job).finally(() => {
     activeJobId = undefined;
+    if (activeExecution === execution) activeExecution = undefined;
     startNextJob();
   });
+  activeExecution = execution;
+  void execution;
 }
 
 async function removePreviousGenerationDirectory(jobsDirectory: string, id: string): Promise<void> {
@@ -889,7 +1521,7 @@ export function isLocalJobId(id: string): boolean {
   return LOCAL_JOB_ID.test(id);
 }
 
-export async function generateLocalVideo(
+async function generateLocalVideoOperation(
   input: LocalGenerateVideoInput,
 ): Promise<VideoStatusResponse> {
   const runtime = await resolveRuntime();
@@ -981,16 +1613,30 @@ export async function generateLocalVideo(
       createdAt: Date.now(),
     };
 
+    if (shuttingDown) {
+      await rm(directory, { recursive: true, force: true });
+      throw new LocalH3Error(
+        "The local h3.c service is shutting down.",
+        503,
+        "local_service_stopping",
+        true,
+      );
+    }
     jobs.set(id, job);
     queue.push(id);
+    startNextJob();
     if (input.previousJobId) {
       await removePreviousGenerationDirectory(runtime.jobsDirectory, input.previousJobId).catch(() => undefined);
     }
-    startNextJob();
     return toResponse(job);
   } finally {
     pendingJobReservations -= 1;
   }
+}
+
+export function generateLocalVideo(input: LocalGenerateVideoInput): Promise<VideoStatusResponse> {
+  const release = beginLocalOperation();
+  return generateLocalVideoOperation(input).finally(release);
 }
 
 export function getLocalVideoStatus(id: string): VideoStatusResponse {

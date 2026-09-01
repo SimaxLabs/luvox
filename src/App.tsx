@@ -48,6 +48,7 @@ interface FormState {
 
 interface DisplayJob extends VideoJob {
   aspectRatio?: string;
+  temporaryApiKey?: string;
 }
 
 type IconName =
@@ -61,50 +62,6 @@ type IconName =
   | "spark";
 
 const statusOrder: GenerationStatus[] = ["queued", "processing", "completed", "failed"];
-const storedJobKey = "motion-lab:video-job";
-
-function loadStoredJob(): DisplayJob | null {
-  try {
-    const value: unknown = JSON.parse(localStorage.getItem(storedJobKey) || "null");
-    if (
-      typeof value !== "object" ||
-      value === null ||
-      !("id" in value) ||
-      typeof value.id !== "string" ||
-      !("status" in value) ||
-      typeof value.status !== "string" ||
-      !statusOrder.includes(value.status as GenerationStatus)
-    ) {
-      return null;
-    }
-    const status = value.status as GenerationStatus;
-    const provider =
-      "provider" in value && value.provider === "local" ? "local" : "openrouter";
-    const job: DisplayJob = {
-      id: value.id,
-      provider,
-      status,
-    };
-
-    if ("aspectRatio" in value && typeof value.aspectRatio === "string") {
-      job.aspectRatio = value.aspectRatio;
-    }
-    if ("error" in value && typeof value.error === "string") job.error = value.error;
-    if ("cost" in value && typeof value.cost === "number") job.cost = value.cost;
-    if ("phase" in value && typeof value.phase === "string") job.phase = value.phase;
-    if ("progress" in value && typeof value.progress === "number") {
-      job.progress = value.progress;
-    }
-    if (status === "completed") {
-      const id = encodeURIComponent(value.id);
-      job.videoUrl = `/api/video/content/${id}`;
-      job.downloadUrl = `/api/video/content/${id}?download=1`;
-    }
-    return job;
-  } catch {
-    return null;
-  }
-}
 
 function initialForm(model: VideoModelConfig): FormState {
   return {
@@ -328,13 +285,14 @@ function messageFrom(error: unknown): string {
 export default function App() {
   const defaultModel = getVideoModel(DEFAULT_MODEL_ID) || VIDEO_MODELS[0];
   const [form, setForm] = useState<FormState>(() => initialForm(defaultModel));
-  const [job, setJob] = useState<DisplayJob | null>(loadStoredJob);
+  const [job, setJob] = useState<DisplayJob | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pollWarning, setPollWarning] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [mediaError, setMediaError] = useState<string | null>(null);
   const [mediaLoading, setMediaLoading] = useState(false);
+  const [mediaRetry, setMediaRetry] = useState(0);
   const [sessionApiKey, setSessionApiKey] = useState("");
   const [temporaryVideoUrl, setTemporaryVideoUrl] = useState<string | null>(null);
   const [appConfig, setAppConfig] = useState<AppConfig | null>(null);
@@ -346,23 +304,102 @@ export default function App() {
   const lastFramePicker = useRef<HTMLInputElement>(null);
   const firstFramePathOnFocus = useRef("");
   const lastFramePathOnFocus = useRef("");
+  const serverSession = useRef<string | null>(null);
+  const serviceState = useRef<"unknown" | "online" | "offline">("unknown");
+  const workspaceVersion = useRef(0);
 
   const selectedModel = getVideoModel(form.model) || defaultModel;
   const selectedLocalQuality = getLocalH3QualityPreset(form.localQuality);
   const isActive = job?.status === "queued" || job?.status === "processing";
-  const hasSessionApiKey = Boolean(sessionApiKey.trim());
-  const usesSessionMedia = job?.provider !== "local" && hasSessionApiKey;
-  const pollApiKey = job?.provider === "local" ? "" : sessionApiKey;
+  const jobApiKey = job?.provider === "openrouter" ? job.temporaryApiKey : undefined;
+  const usesSessionMedia = Boolean(jobApiKey);
+  const pollApiKey = jobApiKey;
   const videoSource = usesSessionMedia ? temporaryVideoUrl || undefined : job?.videoUrl;
   const downloadSource = usesSessionMedia ? temporaryVideoUrl || undefined : job?.downloadUrl;
 
   useEffect(() => {
-    void getAppConfig().then(setAppConfig).catch(() => undefined);
+    try {
+      localStorage.removeItem("motion-lab:video-job");
+    } catch {
+      // Persistence is no longer used; inaccessible legacy storage can be ignored.
+    }
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout>;
+    let controller: AbortController | undefined;
+    let consecutiveFailures = 0;
+    let firstFailureAt = 0;
+
+    const resetWorkspace = () => {
+      workspaceVersion.current += 1;
+      if (copyTimer.current) {
+        clearTimeout(copyTimer.current);
+        copyTimer.current = null;
+      }
+      setForm(initialForm(defaultModel));
+      setJob(null);
+      setSubmitting(false);
+      setError(null);
+      setPollWarning(null);
+      setCopied(false);
+      setMediaError(null);
+      setMediaLoading(false);
+      setMediaRetry(0);
+      setTemporaryVideoUrl(null);
+      setUploadingReference(null);
+      setReferenceUploadStatus("");
+      setReferenceUploadTokens({});
+      firstFramePathOnFocus.current = "";
+      lastFramePathOnFocus.current = "";
+    };
+
+    const refreshConfig = async () => {
+      const requestController = new AbortController();
+      controller = requestController;
+      const requestTimeout = setTimeout(() => requestController.abort(), 2_000);
+      try {
+        const config = await getAppConfig(requestController.signal);
+        if (disposed) return;
+        consecutiveFailures = 0;
+        firstFailureAt = 0;
+        if (serverSession.current && serverSession.current !== config.sessionId) {
+          resetWorkspace();
+        }
+        serverSession.current = config.sessionId;
+        serviceState.current = "online";
+        setAppConfig(config);
+      } catch {
+        if (disposed) return;
+        if (consecutiveFailures === 0) firstFailureAt = Date.now();
+        consecutiveFailures += 1;
+        if (
+          consecutiveFailures >= 3 &&
+          Date.now() - firstFailureAt >= 6_000 &&
+          serviceState.current !== "offline"
+        ) {
+          resetWorkspace();
+          serverSession.current = null;
+          serviceState.current = "offline";
+          setAppConfig(null);
+        }
+      } finally {
+        clearTimeout(requestTimeout);
+        if (!disposed) timer = setTimeout(() => void refreshConfig(), 3_000);
+      }
+    };
+
+    void refreshConfig();
+    return () => {
+      disposed = true;
+      workspaceVersion.current += 1;
+      controller?.abort();
+      clearTimeout(timer);
+    };
   }, []);
 
   useEffect(() => {
     if (!job || (job.status !== "queued" && job.status !== "processing")) return;
 
+    const version = workspaceVersion.current;
     let disposed = false;
     let timer: ReturnType<typeof setTimeout>;
     let consecutiveFailures = 0;
@@ -375,14 +412,17 @@ export default function App() {
           pollApiKey || undefined,
           controller.signal,
         );
-        if (disposed) return;
+        if (disposed || version !== workspaceVersion.current) return;
 
         consecutiveFailures = 0;
         setPollWarning(null);
-        setJob({
-          ...nextJob,
-          aspectRatio: job.aspectRatio,
-        });
+        setJob((current) => current?.id === job.id
+          ? {
+              ...nextJob,
+              aspectRatio: job.aspectRatio,
+              temporaryApiKey: nextJob.status === "failed" ? undefined : current.temporaryApiKey,
+            }
+          : current);
 
         if (nextJob.status === "failed") {
           setError(nextJob.error || "The video provider could not complete this generation.");
@@ -393,7 +433,7 @@ export default function App() {
           timer = setTimeout(poll, 10_000);
         }
       } catch (pollError) {
-        if (disposed || controller.signal.aborted) return;
+        if (disposed || controller.signal.aborted || version !== workspaceVersion.current) return;
 
         const apiError = pollError instanceof ApiError ? pollError : null;
         if (job.provider === "local" && apiError?.status === 404) {
@@ -424,11 +464,6 @@ export default function App() {
   }, [job?.id, pollApiKey]);
 
   useEffect(() => {
-    if (job) localStorage.setItem(storedJobKey, JSON.stringify(job));
-    else localStorage.removeItem(storedJobKey);
-  }, [job]);
-
-  useEffect(() => {
     setTemporaryVideoUrl(null);
     setMediaError(null);
     setMediaLoading(false);
@@ -437,35 +472,39 @@ export default function App() {
       job?.status !== "completed" ||
       job.provider === "local" ||
       !job.videoUrl ||
-      !sessionApiKey.trim()
+      !jobApiKey
     ) {
       return;
     }
 
-    const key = sessionApiKey.trim();
+    const key = jobApiKey;
+    const version = workspaceVersion.current;
     const controller = new AbortController();
     let objectUrl: string | undefined;
+    let disposed = false;
     setMediaLoading(true);
 
     void getVideoContent(job.videoUrl, key, controller.signal)
       .then((blob) => {
+        if (disposed || version !== workspaceVersion.current) return;
         objectUrl = URL.createObjectURL(blob);
         setTemporaryVideoUrl(objectUrl);
       })
       .catch((contentError) => {
-        if (!controller.signal.aborted) {
+        if (!controller.signal.aborted && version === workspaceVersion.current) {
           setMediaError(messageFrom(contentError));
         }
       })
       .finally(() => {
-        if (!controller.signal.aborted) setMediaLoading(false);
+        if (!controller.signal.aborted && version === workspaceVersion.current) setMediaLoading(false);
       });
 
     return () => {
+      disposed = true;
       controller.abort();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [job?.id, job?.status, job?.videoUrl, sessionApiKey]);
+  }, [job?.id, job?.status, job?.videoUrl, jobApiKey, mediaRetry]);
 
   useEffect(() => {
     return () => {
@@ -538,6 +577,7 @@ export default function App() {
     const previousPath = position === "first"
       ? form.localFirstFramePath
       : form.localLastFramePath;
+    const version = workspaceVersion.current;
     setUploadingReference(position);
     setReferenceUploadStatus(`Uploading ${position} frame image.`);
     setError(null);
@@ -554,9 +594,14 @@ export default function App() {
       try {
         result = await upload();
       } catch (firstAttemptError) {
+        if (version !== workspaceVersion.current) return;
         const apiError = firstAttemptError instanceof ApiError ? firstAttemptError : null;
         if (!apiError || (apiError.status !== 0 && apiError.status >= 300)) throw firstAttemptError;
         result = await upload();
+      }
+      if (version !== workspaceVersion.current) {
+        void deleteLocalReferenceImage(result.token).catch(() => undefined);
+        return;
       }
       setForm((current) => position === "first"
         ? { ...current, localFirstFramePath: result.path, localFrameFit: "contain" }
@@ -571,15 +616,17 @@ export default function App() {
       });
       setReferenceUploadStatus(`${position === "first" ? "First" : "Last"} frame image uploaded.`);
     } catch (uploadError) {
+      if (version !== workspaceVersion.current) return;
       setReferenceUploadStatus(`${position === "first" ? "First" : "Last"} frame image upload failed.`);
       setError(messageFrom(uploadError));
     } finally {
-      setUploadingReference(null);
+      if (version === workspaceVersion.current) setUploadingReference(null);
     }
   };
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
+    const version = workspaceVersion.current;
     setSubmitting(true);
     setError(null);
     setPollWarning(null);
@@ -616,21 +663,28 @@ export default function App() {
             },
             key || undefined,
           );
+      if (version !== workspaceVersion.current) return;
       setJob({
         ...nextJob,
+        temporaryApiKey:
+          nextJob.provider === "openrouter" && nextJob.status !== "failed"
+            ? key || undefined
+            : undefined,
         aspectRatio:
           form.provider === "local"
             ? form.localResolution.replace("x", ":")
             : form.aspectRatio,
       });
     } catch (submitError) {
+      if (version !== workspaceVersion.current) return;
       setError(messageFrom(submitError));
     } finally {
-      setSubmitting(false);
+      if (version === workspaceVersion.current) setSubmitting(false);
     }
   };
 
   const clear = () => {
+    if (submitting || uploadingReference !== null) return;
     if (
       isActive &&
       !window.confirm(
@@ -641,24 +695,35 @@ export default function App() {
     ) {
       return;
     }
+    workspaceVersion.current += 1;
+    if (copyTimer.current) {
+      clearTimeout(copyTimer.current);
+      copyTimer.current = null;
+    }
     setJob(null);
+    setSubmitting(false);
     setError(null);
     setPollWarning(null);
     setCopied(false);
     setMediaError(null);
     setMediaLoading(false);
+    setUploadingReference(null);
   };
 
   const copyVideoUrl = async () => {
-    if (!videoSource) return;
+    const source = videoSource;
+    const version = workspaceVersion.current;
+    if (!source) return;
+    const videoUrl = new URL(source, window.location.origin).href;
     try {
-      await navigator.clipboard.writeText(new URL(videoSource, window.location.origin).href);
+      await navigator.clipboard.writeText(videoUrl);
+      if (version !== workspaceVersion.current) return;
       setError(null);
       setCopied(true);
       if (copyTimer.current) clearTimeout(copyTimer.current);
       copyTimer.current = setTimeout(() => setCopied(false), 2_000);
     } catch {
-      const videoUrl = new URL(videoSource, window.location.origin).href;
+      if (version !== workspaceVersion.current) return;
       const input = document.createElement("textarea");
       input.value = videoUrl;
       input.style.position = "fixed";
@@ -752,6 +817,7 @@ export default function App() {
                     aria-describedby="session-key-help"
                     autoComplete="off"
                     className="h-11 min-w-0 flex-1 border border-black/15 bg-[#faf9f3] px-3 font-mono text-xs outline-none transition placeholder:text-stone-400 focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
+                    disabled={submitting}
                     id="session-api-key"
                     maxLength={1_024}
                     onChange={(event) => setSessionApiKey(event.target.value)}
@@ -763,6 +829,7 @@ export default function App() {
                   {sessionApiKey && (
                     <button
                       className="border border-black/15 px-3 text-[10px] font-bold uppercase tracking-[0.12em] hover:border-black"
+                      disabled={submitting}
                       onClick={() => setSessionApiKey("")}
                       type="button"
                     >
@@ -771,7 +838,7 @@ export default function App() {
                   )}
                 </div>
                 <p className="mt-2 text-[11px] leading-4 text-stone-500" id="session-key-help">
-                  Overrides <code>OPENROUTER_API_KEY</code> for this tab. Kept only in memory, sent only to the local backend, and erased when this page closes or reloads.
+                  Overrides <code>OPENROUTER_API_KEY</code> for future jobs in this tab. A submitted job keeps its chosen credential in memory until it is cleared.
                 </p>
               </div>
             </div>
@@ -1169,7 +1236,12 @@ export default function App() {
               <span className="flex size-8 items-center justify-center rounded-full bg-[#d9ff72] text-black transition group-hover:translate-x-1"><Icon name="arrow" /></span>
             </button>
             {(job || error) && (
-              <button className="h-14 border border-black/20 px-4 text-[10px] font-bold uppercase tracking-[0.12em] hover:border-black" onClick={clear} type="button">
+              <button
+                className="h-14 border border-black/20 px-4 text-[10px] font-bold uppercase tracking-[0.12em] hover:border-black disabled:cursor-not-allowed disabled:opacity-45"
+                disabled={submitting || uploadingReference !== null}
+                onClick={clear}
+                type="button"
+              >
                 {isActive ? "Stop watching" : "Clear"}
               </button>
             )}
@@ -1199,7 +1271,10 @@ export default function App() {
                 mediaLoading={mediaLoading}
                 mediaError={mediaError}
                 onMediaError={() => setMediaError("The completed video could not be loaded in the player. Try downloading it instead.")}
-                onMediaRetry={() => setMediaError(null)}
+                onMediaRetry={() => {
+                  setMediaError(null);
+                  setMediaRetry((current) => current + 1);
+                }}
                 videoSource={videoSource}
               />
             </div>
