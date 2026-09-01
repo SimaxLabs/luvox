@@ -15,14 +15,14 @@ import {
   type LocalH3FrameFitId,
 } from "../shared/localH3.js";
 import type { LocalGenerateVideoInput } from "./validation.js";
-import type { VideoStatusResponse } from "./videoTypes.js";
+import type { GenerationStatus, VideoStatusResponse } from "./videoTypes.js";
 
 const LOCAL_JOB_PREFIX = "local_";
 const LOCAL_JOB_ID = /^local_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const TERMINAL_MARKER = "terminal-status";
 const STORAGE_LOCK = ".motion-lab.lock";
 const STORAGE_LOCK_OWNER = "owner.json";
-const STORAGE_LOCK_TOMBSTONE = /^\.motion-lab\.lock\.stale-(\d+)-(\d+)$/;
+const STORAGE_LOCK_TOMBSTONE = /^\.motion-lab\.lock\.stale-\d+-\d+$/;
 const STORAGE_OWNER = ".motion-lab-owned";
 const STORAGE_OWNER_CONTENT = "motion-lab-h3-jobs-v1\n";
 const MAX_DIAGNOSTIC_CHARS = 16_000;
@@ -64,13 +64,12 @@ interface LocalJob {
   output: string;
   firstFrame?: string;
   lastFrame?: string;
-  status: "queued" | "processing" | "completed" | "failed";
+  status: GenerationStatus;
   phase: string;
   progress: number;
   error?: string;
   diagnostics: string;
   progressCarry: string;
-  createdAt: number;
 }
 
 export class LocalH3Error extends Error {
@@ -89,7 +88,6 @@ const jobs = new Map<string, LocalJob>();
 const execFileAsync = promisify(execFile);
 const queue: string[] = [];
 let activeJobId: string | undefined;
-let activeChild: ChildProcess | undefined;
 let activeExecution: Promise<void> | undefined;
 let pendingJobReservations = 0;
 let referenceUploadTail: Promise<void> = Promise.resolve();
@@ -583,8 +581,7 @@ async function ensureStorageOwnership(jobsDirectory: string): Promise<void> {
   const entries = await readdir(jobsDirectory, { withFileTypes: true });
   for (const entry of entries) {
     if (entry.name === STORAGE_LOCK && entry.isDirectory()) continue;
-    const tombstoneMatch = entry.name.match(STORAGE_LOCK_TOMBSTONE);
-    if (tombstoneMatch && (entry.isDirectory() || entry.isFile())) {
+    if (STORAGE_LOCK_TOMBSTONE.test(entry.name) && (entry.isDirectory() || entry.isFile())) {
       const tombstonePath = path.join(jobsDirectory, entry.name);
       const tombstoneInfo = await lstat(tombstonePath);
       const expectedName = `${STORAGE_LOCK}.stale-${tombstoneInfo.dev}-${tombstoneInfo.ino}`;
@@ -1398,7 +1395,6 @@ async function executeJob(job: LocalJob): Promise<void> {
       stdio: ["ignore", "pipe", "pipe"],
     });
     trackChildProcess(child);
-    activeChild = child;
     let forceKill: ReturnType<typeof setTimeout> | undefined;
     const timeout = setTimeout(() => {
       timedOut = true;
@@ -1423,7 +1419,6 @@ async function executeJob(job: LocalJob): Promise<void> {
         child.once("error", (error) => {
           clearTimeout(timeout);
           if (forceKill) clearTimeout(forceKill);
-          activeChild = undefined;
           reject(error);
         });
         child.once("close", (code, signal) => {
@@ -1432,7 +1427,6 @@ async function executeJob(job: LocalJob): Promise<void> {
             clearTimeout(forceKill);
             signalProcessGroup(child, "SIGKILL");
           }
-          activeChild = undefined;
           resolve({ code, signal });
         });
       },
@@ -1610,7 +1604,6 @@ async function generateLocalVideoOperation(
       progress: 0,
       diagnostics: "",
       progressCarry: "",
-      createdAt: Date.now(),
     };
 
     if (shuttingDown) {

@@ -125,11 +125,11 @@ function FieldLabel({ children, htmlFor, optional }: { children: ReactNode; html
 }
 
 function StatusRail({ status }: { status?: GenerationStatus }) {
+  const currentIndex = status ? statusOrder.indexOf(status) : -1;
   return (
     <div className="grid grid-cols-4 border-y border-white/10" aria-label="Generation progress" aria-live="polite">
       {statusOrder.map((item, index) => {
         const active = status === item;
-        const currentIndex = status ? statusOrder.indexOf(status) : -1;
         const passed = currentIndex > index && status !== "failed";
         return (
           <div
@@ -313,7 +313,6 @@ export default function App() {
   const isActive = job?.status === "queued" || job?.status === "processing";
   const jobApiKey = job?.provider === "openrouter" ? job.temporaryApiKey : undefined;
   const usesSessionMedia = Boolean(jobApiKey);
-  const pollApiKey = jobApiKey;
   const videoSource = usesSessionMedia ? temporaryVideoUrl || undefined : job?.videoUrl;
   const downloadSource = usesSessionMedia ? temporaryVideoUrl || undefined : job?.downloadUrl;
 
@@ -409,7 +408,7 @@ export default function App() {
       try {
         const nextJob = await getVideoStatus(
           job.id,
-          pollApiKey || undefined,
+          jobApiKey || undefined,
           controller.signal,
         );
         if (disposed || version !== workspaceVersion.current) return;
@@ -461,7 +460,7 @@ export default function App() {
       controller.abort();
       clearTimeout(timer);
     };
-  }, [job?.id, pollApiKey]);
+  }, [job?.id, jobApiKey]);
 
   useEffect(() => {
     setTemporaryVideoUrl(null);
@@ -559,17 +558,18 @@ export default function App() {
     const file = event.currentTarget.files?.[0];
     event.currentTarget.value = "";
     if (!file) return;
+    const frameLabel = position === "first" ? "First" : "Last";
 
     const extension = file.name.split(".").pop()?.toLowerCase();
     const supportedType = ["image/png", "image/jpeg", "image/webp"].includes(file.type);
     const supportedExtension = Boolean(extension && ["png", "jpg", "jpeg", "webp"].includes(extension));
     if (!supportedType && !supportedExtension) {
-      setReferenceUploadStatus(`${position === "first" ? "First" : "Last"} frame image upload failed.`);
+      setReferenceUploadStatus(`${frameLabel} frame image upload failed.`);
       setError("Reference images must be PNG, JPEG, or WebP files.");
       return;
     }
     if (file.size < 1 || file.size > 25 * 1024 * 1024) {
-      setReferenceUploadStatus(`${position === "first" ? "First" : "Last"} frame image upload failed.`);
+      setReferenceUploadStatus(`${frameLabel} frame image upload failed.`);
       setError("Reference images must be non-empty and no larger than 25 MB.");
       return;
     }
@@ -596,7 +596,7 @@ export default function App() {
       } catch (firstAttemptError) {
         if (version !== workspaceVersion.current) return;
         const apiError = firstAttemptError instanceof ApiError ? firstAttemptError : null;
-        if (!apiError || (apiError.status !== 0 && apiError.status >= 300)) throw firstAttemptError;
+        if (!apiError || apiError.status >= 300) throw firstAttemptError;
         result = await upload();
       }
       if (version !== workspaceVersion.current) {
@@ -614,10 +614,10 @@ export default function App() {
         }
         return next;
       });
-      setReferenceUploadStatus(`${position === "first" ? "First" : "Last"} frame image uploaded.`);
+      setReferenceUploadStatus(`${frameLabel} frame image uploaded.`);
     } catch (uploadError) {
       if (version !== workspaceVersion.current) return;
-      setReferenceUploadStatus(`${position === "first" ? "First" : "Last"} frame image upload failed.`);
+      setReferenceUploadStatus(`${frameLabel} frame image upload failed.`);
       setError(messageFrom(uploadError));
     } finally {
       if (version === workspaceVersion.current) setUploadingReference(null);
@@ -701,13 +701,11 @@ export default function App() {
       copyTimer.current = null;
     }
     setJob(null);
-    setSubmitting(false);
     setError(null);
     setPollWarning(null);
     setCopied(false);
     setMediaError(null);
     setMediaLoading(false);
-    setUploadingReference(null);
   };
 
   const copyVideoUrl = async () => {

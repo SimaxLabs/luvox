@@ -76,6 +76,14 @@ function extractErrorMessage(value: unknown): string | undefined {
   return undefined;
 }
 
+async function readJsonOrUndefined(response: Response): Promise<unknown> {
+  try {
+    return await response.json();
+  } catch {
+    return undefined;
+  }
+}
+
 function providerError(
   upstreamStatus: number,
   details: string | undefined,
@@ -187,13 +195,7 @@ async function requestJson(
     JSON_REQUEST_TIMEOUT_MS,
     overrideApiKey,
   );
-  let payload: unknown;
-
-  try {
-    payload = await response.json();
-  } catch {
-    payload = undefined;
-  }
+  const payload = await readJsonOrUndefined(response);
 
   if (!response.ok) {
     throw providerError(
@@ -343,12 +345,7 @@ export async function getVideoContent(
   if (response.status === 416) return response;
 
   if (!response.ok) {
-    let payload: unknown;
-    try {
-      payload = await response.json();
-    } catch {
-      payload = undefined;
-    }
+    const payload = await readJsonOrUndefined(response);
 
     throw providerError(
       response.status,

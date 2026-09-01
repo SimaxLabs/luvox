@@ -75,10 +75,16 @@ const optionalAbsolutePath = z
   .optional()
   .transform((value) => value || undefined);
 
+const promptSchema = z.string().trim().min(1, "Prompt is required.").max(10_000);
+
+function customIssue(path: string, message: string): z.ZodIssue {
+  return { code: z.ZodIssueCode.custom, path: [path], message };
+}
+
 const baseGenerateVideoSchema = z
   .object({
     provider: z.literal("openrouter"),
-    prompt: z.string().trim().min(1, "Prompt is required.").max(10_000),
+    prompt: promptSchema,
     model: z.string().trim().min(1, "Model is required."),
     duration: z.number().int("Duration must be a whole number."),
     aspectRatio: z.string().trim().min(1, "Aspect ratio is required."),
@@ -94,7 +100,7 @@ export type GenerateVideoInput = z.infer<typeof baseGenerateVideoSchema>;
 const localGenerateVideoSchema = z
   .object({
     provider: z.literal("local"),
-    prompt: z.string().trim().min(1, "Prompt is required.").max(10_000),
+    prompt: promptSchema,
     resolution: z.string().trim().min(1, "Resolution is required."),
     frames: z.number().int("Frame count must be a whole number."),
     quality: z.string().trim().min(1, "Quality preset is required."),
@@ -128,27 +134,15 @@ export function validateGenerateVideoInput(value: unknown): VideoGenerateInput {
     const issues: z.ZodIssue[] = [];
 
     if (!getLocalH3Resolution(input.resolution)) {
-      issues.push({
-        code: z.ZodIssueCode.custom,
-        path: ["resolution"],
-        message: "Unsupported local resolution preset.",
-      });
+      issues.push(customIssue("resolution", "Unsupported local resolution preset."));
     }
 
     if (!LOCAL_H3_DURATIONS.some((duration) => duration.frames === input.frames)) {
-      issues.push({
-        code: z.ZodIssueCode.custom,
-        path: ["frames"],
-        message: "Unsupported local clip length.",
-      });
+      issues.push(customIssue("frames", "Unsupported local clip length."));
     }
 
     if (!getLocalH3QualityPreset(input.quality)) {
-      issues.push({
-        code: z.ZodIssueCode.custom,
-        path: ["quality"],
-        message: "Unsupported local quality preset.",
-      });
+      issues.push(customIssue("quality", "Unsupported local quality preset."));
     }
 
     if (issues.length > 0) throw new z.ZodError(issues);
@@ -159,78 +153,59 @@ export function validateGenerateVideoInput(value: unknown): VideoGenerateInput {
   const model = getVideoModel(input.model);
 
   if (!model) {
-    throw new z.ZodError([
-      {
-        code: z.ZodIssueCode.custom,
-        path: ["model"],
-        message: "Unsupported video model.",
-      },
-    ]);
+    throw new z.ZodError([customIssue("model", "Unsupported video model.")]);
   }
 
   const issues: z.ZodIssue[] = [];
 
   if (!model.durations.includes(input.duration)) {
-    issues.push({
-      code: z.ZodIssueCode.custom,
-      path: ["duration"],
-      message: `Duration must be one of: ${model.durations.join(", ")} seconds.`,
-    });
+    issues.push(customIssue(
+      "duration",
+      `Duration must be one of: ${model.durations.join(", ")} seconds.`,
+    ));
   }
 
   if (!model.aspectRatios.includes(input.aspectRatio)) {
-    issues.push({
-      code: z.ZodIssueCode.custom,
-      path: ["aspectRatio"],
-      message: `Aspect ratio must be one of: ${model.aspectRatios.join(", ")}.`,
-    });
+    issues.push(customIssue(
+      "aspectRatio",
+      `Aspect ratio must be one of: ${model.aspectRatios.join(", ")}.`,
+    ));
   }
 
   if (model.resolutions.length > 0 && !input.resolution) {
-    issues.push({
-      code: z.ZodIssueCode.custom,
-      path: ["resolution"],
-      message: "Resolution is required for this model.",
-    });
+    issues.push(customIssue("resolution", "Resolution is required for this model."));
   } else if (
     input.resolution &&
     !model.resolutions.includes(input.resolution)
   ) {
-    issues.push({
-      code: z.ZodIssueCode.custom,
-      path: ["resolution"],
-      message: `Resolution must be one of: ${model.resolutions.join(", ")}.`,
-    });
+    issues.push(customIssue(
+      "resolution",
+      `Resolution must be one of: ${model.resolutions.join(", ")}.`,
+    ));
   }
 
   if (
     input.firstFrameUrl &&
     !model.frameImages.supported.includes("first_frame")
   ) {
-    issues.push({
-      code: z.ZodIssueCode.custom,
-      path: ["firstFrameUrl"],
-      message: "This model does not support a first frame image.",
-    });
+    issues.push(customIssue(
+      "firstFrameUrl",
+      "This model does not support a first frame image.",
+    ));
   }
 
   if (
     input.lastFrameUrl &&
     !model.frameImages.supported.includes("last_frame")
   ) {
-    issues.push({
-      code: z.ZodIssueCode.custom,
-      path: ["lastFrameUrl"],
-      message: "This model does not support a last frame image.",
-    });
+    issues.push(customIssue(
+      "lastFrameUrl",
+      "This model does not support a last frame image.",
+    ));
   }
 
   if (input.generateAudio && !model.generateAudio.supported) {
-    issues.push({
-      code: z.ZodIssueCode.custom,
-      path: ["generateAudio"],
-      message: "This model does not support generated audio.",
-    });
+    issues.push(customIssue("generateAudio", "This model does not support generated audio."));
   }
 
   if (issues.length > 0) {
