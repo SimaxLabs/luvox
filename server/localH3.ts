@@ -15,9 +15,8 @@ import {
   type LocalH3FrameFitId,
 } from "../shared/localH3.js";
 import type { LocalGenerateVideoInput } from "./validation.js";
-import type { GenerationStatus, VideoStatusResponse } from "./videoTypes.js";
+import type { GenerationStatus, VideoStatusResponse } from "../shared/videoTypes.js";
 
-const LOCAL_JOB_PREFIX = "local_";
 const LOCAL_JOB_ID = /^local_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const TERMINAL_MARKER = "terminal-status";
 const STORAGE_LOCK = ".motion-lab.lock";
@@ -138,9 +137,9 @@ async function activateProcessGroup(child: ChildProcess, expectedExecutable: str
   }
   const identity = await readProcessIdentity(child.pid);
   if (!identity) {
-    if (!processGroupIsRunning(child.pid)) {
+    if (!processIsRunning(child.pid, true)) {
       persistedProcessGroups.delete(child.pid);
-      await updateStorageLockOwner();
+      writeStorageLockOwnerSync();
       return;
     }
     signalProcessGroup(child, "SIGKILL");
@@ -152,7 +151,7 @@ async function activateProcessGroup(child: ChildProcess, expectedExecutable: str
     executable: identity.executable,
   });
   try {
-    await updateStorageLockOwner();
+    writeStorageLockOwnerSync();
   } catch (error) {
     persistedProcessGroups.delete(child.pid);
     signalProcessGroup(child, "SIGKILL");
@@ -161,9 +160,9 @@ async function activateProcessGroup(child: ChildProcess, expectedExecutable: str
   signalProcessGroup(child, "SIGCONT");
 }
 
-async function deactivateProcessGroup(child: ChildProcess): Promise<void> {
+function deactivateProcessGroup(child: ChildProcess): void {
   if (!child.pid || !persistedProcessGroups.delete(child.pid)) return;
-  await updateStorageLockOwner();
+  writeStorageLockOwnerSync();
 }
 
 function signalChildProcessGroups(
@@ -233,9 +232,10 @@ async function readProcessIdentity(
   }
 }
 
-function processGroupIsRunning(group: number): boolean {
+function processIsRunning(pid: number, group = false): boolean {
+  if (!Number.isInteger(pid) || pid < 1) return false;
   try {
-    process.kill(-group, 0);
+    process.kill(group ? -pid : pid, 0);
     return true;
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "EPERM";
@@ -244,7 +244,7 @@ function processGroupIsRunning(group: number): boolean {
 
 async function terminateOrphanedProcessGroups(owner: StorageLockOwner): Promise<void> {
   for (const group of owner.activeGroups || []) {
-    if (!processGroupIsRunning(group.pid)) continue;
+    if (!processIsRunning(group.pid, true)) continue;
     const identity = await readProcessIdentity(group.pid);
     const pendingExecutableMatches = group.startedAt === "pending" && Boolean(
       identity && (
@@ -273,10 +273,10 @@ async function terminateOrphanedProcessGroups(owner: StorageLockOwner): Promise<
     }
   }
   for (const group of owner.activeGroups || []) {
-    for (let attempt = 0; attempt < 20 && processGroupIsRunning(group.pid); attempt += 1) {
+    for (let attempt = 0; attempt < 20 && processIsRunning(group.pid, true); attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
-    if (processGroupIsRunning(group.pid)) {
+    if (processIsRunning(group.pid, true)) {
       throw new LocalH3Error(
         "An orphaned local process group could not be stopped before storage cleanup.",
         503,
@@ -312,11 +312,6 @@ function writeStorageLockOwnerSync(): void {
       // The atomic rename normally consumes the temporary file.
     }
   }
-}
-
-function updateStorageLockOwner(): Promise<void> {
-  writeStorageLockOwnerSync();
-  return Promise.resolve();
 }
 
 function jobTimeoutMs(): number {
@@ -381,23 +376,10 @@ async function resolveJobsDirectory(): Promise<string> {
   return jobsDirectory;
 }
 
-function processIsRunning(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid < 1) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
-  }
-}
-
 function beginLocalOperation(): () => void {
   assertLocalOperationMayContinue();
   inFlightOperations += 1;
-  let released = false;
   return () => {
-    if (released) return;
-    released = true;
     inFlightOperations -= 1;
     if (inFlightOperations === 0) {
       for (const resolve of idleResolvers) resolve();
@@ -861,7 +843,7 @@ async function inspectReferenceImage(filePath: string): Promise<void> {
     try {
       await activation;
     } finally {
-      if (child) await deactivateProcessGroup(child);
+      if (child) deactivateProcessGroup(child);
     }
   }
 }
@@ -949,7 +931,7 @@ async function probeReferenceImage(filePath: string): Promise<void> {
     try {
       await activation;
     } finally {
-      if (child) await deactivateProcessGroup(child);
+      if (child) deactivateProcessGroup(child);
     }
   }
 }
@@ -1059,7 +1041,7 @@ async function processReferenceImage(
     try {
       await activation;
     } finally {
-      if (child) await deactivateProcessGroup(child);
+      if (child) deactivateProcessGroup(child);
     }
   }
 
@@ -1196,21 +1178,17 @@ export function uploadLocalReferenceImage(
   return operation.finally(release);
 }
 
-async function deleteStoredReferenceImage(token: string): Promise<{ deleted: boolean }> {
-  const jobsDirectory = await resolveJobsDirectory();
-  const directory = path.join(jobsDirectory, "reference-images");
-  const candidate = await ownedReferenceUpload(token, directory);
-  if (!candidate) return { deleted: false };
-  await serializeReferenceProcessing(() => rm(candidate, { force: true }));
-  referenceUploads.delete(token);
-  return { deleted: true };
-}
-
 export function deleteLocalReferenceImage(token: string): Promise<{ deleted: boolean }> {
   const release = beginLocalOperation();
-  const operation = referenceUploadTail.then(() => {
+  const operation = referenceUploadTail.then(async () => {
     assertLocalOperationMayContinue();
-    return deleteStoredReferenceImage(token);
+    const jobsDirectory = await resolveJobsDirectory();
+    const directory = path.join(jobsDirectory, "reference-images");
+    const candidate = await ownedReferenceUpload(token, directory);
+    if (!candidate) return { deleted: false };
+    await serializeReferenceProcessing(() => rm(candidate, { force: true }));
+    referenceUploads.delete(token);
+    return { deleted: true };
   });
   referenceUploadTail = operation.then(() => undefined, () => undefined);
   return operation.finally(release);
@@ -1274,19 +1252,6 @@ function prepareReferenceImage(
   });
 }
 
-function getJob(id: string): LocalJob {
-  const job = jobs.get(id);
-  if (!job) {
-    throw new LocalH3Error(
-      "The local generation job was not found. Local jobs are lost when the server restarts.",
-      404,
-      "local_job_not_found",
-      false,
-    );
-  }
-  return job;
-}
-
 function toResponse(job: LocalJob): VideoStatusResponse {
   const response: VideoStatusResponse = {
     id: job.id,
@@ -1346,14 +1311,9 @@ async function writeTerminalMarker(job: LocalJob, status: "completed" | "failed"
 }
 
 async function executeJob(job: LocalJob): Promise<void> {
-  const resolution = getLocalH3Resolution(job.input.resolution);
-  const quality = getLocalH3QualityPreset(job.input.quality);
-  if (!resolution || !quality) {
-    job.status = "failed";
-    job.error = "The selected local generation preset is no longer available.";
-    await writeTerminalMarker(job, "failed").catch(() => undefined);
-    return;
-  }
+  // ponytail: queued jobs are created only from route-validated static presets.
+  const resolution = getLocalH3Resolution(job.input.resolution)!;
+  const quality = getLocalH3QualityPreset(job.input.quality)!;
 
   const args = [
     "-d",
@@ -1443,7 +1403,7 @@ async function executeJob(job: LocalJob): Promise<void> {
       }
       result = await resultPromise;
     } finally {
-      await deactivateProcessGroup(child);
+      deactivateProcessGroup(child);
     }
 
     if (job.progressCarry) parseProgressLine(job, job.progressCarry);
@@ -1519,28 +1479,10 @@ async function generateLocalVideoOperation(
   input: LocalGenerateVideoInput,
 ): Promise<VideoStatusResponse> {
   const runtime = await resolveRuntime();
-  const resolution = getLocalH3Resolution(input.resolution);
-  if (!resolution) {
-    throw new LocalH3Error(
-      "The selected local resolution preset is not supported.",
-      400,
-      "local_resolution_error",
-      false,
-    );
-  }
+  // ponytail: the sole caller validates this static preset before dispatch.
+  const resolution = getLocalH3Resolution(input.resolution)!;
   const firstFrameSource = input.firstFramePath;
   const lastFrameSource = input.lastFramePath;
-  if (
-    (firstFrameSource && !path.isAbsolute(firstFrameSource)) ||
-    (lastFrameSource && !path.isAbsolute(lastFrameSource))
-  ) {
-    throw new LocalH3Error(
-      "Reference image paths must be absolute.",
-      400,
-      "local_reference_error",
-      false,
-    );
-  }
   if (queue.length + pendingJobReservations >= MAX_QUEUED_JOBS) {
     throw new LocalH3Error(
       "The local h3.c queue is full. Wait for an existing generation to finish.",
@@ -1550,7 +1492,7 @@ async function generateLocalVideoOperation(
     );
   }
   pendingJobReservations += 1;
-  const id = `${LOCAL_JOB_PREFIX}${randomUUID()}`;
+  const id = `local_${randomUUID()}`;
 
   try {
     const directory = path.join(runtime.jobsDirectory, id);
@@ -1633,7 +1575,16 @@ export function generateLocalVideo(input: LocalGenerateVideoInput): Promise<Vide
 }
 
 export function getLocalVideoStatus(id: string): VideoStatusResponse {
-  return toResponse(getJob(id));
+  const job = jobs.get(id);
+  if (!job) {
+    throw new LocalH3Error(
+      "The local generation job was not found. Local jobs are lost when the server restarts.",
+      404,
+      "local_job_not_found",
+      false,
+    );
+  }
+  return toResponse(job);
 }
 
 export async function getLocalVideoPath(id: string): Promise<string> {

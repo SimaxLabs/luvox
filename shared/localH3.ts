@@ -49,8 +49,6 @@ export const LOCAL_H3_QUALITY_PRESETS = [
   },
 ] as const;
 
-export type LocalH3ResolutionId = (typeof LOCAL_H3_RESOLUTIONS)[number]["id"];
-export type LocalH3QualityId = (typeof LOCAL_H3_QUALITY_PRESETS)[number]["id"];
 export type LocalH3FrameFitId = (typeof LOCAL_H3_FRAME_FIT_IDS)[number];
 
 export function getLocalH3Resolution(id: string) {

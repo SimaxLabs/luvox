@@ -56,24 +56,16 @@ const publicHttpsUrl = z
     message: "Reference images must use a public, non-local hostname.",
   });
 
-const optionalPublicHttpsUrl = z
-  .union([publicHttpsUrl, z.literal("")])
-  .optional()
-  .transform((value) => value || undefined);
+const optionalPublicHttpsUrl = publicHttpsUrl.optional();
 
 const optionalAbsolutePath = z
-  .union([
-    z
-      .string()
-      .trim()
-      .max(4_096, "The reference image path is too long.")
-      .refine((value) => path.isAbsolute(value), {
-        message: "Reference image paths must be absolute.",
-      }),
-    z.literal(""),
-  ])
-  .optional()
-  .transform((value) => value || undefined);
+  .string()
+  .trim()
+  .max(4_096, "The reference image path is too long.")
+  .refine((value) => path.isAbsolute(value), {
+    message: "Reference image paths must be absolute.",
+  })
+  .optional();
 
 const promptSchema = z.string().trim().min(1, "Prompt is required.").max(10_000);
 
@@ -121,16 +113,16 @@ const localGenerateVideoSchema = z
   .strict();
 
 export type LocalGenerateVideoInput = z.infer<typeof localGenerateVideoSchema>;
-export type VideoGenerateInput = GenerateVideoInput | LocalGenerateVideoInput;
+const generateVideoSchema = z.discriminatedUnion("provider", [
+  baseGenerateVideoSchema,
+  localGenerateVideoSchema,
+]);
+export type VideoGenerateInput = z.infer<typeof generateVideoSchema>;
 
 export function validateGenerateVideoInput(value: unknown): VideoGenerateInput {
-  const provider = z
-    .object({ provider: z.enum(["openrouter", "local"]) })
-    .passthrough()
-    .parse(value).provider;
+  const input = generateVideoSchema.parse(value);
 
-  if (provider === "local") {
-    const input = localGenerateVideoSchema.parse(value);
+  if (input.provider === "local") {
     const issues: z.ZodIssue[] = [];
 
     if (!getLocalH3Resolution(input.resolution)) {
@@ -149,7 +141,6 @@ export function validateGenerateVideoInput(value: unknown): VideoGenerateInput {
     return input;
   }
 
-  const input = baseGenerateVideoSchema.parse(value);
   const model = getVideoModel(input.model);
 
   if (!model) {
@@ -216,11 +207,9 @@ export function validateGenerateVideoInput(value: unknown): VideoGenerateInput {
 }
 
 export function validateJobId(value: unknown): string {
-  const parsed = z
+  return z
     .string()
     .trim()
     .min(1, "Generation ID is required.")
     .parse(value);
-
-  return parsed;
 }

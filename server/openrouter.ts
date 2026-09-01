@@ -2,7 +2,7 @@ import type { GenerateVideoInput } from "./validation.js";
 import type {
   GenerationStatus,
   VideoStatusResponse,
-} from "./videoTypes.js";
+} from "../shared/videoTypes.js";
 
 const OPENROUTER_API_BASE = "https://openrouter.ai/api/v1";
 const JSON_REQUEST_TIMEOUT_MS = 30_000;
@@ -23,12 +23,9 @@ interface OpenRouterVideoResponse {
   id: string;
   polling_url: string;
   status: OpenRouterStatus;
-  generation_id?: string;
-  unsigned_urls?: string[];
   error?: string;
   usage?: {
     cost?: number | null;
-    is_byok?: boolean;
   };
 }
 

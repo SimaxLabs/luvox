@@ -1,9 +1,8 @@
-export type VideoProvider = "openrouter" | "local";
 export type GenerationStatus = "queued" | "processing" | "completed" | "failed";
 
 export interface VideoStatusResponse {
   id: string;
-  provider: VideoProvider;
+  provider: "openrouter" | "local";
   status: GenerationStatus;
   error?: string;
   videoUrl?: string;

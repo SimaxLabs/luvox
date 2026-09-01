@@ -17,7 +17,7 @@
 
 ## OpenRouter Constraints
 
-- The environment `OPENROUTER_API_KEY` is server-only via `dotenv/config` and must never be returned to the client. A user-entered override may exist only in volatile React state and the local `X-OpenRouter-Api-Key` request header; pin that override to its submitted job in volatile state so later edits cannot change job authentication. Never put either key in payloads, URLs, logs, browser storage, or server storage.
+- The environment `OPENROUTER_API_KEY` is server-only via Node's `--env-file-if-exists` and must never be returned to the client. A user-entered override may exist only in volatile React state and the local `X-OpenRouter-Api-Key` request header; pin that override to its submitted job in volatile state so later edits cannot change job authentication. Never put either key in payloads, URLs, logs, browser storage, or server storage.
 - Before changing requests or capabilities, re-check the official sources linked under `README.md`'s OpenRouter contract. Use the dedicated asynchronous `/api/v1/videos` API; do not infer chat-completions fields or provider fields.
 - Hailuo 3 currently accepts public HTTPS first/last-frame URLs through `frame_images`. Do not add multipart, local-file, or base64 submission unless the dedicated video-generation docs explicitly add support.
 - Provider `pending` and `in_progress` map to local `queued` and `processing`; `failed`, `cancelled`, and `expired` map to local `failed`. Polling transport/auth errors are not proof that provider generation failed.

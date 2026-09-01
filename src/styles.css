@@ -6,27 +6,15 @@
   --font-display: Impact, Haettenschweiler, "Arial Narrow Bold", sans-serif;
 }
 
-* {
-  box-sizing: border-box;
-}
-
 html {
   background: #0c0d0c;
 }
 
 body {
-  margin: 0;
   min-width: 320px;
   min-height: 100vh;
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
-}
-
-button,
-select,
-textarea,
-input {
-  font: inherit;
 }
 
 button,

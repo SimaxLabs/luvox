@@ -1,10 +1,6 @@
-export type FrameType = "first_frame" | "last_frame";
-
 export interface VideoModelConfig {
   id: string;
   name: string;
-  shortName: string;
-  description: string;
   durations: readonly number[];
   defaultDuration: number;
   aspectRatios: readonly string[];
@@ -12,7 +8,7 @@ export interface VideoModelConfig {
   resolutions: readonly string[];
   defaultResolution?: string;
   frameImages: {
-    supported: readonly FrameType[];
+    supported: readonly ("first_frame" | "last_frame")[];
     input: "public_url" | "none";
   };
   generateAudio: {
@@ -29,8 +25,6 @@ export const VIDEO_MODELS = [
   {
     id: DEFAULT_MODEL_ID,
     name: "MiniMax: Hailuo 3",
-    shortName: "Hailuo 3",
-    description: "2K audiovisual generation with precise first and last frame control.",
     durations: [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
     defaultDuration: 6,
     aspectRatios: ["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"],

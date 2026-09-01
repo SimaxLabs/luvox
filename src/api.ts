@@ -1,18 +1,7 @@
 import type { LocalH3FrameFitId } from "../shared/localH3";
+import type { VideoStatusResponse as VideoJob } from "../shared/videoTypes";
 
-export type GenerationStatus = "queued" | "processing" | "completed" | "failed";
-
-export interface VideoJob {
-  id: string;
-  provider: "openrouter" | "local";
-  status: GenerationStatus;
-  error?: string;
-  videoUrl?: string;
-  downloadUrl?: string;
-  cost?: number;
-  phase?: string;
-  progress?: number;
-}
+export type { GenerationStatus, VideoStatusResponse as VideoJob } from "../shared/videoTypes";
 
 export interface OpenRouterGenerateVideoPayload {
   provider: "openrouter";
@@ -39,10 +28,6 @@ export interface LocalGenerateVideoPayload {
   previousJobId?: string;
   ssdStreaming: boolean;
 }
-
-export type GenerateVideoPayload =
-  | OpenRouterGenerateVideoPayload
-  | LocalGenerateVideoPayload;
 
 interface ApiErrorBody {
   error?: {
@@ -111,7 +96,7 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 export function generateVideo(
-  payload: GenerateVideoPayload,
+  payload: OpenRouterGenerateVideoPayload | LocalGenerateVideoPayload,
   sessionApiKey?: string,
 ): Promise<VideoJob> {
   return request<VideoJob>("/api/video/generate", {
@@ -133,20 +118,10 @@ export function uploadLocalReferenceImage(
   uploadToken: string,
   previousToken?: string,
 ): Promise<{ path: string; token: string }> {
-  const extension = file.name.split(".").pop()?.toLowerCase();
-  const contentType = ["image/png", "image/jpeg", "image/webp"].includes(file.type)
-    ? file.type
-    : extension === "png"
-      ? "image/png"
-      : extension === "jpg" || extension === "jpeg"
-        ? "image/jpeg"
-        : extension === "webp"
-          ? "image/webp"
-          : "application/octet-stream";
   return request<{ path: string; token: string }>("/api/local/reference-image", {
     method: "POST",
     headers: {
-      "Content-Type": contentType,
+      "Content-Type": "application/octet-stream",
       "X-Reference-Upload-Token": uploadToken,
       ...(previousToken ? { "X-Previous-Reference-Token": previousToken } : {}),
     },

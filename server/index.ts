@@ -1,5 +1,3 @@
-import "dotenv/config";
-
 import express, { type NextFunction, type Request, type Response } from "express";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
@@ -41,7 +39,6 @@ const localReferenceDeleteSchema = z
   .object({ token: z.string().uuid() })
   .strict();
 const localReferenceTokenSchema = z.string().uuid();
-const optionalLocalReferenceTokenSchema = localReferenceTokenSchema.optional();
 
 function getSessionApiKey(request: Request): string | undefined {
   return sessionApiKeySchema.parse(request.get("X-OpenRouter-Api-Key"));
@@ -71,10 +68,6 @@ function assertLoopbackRequest(request: Request): void {
 }
 
 app.disable("x-powered-by");
-
-app.get("/api/health", (_request, response) => {
-  response.json({ ok: true });
-});
 
 app.get("/api/config", (_request, response) => {
   response.setHeader("Cache-Control", "no-store");
@@ -109,7 +102,7 @@ app.post(
       const uploadToken = localReferenceTokenSchema.parse(
         request.get("X-Reference-Upload-Token"),
       );
-      const previousToken = optionalLocalReferenceTokenSchema.parse(
+      const previousToken = localReferenceTokenSchema.optional().parse(
         request.get("X-Previous-Reference-Token"),
       );
       const result = await uploadLocalReferenceImage(request.body, uploadToken, previousToken);
@@ -299,19 +292,10 @@ app.use(
       return;
     }
 
-    if (error instanceof OpenRouterError) {
-      if (error.retryAfter) response.setHeader("Retry-After", error.retryAfter);
-      response.status(error.status).json({
-        error: {
-          type: error.type,
-          message: error.message,
-          retryable: error.retryable,
-        },
-      });
-      return;
-    }
-
-    if (error instanceof LocalH3Error) {
+    if (error instanceof OpenRouterError || error instanceof LocalH3Error) {
+      if (error instanceof OpenRouterError && error.retryAfter) {
+        response.setHeader("Retry-After", error.retryAfter);
+      }
       response.status(error.status).json({
         error: {
           type: error.type,

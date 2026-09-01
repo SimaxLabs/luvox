@@ -1,8 +1,6 @@
 # Motion Lab
 
-A local React interface for MiniMax H3 video generation through OpenRouter or a host-installed h3.c engine. The environment API key remains server-only; an optional UI key exists only in volatile tab memory.
-
-The same UI can run MiniMax H3 locally through [antirez/h3.c](https://github.com/antirez/h3.c) on a compatible Mac.
+A local React interface for MiniMax H3 video generation through OpenRouter or a host-installed [h3.c](https://github.com/antirez/h3.c) engine on a compatible Mac. The environment API key remains server-only; an optional UI key exists only in volatile tab memory.
 
 ## Docker
 
@@ -38,18 +36,7 @@ Local mode executes the one-shot `h3` CLI and does not use an API key. It requir
 - The MiniMax H3 Hugging Face model snapshot
 - `ffmpeg` and `ffprobe` on `PATH`, with `libx264` available
 
-Build and verify `h3.c` following its upstream README, then add absolute paths to this app's `.env`:
-
-```dotenv
-H3_BINARY=/absolute/path/to/h3.c/h3
-H3_MODEL_DIR=/absolute/path/to/MiniMax-H3
-# Optional; defaults beside H3_BINARY.
-H3_RUNTIME_DIR=/absolute/path/to/h3.c
-# Optional; defaults to ./.h3-jobs.
-H3_JOBS_DIR=/absolute/path/to/h3-jobs
-# Optional local child-process timeout.
-H3_TIMEOUT_MINUTES=120
-```
+Build and verify `h3.c` following its upstream README, then copy `.env.example` to `.env` and set absolute `H3_BINARY` and `H3_MODEL_DIR` paths. `H3_RUNTIME_DIR` defaults beside the binary, `H3_JOBS_DIR` to `./.h3-jobs`, and `H3_TIMEOUT_MINUTES` to 120.
 
 Run the app directly with `npm run dev`, or use `npm run build && NODE_ENV=production npm start`. Local mode is unavailable in Docker because the Linux container cannot access macOS Metal. Because local generation intentionally accepts host filesystem paths, the server must remain bound to `127.0.0.1` or `::1`; local mode is disabled for public bind addresses.
 
@@ -67,13 +54,6 @@ The `h3.c` engine is MIT licensed, but MiniMax H3 weights use a separate communi
 - A temporary key entered in the UI takes precedence for new jobs. Each submitted job keeps using the credential choice made at submission even if the draft field is edited later.
 - The temporary key exists only in the current tab's React memory. It is sent to the local backend in the `X-OpenRouter-Api-Key` header and is never placed in request bodies, URLs, browser storage, server storage, or logs.
 - Session-key video content is fetched through the authenticated local proxy and exposed to the player as a temporary `blob:` URL. The object URL is revoked when the job is cleared, replaced, or the page closes.
-
-Build and run the production server locally:
-
-```bash
-npm run build
-NODE_ENV=production npm start
-```
 
 ## API
 

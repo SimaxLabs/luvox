@@ -1,10 +1,5 @@
 import { type ChangeEvent, type FormEvent, type ReactNode, useEffect, useRef, useState } from "react";
-import {
-  DEFAULT_MODEL_ID,
-  getVideoModel,
-  VIDEO_MODELS,
-  type VideoModelConfig,
-} from "../shared/videoModels";
+import { VIDEO_MODELS } from "../shared/videoModels";
 import {
   getLocalH3QualityPreset,
   LOCAL_H3_DURATIONS,
@@ -29,10 +24,8 @@ import {
 interface FormState {
   provider: "openrouter" | "local";
   prompt: string;
-  model: string;
   duration: number;
   aspectRatio: string;
-  resolution: string;
   firstFrameUrl: string;
   lastFrameUrl: string;
   generateAudio: boolean;
@@ -63,14 +56,13 @@ type IconName =
 
 const statusOrder: GenerationStatus[] = ["queued", "processing", "completed", "failed"];
 
-function initialForm(model: VideoModelConfig): FormState {
+function initialForm(): FormState {
+  const model = VIDEO_MODELS[0];
   return {
     provider: "openrouter",
     prompt: "",
-    model: model.id,
     duration: model.defaultDuration,
     aspectRatio: model.defaultAspectRatio,
-    resolution: model.defaultResolution || "",
     firstFrameUrl: "",
     lastFrameUrl: "",
     generateAudio: model.generateAudio.default,
@@ -283,8 +275,7 @@ function messageFrom(error: unknown): string {
 }
 
 export default function App() {
-  const defaultModel = getVideoModel(DEFAULT_MODEL_ID) || VIDEO_MODELS[0];
-  const [form, setForm] = useState<FormState>(() => initialForm(defaultModel));
+  const [form, setForm] = useState<FormState>(initialForm);
   const [job, setJob] = useState<DisplayJob | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -300,21 +291,33 @@ export default function App() {
   const [referenceUploadStatus, setReferenceUploadStatus] = useState("");
   const [referenceUploadTokens, setReferenceUploadTokens] = useState<Partial<Record<"first" | "last", string>>>({});
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const firstFramePicker = useRef<HTMLInputElement>(null);
-  const lastFramePicker = useRef<HTMLInputElement>(null);
   const firstFramePathOnFocus = useRef("");
   const lastFramePathOnFocus = useRef("");
   const serverSession = useRef<string | null>(null);
   const serviceState = useRef<"unknown" | "online" | "offline">("unknown");
   const workspaceVersion = useRef(0);
 
-  const selectedModel = getVideoModel(form.model) || defaultModel;
+  const selectedModel = VIDEO_MODELS[0];
   const selectedLocalQuality = getLocalH3QualityPreset(form.localQuality);
   const isActive = job?.status === "queued" || job?.status === "processing";
   const jobApiKey = job?.provider === "openrouter" ? job.temporaryApiKey : undefined;
   const usesSessionMedia = Boolean(jobApiKey);
   const videoSource = usesSessionMedia ? temporaryVideoUrl || undefined : job?.videoUrl;
   const downloadSource = usesSessionMedia ? temporaryVideoUrl || undefined : job?.downloadUrl;
+
+  const clearOutput = () => {
+    workspaceVersion.current += 1;
+    if (copyTimer.current) {
+      clearTimeout(copyTimer.current);
+      copyTimer.current = null;
+    }
+    setJob(null);
+    setError(null);
+    setPollWarning(null);
+    setCopied(false);
+    setMediaError(null);
+    setMediaLoading(false);
+  };
 
   useEffect(() => {
     try {
@@ -329,19 +332,9 @@ export default function App() {
     let firstFailureAt = 0;
 
     const resetWorkspace = () => {
-      workspaceVersion.current += 1;
-      if (copyTimer.current) {
-        clearTimeout(copyTimer.current);
-        copyTimer.current = null;
-      }
-      setForm(initialForm(defaultModel));
-      setJob(null);
+      clearOutput();
+      setForm(initialForm());
       setSubmitting(false);
-      setError(null);
-      setPollWarning(null);
-      setCopied(false);
-      setMediaError(null);
-      setMediaLoading(false);
       setMediaRetry(0);
       setTemporaryVideoUrl(null);
       setUploadingReference(null);
@@ -511,22 +504,6 @@ export default function App() {
     };
   }, []);
 
-  const updateModel = (modelId: string) => {
-    const model = getVideoModel(modelId);
-    if (!model) return;
-    const defaults = initialForm(model);
-    setForm((current) => ({
-      ...current,
-      model: defaults.model,
-      duration: defaults.duration,
-      aspectRatio: defaults.aspectRatio,
-      resolution: defaults.resolution,
-      firstFrameUrl: "",
-      lastFrameUrl: "",
-      generateAudio: defaults.generateAudio,
-    }));
-  };
-
   const releaseChangedReference = (
     position: "first" | "last",
     previousPath: string,
@@ -559,20 +536,6 @@ export default function App() {
     event.currentTarget.value = "";
     if (!file) return;
     const frameLabel = position === "first" ? "First" : "Last";
-
-    const extension = file.name.split(".").pop()?.toLowerCase();
-    const supportedType = ["image/png", "image/jpeg", "image/webp"].includes(file.type);
-    const supportedExtension = Boolean(extension && ["png", "jpg", "jpeg", "webp"].includes(extension));
-    if (!supportedType && !supportedExtension) {
-      setReferenceUploadStatus(`${frameLabel} frame image upload failed.`);
-      setError("Reference images must be PNG, JPEG, or WebP files.");
-      return;
-    }
-    if (file.size < 1 || file.size > 25 * 1024 * 1024) {
-      setReferenceUploadStatus(`${frameLabel} frame image upload failed.`);
-      setError("Reference images must be non-empty and no larger than 25 MB.");
-      return;
-    }
 
     const previousPath = position === "first"
       ? form.localFirstFramePath
@@ -653,10 +616,10 @@ export default function App() {
             {
               provider: "openrouter",
               prompt: form.prompt,
-              model: form.model,
+              model: selectedModel.id,
               duration: form.duration,
               aspectRatio: form.aspectRatio,
-              resolution: form.resolution || undefined,
+              resolution: selectedModel.defaultResolution,
               firstFrameUrl: form.firstFrameUrl || undefined,
               lastFrameUrl: form.lastFrameUrl || undefined,
               generateAudio: selectedModel.generateAudio.supported ? form.generateAudio : undefined,
@@ -695,17 +658,7 @@ export default function App() {
     ) {
       return;
     }
-    workspaceVersion.current += 1;
-    if (copyTimer.current) {
-      clearTimeout(copyTimer.current);
-      copyTimer.current = null;
-    }
-    setJob(null);
-    setError(null);
-    setPollWarning(null);
-    setCopied(false);
-    setMediaError(null);
-    setMediaLoading(false);
+    clearOutput();
   };
 
   const copyVideoUrl = async () => {
@@ -715,30 +668,16 @@ export default function App() {
     const videoUrl = new URL(source, window.location.origin).href;
     try {
       await navigator.clipboard.writeText(videoUrl);
-      if (version !== workspaceVersion.current) return;
-      setError(null);
-      setCopied(true);
-      if (copyTimer.current) clearTimeout(copyTimer.current);
-      copyTimer.current = setTimeout(() => setCopied(false), 2_000);
     } catch {
       if (version !== workspaceVersion.current) return;
-      const input = document.createElement("textarea");
-      input.value = videoUrl;
-      input.style.position = "fixed";
-      input.style.opacity = "0";
-      document.body.appendChild(input);
-      input.select();
-      const copiedWithFallback = document.execCommand("copy");
-      input.remove();
-      if (!copiedWithFallback) {
-        setError("The browser could not copy the video URL to the clipboard.");
-        return;
-      }
-      setError(null);
-      setCopied(true);
-      if (copyTimer.current) clearTimeout(copyTimer.current);
-      copyTimer.current = setTimeout(() => setCopied(false), 2_000);
+      setError("The browser could not copy the video URL to the clipboard.");
+      return;
     }
+    if (version !== workspaceVersion.current) return;
+    setError(null);
+    setCopied(true);
+    if (copyTimer.current) clearTimeout(copyTimer.current);
+    copyTimer.current = setTimeout(() => setCopied(false), 2_000);
   };
 
   return (
@@ -865,29 +804,13 @@ export default function App() {
           <>
           <div className="mt-6 grid gap-5 sm:grid-cols-2">
             <div>
-              <FieldLabel htmlFor="model">Model</FieldLabel>
-              <select
-                className="h-12 w-full border border-black/15 bg-[#faf9f3] px-3 text-sm outline-none transition focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
-                onChange={(event) => updateModel(event.target.value)}
-                id="model"
-                value={form.model}
-              >
-                {VIDEO_MODELS.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}
-              </select>
+              <p className="mb-2 text-[11px] font-bold uppercase tracking-[0.18em] text-stone-700">Model</p>
+              <p className="flex h-12 items-center border border-black/15 bg-[#faf9f3] px-3 text-sm">{selectedModel.name}</p>
             </div>
-            {selectedModel.resolutions.length > 0 && (
-              <div>
-                <FieldLabel htmlFor="resolution">Resolution</FieldLabel>
-                <select
-                  className="h-12 w-full border border-black/15 bg-[#faf9f3] px-3 text-sm outline-none transition focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
-                  onChange={(event) => setForm((current) => ({ ...current, resolution: event.target.value }))}
-                  id="resolution"
-                  value={form.resolution}
-                >
-                  {selectedModel.resolutions.map((resolution) => <option key={resolution}>{resolution}</option>)}
-                </select>
-              </div>
-            )}
+            <div>
+              <p className="mb-2 text-[11px] font-bold uppercase tracking-[0.18em] text-stone-700">Resolution</p>
+              <p className="flex h-12 items-center border border-black/15 bg-[#faf9f3] px-3 text-sm">{selectedModel.defaultResolution}</p>
+            </div>
           </div>
 
           <div className="mt-6 grid gap-5 sm:grid-cols-[0.7fr_1.3fr]">
@@ -932,32 +855,25 @@ export default function App() {
                 </div>
               </div>
               <div className="grid gap-4 sm:grid-cols-2">
-                {selectedModel.frameImages.supported.includes("first_frame") && (
-                  <div>
-                    <FieldLabel htmlFor="first-frame-url" optional>First frame URL</FieldLabel>
-                    <input
-                      className="h-11 w-full border border-black/15 bg-[#faf9f3] px-3 text-xs outline-none transition placeholder:text-stone-400 focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
-                      onChange={(event) => setForm((current) => ({ ...current, firstFrameUrl: event.target.value }))}
-                      id="first-frame-url"
-                      placeholder="https://.../opening.jpg"
-                      type="url"
-                      value={form.firstFrameUrl}
-                    />
-                  </div>
-                )}
-                {selectedModel.frameImages.supported.includes("last_frame") && (
-                  <div>
-                    <FieldLabel htmlFor="last-frame-url" optional>Last frame URL</FieldLabel>
-                    <input
-                      className="h-11 w-full border border-black/15 bg-[#faf9f3] px-3 text-xs outline-none transition placeholder:text-stone-400 focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
-                      onChange={(event) => setForm((current) => ({ ...current, lastFrameUrl: event.target.value }))}
-                      id="last-frame-url"
-                      placeholder="https://.../closing.jpg"
-                      type="url"
-                      value={form.lastFrameUrl}
-                    />
-                  </div>
-                )}
+                {selectedModel.frameImages.supported.map((frameType) => {
+                  const first = frameType === "first_frame";
+                  const position = first ? "first" : "last";
+                  return (
+                    <div key={frameType}>
+                      <FieldLabel htmlFor={`${position}-frame-url`} optional>{first ? "First" : "Last"} frame URL</FieldLabel>
+                      <input
+                        className="h-11 w-full border border-black/15 bg-[#faf9f3] px-3 text-xs outline-none transition placeholder:text-stone-400 focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
+                        id={`${position}-frame-url`}
+                        onChange={(event) => setForm((current) => first
+                          ? { ...current, firstFrameUrl: event.target.value }
+                          : { ...current, lastFrameUrl: event.target.value })}
+                        placeholder={`https://.../${first ? "opening" : "closing"}.jpg`}
+                        type="url"
+                        value={first ? form.firstFrameUrl : form.lastFrameUrl}
+                      />
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}
@@ -984,15 +900,8 @@ export default function App() {
             <>
               <div className="mt-6 grid gap-5 sm:grid-cols-2">
                 <div>
-                  <FieldLabel htmlFor="local-model">Model</FieldLabel>
-                  <select
-                    className="h-12 w-full border border-black/15 bg-[#faf9f3] px-3 text-sm text-stone-700 outline-none"
-                    disabled
-                    id="local-model"
-                    value="minimax-h3-local"
-                  >
-                    <option value="minimax-h3-local">MiniMax H3 / h3.c</option>
-                  </select>
+                  <p className="mb-2 text-[11px] font-bold uppercase tracking-[0.18em] text-stone-700">Model</p>
+                  <p className="flex h-12 items-center border border-black/15 bg-[#faf9f3] px-3 text-sm text-stone-700">MiniMax H3 / h3.c</p>
                 </div>
                 <div>
                   <FieldLabel htmlFor="local-resolution">Resolution</FieldLabel>
@@ -1056,92 +965,50 @@ export default function App() {
                   </div>
                 </div>
                 <div className="grid gap-4 sm:grid-cols-2">
-                  <div>
-                    <FieldLabel htmlFor="local-first-frame-path" optional>First frame path</FieldLabel>
-                    <div className="flex gap-2">
-                      <input
-                        className="h-11 min-w-0 flex-1 border border-black/15 bg-[#faf9f3] px-3 font-mono text-xs outline-none transition placeholder:text-stone-400 focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
-                        id="local-first-frame-path"
-                        onBlur={(event) => {
-                          const previousPath = firstFramePathOnFocus.current;
-                          releaseChangedReference("first", previousPath, event.currentTarget.value);
-                          firstFramePathOnFocus.current = event.currentTarget.value;
-                        }}
-                        onChange={(event) => setForm((current) => ({
-                          ...current,
-                          localFirstFramePath: event.target.value,
-                          localFrameFit: event.target.value ? "contain" : current.localFrameFit,
-                        }))}
-                        onFocus={(event) => { firstFramePathOnFocus.current = event.currentTarget.value; }}
-                        placeholder="/Users/.../opening.png"
-                        spellCheck={false}
-                        type="text"
-                        value={form.localFirstFramePath}
-                      />
-                      <button
-                        aria-label={uploadingReference === "first" ? "Uploading first frame image" : "Browse for first frame image"}
-                        className="border border-black/15 px-3 text-[10px] font-bold uppercase tracking-[0.12em] hover:border-black disabled:cursor-wait disabled:opacity-45"
-                        disabled={uploadingReference !== null}
-                        onClick={() => firstFramePicker.current?.click()}
-                        type="button"
-                      >
-                        {uploadingReference === "first" ? "Uploading" : "Browse"}
-                      </button>
-                      <input
-                        accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp"
-                        aria-hidden="true"
-                        className="sr-only"
-                        disabled={uploadingReference !== null}
-                        onChange={(event) => void selectLocalReference(event, "first")}
-                        ref={firstFramePicker}
-                        tabIndex={-1}
-                        type="file"
-                      />
-                    </div>
-                  </div>
-                  <div>
-                    <FieldLabel htmlFor="local-last-frame-path" optional>Last frame path</FieldLabel>
-                    <div className="flex gap-2">
-                      <input
-                        className="h-11 min-w-0 flex-1 border border-black/15 bg-[#faf9f3] px-3 font-mono text-xs outline-none transition placeholder:text-stone-400 focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
-                        id="local-last-frame-path"
-                        onBlur={(event) => {
-                          const previousPath = lastFramePathOnFocus.current;
-                          releaseChangedReference("last", previousPath, event.currentTarget.value);
-                          lastFramePathOnFocus.current = event.currentTarget.value;
-                        }}
-                        onChange={(event) => setForm((current) => ({
-                          ...current,
-                          localLastFramePath: event.target.value,
-                          localFrameFit: event.target.value ? "contain" : current.localFrameFit,
-                        }))}
-                        onFocus={(event) => { lastFramePathOnFocus.current = event.currentTarget.value; }}
-                        placeholder="/Users/.../closing.png"
-                        spellCheck={false}
-                        type="text"
-                        value={form.localLastFramePath}
-                      />
-                      <button
-                        aria-label={uploadingReference === "last" ? "Uploading last frame image" : "Browse for last frame image"}
-                        className="border border-black/15 px-3 text-[10px] font-bold uppercase tracking-[0.12em] hover:border-black disabled:cursor-wait disabled:opacity-45"
-                        disabled={uploadingReference !== null}
-                        onClick={() => lastFramePicker.current?.click()}
-                        type="button"
-                      >
-                        {uploadingReference === "last" ? "Uploading" : "Browse"}
-                      </button>
-                      <input
-                        accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp"
-                        aria-hidden="true"
-                        className="sr-only"
-                        disabled={uploadingReference !== null}
-                        onChange={(event) => void selectLocalReference(event, "last")}
-                        ref={lastFramePicker}
-                        tabIndex={-1}
-                        type="file"
-                      />
-                    </div>
-                  </div>
+                  {(["first", "last"] as const).map((position) => {
+                    const first = position === "first";
+                    const focusPath = first ? firstFramePathOnFocus : lastFramePathOnFocus;
+                    const value = first ? form.localFirstFramePath : form.localLastFramePath;
+                    return (
+                      <div key={position}>
+                        <FieldLabel htmlFor={`local-${position}-frame-path`} optional>{first ? "First" : "Last"} frame path</FieldLabel>
+                        <div className="flex gap-2">
+                          <input
+                            className="h-11 min-w-0 flex-1 border border-black/15 bg-[#faf9f3] px-3 font-mono text-xs outline-none transition placeholder:text-stone-400 focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
+                            id={`local-${position}-frame-path`}
+                            onBlur={(event) => {
+                              releaseChangedReference(position, focusPath.current, event.currentTarget.value);
+                              focusPath.current = event.currentTarget.value;
+                            }}
+                            onChange={(event) => setForm((current) => first
+                              ? {
+                                  ...current,
+                                  localFirstFramePath: event.target.value,
+                                  localFrameFit: event.target.value ? "contain" : current.localFrameFit,
+                                }
+                              : {
+                                  ...current,
+                                  localLastFramePath: event.target.value,
+                                  localFrameFit: event.target.value ? "contain" : current.localFrameFit,
+                                })}
+                            onFocus={(event) => { focusPath.current = event.currentTarget.value; }}
+                            placeholder={`/Users/.../${first ? "opening" : "closing"}.png`}
+                            spellCheck={false}
+                            type="text"
+                            value={value}
+                          />
+                          <input
+                            accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp"
+                            aria-label={uploadingReference === position ? `Uploading ${position} frame image` : `Browse for ${position} frame image`}
+                            className="h-11 w-24 cursor-pointer text-[0] outline-none file:h-11 file:w-full file:cursor-pointer file:border file:border-black/15 file:bg-transparent file:px-3 file:text-[10px] file:font-bold file:uppercase file:tracking-[0.12em] hover:file:border-black focus-visible:ring-2 focus-visible:ring-black disabled:cursor-wait disabled:opacity-45"
+                            id={`local-${position}-frame-picker`}
+                            onChange={(event) => void selectLocalReference(event, position)}
+                            type="file"
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
                 {(form.localFirstFramePath || form.localLastFramePath) && (
                   <fieldset className="mt-4 border-t border-black/10 pt-4">
