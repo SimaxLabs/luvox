@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { access, lstat, mkdir, open, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { access, lstat, mkdir, open, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   getLocalH3QualityPreset,
@@ -11,6 +11,7 @@ import type { LocalGenerateVideoInput } from "./validation.js";
 import type { VideoStatusResponse } from "./videoTypes.js";
 
 const LOCAL_JOB_PREFIX = "local_";
+const LOCAL_JOB_ID = /^local_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const MAX_DIAGNOSTIC_CHARS = 16_000;
 const MAX_PROGRESS_CARRY_CHARS = 4_096;
 const MAX_QUEUED_JOBS = 3;
@@ -610,7 +611,7 @@ function startNextJob(): void {
 }
 
 export function isLocalJobId(id: string): boolean {
-  return id.startsWith(LOCAL_JOB_PREFIX);
+  return LOCAL_JOB_ID.test(id);
 }
 
 export async function generateLocalVideo(
@@ -706,8 +707,8 @@ export function getLocalVideoStatus(id: string): VideoStatusResponse {
 }
 
 export async function getLocalVideoPath(id: string): Promise<string> {
-  const job = getJob(id);
-  if (job.status !== "completed") {
+  const job = jobs.get(id);
+  if (job && job.status !== "completed") {
     throw new LocalH3Error(
       "The local video is not ready yet.",
       409,
@@ -716,14 +717,22 @@ export async function getLocalVideoPath(id: string): Promise<string> {
     );
   }
 
-  const output = await stat(job.output).catch(() => undefined);
-  if (!output?.isFile()) {
+  const jobsDirectory = job?.runtime.jobsDirectory || await resolveJobsDirectory();
+  const expectedOutput = job?.output || path.join(jobsDirectory, id, "result.mp4");
+  const resolvedJobsDirectory = await realpath(jobsDirectory);
+  const resolvedOutput = await realpath(expectedOutput).catch(() => undefined);
+  const output = resolvedOutput?.startsWith(`${resolvedJobsDirectory}${path.sep}`)
+    ? await stat(resolvedOutput).catch(() => undefined)
+    : undefined;
+  if (!resolvedOutput || !output?.isFile()) {
     throw new LocalH3Error(
-      "The completed local video file is missing.",
+      job
+        ? "The completed local video file is missing."
+        : "The local generation job was not found. Local jobs without completed output are lost when the server restarts.",
       404,
-      "local_video_missing",
+      job ? "local_video_missing" : "local_job_not_found",
       false,
     );
   }
-  return job.output;
+  return resolvedOutput;
 }

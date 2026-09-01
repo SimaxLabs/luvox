@@ -150,7 +150,7 @@ app.head(
       const videoPath = await getLocalVideoPath(id);
       response.setHeader("Cache-Control", "private, no-store");
       response.setHeader("Content-Disposition", "inline");
-      response.sendFile(videoPath, (error) => {
+      response.sendFile(videoPath, { dotfiles: "allow" }, (error) => {
         if (error) next(error);
       });
     } catch (error) {
@@ -174,7 +174,7 @@ app.get(
             ? "attachment; filename=\"h3-local-video.mp4\""
             : "inline",
         );
-        response.sendFile(videoPath, (error) => {
+        response.sendFile(videoPath, { dotfiles: "allow" }, (error) => {
           if (error) next(error);
         });
         return;

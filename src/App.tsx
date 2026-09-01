@@ -195,6 +195,7 @@ function Preview({
   mediaLoading,
   mediaError,
   onMediaError,
+  onMediaRetry,
   videoSource,
 }: {
   aspectRatio: string;
@@ -202,6 +203,7 @@ function Preview({
   mediaLoading: boolean;
   mediaError: string | null;
   onMediaError: () => void;
+  onMediaRetry: () => void;
   videoSource?: string;
 }) {
   const ratio = aspectRatio.replace(":", " / ");
@@ -226,6 +228,13 @@ function Preview({
           <div className="mx-auto mb-5 flex size-14 items-center justify-center rounded-full border border-[#ff826e]/40 text-2xl text-[#ff826e]">!</div>
           <p className="font-display text-2xl uppercase text-white">Preview unavailable</p>
           <p className="mx-auto mt-3 max-w-md text-sm leading-6 text-white/55">{mediaError}</p>
+          <button
+            className="mt-5 border border-white/20 px-4 py-2 text-[10px] font-bold uppercase tracking-[0.12em] text-white transition hover:border-white/60"
+            onClick={onMediaRetry}
+            type="button"
+          >
+            Retry preview
+          </button>
         </div>
       </div>
     );
@@ -1075,6 +1084,7 @@ export default function App() {
                 mediaLoading={mediaLoading}
                 mediaError={mediaError}
                 onMediaError={() => setMediaError("The completed video could not be loaded in the player. Try downloading it instead.")}
+                onMediaRetry={() => setMediaError(null)}
                 videoSource={videoSource}
               />
             </div>
