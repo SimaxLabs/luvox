@@ -787,24 +787,23 @@ export default function App() {
           )}
           </>
           ) : (
-            <div className="mt-6 border border-black/12 bg-[#e7e5dc] p-4 sm:p-5">
-              <div className="mb-5 flex items-start gap-3">
-                <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center bg-[#d9ff72] text-black"><Icon name="spark" /></div>
+            <>
+              <div className="mt-6 grid gap-5 sm:grid-cols-2">
                 <div>
-                  <h3 className="text-xs font-bold uppercase tracking-[0.12em]">h3.c on Apple Silicon</h3>
-                  <p className="mt-1 text-[11px] leading-4 text-stone-500">
-                    {appConfig?.localH3.configured
-                      ? "Backend configured. Runs one local job at a time and generates native video with audio."
-                      : "Set H3_BINARY and H3_MODEL_DIR on the backend. The h3.c binary, model snapshot, and FFmpeg are required."}
-                  </p>
-                </div>
-              </div>
-
-              <div className="grid gap-4 sm:grid-cols-2">
-                <div>
-                  <FieldLabel htmlFor="local-resolution">Canvas</FieldLabel>
+                  <FieldLabel htmlFor="local-model">Model</FieldLabel>
                   <select
-                    className="h-11 w-full border border-black/15 bg-[#faf9f3] px-3 text-xs outline-none focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
+                    className="h-12 w-full border border-black/15 bg-[#faf9f3] px-3 text-sm text-stone-700 outline-none"
+                    disabled
+                    id="local-model"
+                    value="minimax-h3-local"
+                  >
+                    <option value="minimax-h3-local">MiniMax H3 / h3.c</option>
+                  </select>
+                </div>
+                <div>
+                  <FieldLabel htmlFor="local-resolution">Resolution</FieldLabel>
+                  <select
+                    className="h-12 w-full border border-black/15 bg-[#faf9f3] px-3 text-sm outline-none transition focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
                     id="local-resolution"
                     onChange={(event) => setForm((current) => ({ ...current, localResolution: event.target.value }))}
                     value={form.localResolution}
@@ -814,10 +813,13 @@ export default function App() {
                     ))}
                   </select>
                 </div>
+              </div>
+
+              <div className="mt-6 grid gap-5 sm:grid-cols-[0.7fr_1.3fr]">
                 <div>
-                  <FieldLabel htmlFor="local-duration">Clip length</FieldLabel>
+                  <FieldLabel htmlFor="local-duration">Duration</FieldLabel>
                   <select
-                    className="h-11 w-full border border-black/15 bg-[#faf9f3] px-3 text-xs outline-none focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
+                    className="h-12 w-full border border-black/15 bg-[#faf9f3] px-3 text-sm outline-none transition focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
                     id="local-duration"
                     onChange={(event) => setForm((current) => ({ ...current, localFrames: Number(event.target.value) }))}
                     value={form.localFrames}
@@ -827,27 +829,29 @@ export default function App() {
                     ))}
                   </select>
                 </div>
+                <fieldset>
+                  <legend className="mb-2 text-[11px] font-bold uppercase tracking-[0.18em] text-stone-700">Quality</legend>
+                  <div className="grid grid-cols-3 gap-1.5">
+                    {LOCAL_H3_QUALITY_PRESETS.map((quality) => (
+                      <button
+                        aria-pressed={form.localQuality === quality.id}
+                        className={`h-12 border text-xs font-bold transition ${form.localQuality === quality.id ? "border-black bg-black text-[#d9ff72]" : "border-black/15 bg-[#faf9f3] hover:border-black/50"}`}
+                        key={quality.id}
+                        onClick={() => setForm((current) => ({ ...current, localQuality: quality.id }))}
+                        type="button"
+                      >
+                        {quality.label}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="mt-1.5 text-[10px] leading-4 text-stone-500">{selectedLocalQuality?.note}</p>
+                </fieldset>
               </div>
 
-              <div className="mt-4 grid gap-4 sm:grid-cols-2">
-                <div>
-                  <FieldLabel htmlFor="local-quality">Quality</FieldLabel>
-                  <select
-                    className="h-11 w-full border border-black/15 bg-[#faf9f3] px-3 text-xs outline-none focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
-                    id="local-quality"
-                    onChange={(event) => setForm((current) => ({ ...current, localQuality: event.target.value }))}
-                    value={form.localQuality}
-                  >
-                    {LOCAL_H3_QUALITY_PRESETS.map((quality) => (
-                      <option key={quality.id} value={quality.id}>{quality.label}</option>
-                    ))}
-                  </select>
-                  <p className="mt-1.5 text-[10px] leading-4 text-stone-500">{selectedLocalQuality?.note}</p>
-                </div>
-                <div>
-                  <FieldLabel htmlFor="local-seed">Seed</FieldLabel>
+              <div className="mt-6 sm:max-w-[calc(50%-0.625rem)]">
+                  <FieldLabel htmlFor="local-seed">Seed / variation</FieldLabel>
                   <input
-                    className="h-11 w-full border border-black/15 bg-[#faf9f3] px-3 font-mono text-xs outline-none focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
+                    className="h-12 w-full border border-black/15 bg-[#faf9f3] px-3 font-mono text-sm outline-none transition focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
                     id="local-seed"
                     max={Number.MAX_SAFE_INTEGER}
                     min={0}
@@ -856,10 +860,12 @@ export default function App() {
                     type="number"
                     value={form.localSeed}
                   />
-                </div>
+                  <p className="mt-1.5 text-[10px] leading-4 text-stone-500">
+                    Keep the same seed and settings to reproduce a variation; change it for a different result.
+                  </p>
               </div>
 
-              <label className="mt-5 flex cursor-pointer items-center justify-between border-t border-black/10 pt-4">
+              <label className="mt-5 flex cursor-pointer items-center justify-between border-y border-black/10 py-4">
                 <span>
                   <span className="block text-xs font-bold uppercase tracking-[0.12em]">SSD streaming</span>
                   <span className="mt-1 block text-[11px] text-stone-500">Use much less unified memory at the cost of slower generation.</span>
@@ -874,7 +880,21 @@ export default function App() {
                   <span className={`absolute top-1 size-5 rounded-full transition ${form.localSsdStreaming ? "left-6 bg-[#d9ff72]" : "left-1 bg-white"}`} />
                 </span>
               </label>
-            </div>
+
+              <div className="mt-7 border border-black/12 bg-[#e7e5dc] p-4 sm:p-5">
+                <div className="flex items-start gap-3">
+                  <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center bg-[#d9ff72] text-black"><Icon name="spark" /></div>
+                  <div>
+                    <h3 className="text-xs font-bold uppercase tracking-[0.12em]">Local engine</h3>
+                    <p className="mt-1 text-[11px] leading-4 text-stone-500">
+                      {appConfig?.localH3.configured
+                        ? "h3.c is configured. Local jobs run one at a time and include native audio."
+                        : "Set H3_BINARY and H3_MODEL_DIR on the backend. The h3.c binary, model snapshot, and FFmpeg are required."}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </>
           )}
           </fieldset>
 
