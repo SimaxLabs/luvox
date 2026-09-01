@@ -9,7 +9,9 @@ import {
   getLocalVideoPath,
   getLocalVideoStatus,
   isLocalJobId,
+  isLocalH3Supported,
   LocalH3Error,
+  uploadLocalReferenceImage,
 } from "./localH3.js";
 import {
   generateVideo,
@@ -34,8 +36,30 @@ function getSessionApiKey(request: Request): string | undefined {
   return sessionApiKeySchema.parse(request.get("X-OpenRouter-Api-Key"));
 }
 
+function assertLoopbackRequest(request: Request): void {
+  const normalizeHostname = (value: string) => value.toLowerCase().replace(/^\[|\]$/g, "");
+  const allowedHostnames = new Set(["127.0.0.1", "::1", "localhost"]);
+  const hostname = normalizeHostname(request.hostname);
+  const origin = request.get("Origin");
+  let originHostname: string | undefined;
+  if (origin) {
+    try {
+      originHostname = normalizeHostname(new URL(origin).hostname);
+    } catch {
+      originHostname = "";
+    }
+  }
+  if (!allowedHostnames.has(hostname) || (originHostname !== undefined && !allowedHostnames.has(originHostname))) {
+    throw new LocalH3Error(
+      "Local h3.c operations accept requests only from a loopback origin.",
+      403,
+      "local_request_forbidden",
+      false,
+    );
+  }
+}
+
 app.disable("x-powered-by");
-app.use(express.json({ limit: "100kb" }));
 
 app.get("/api/health", (_request, response) => {
   response.json({ ok: true });
@@ -44,7 +68,7 @@ app.get("/api/health", (_request, response) => {
 app.get("/api/config", (_request, response) => {
   response.json({
     localH3: {
-      supported: process.platform === "darwin" && process.arch === "arm64",
+      supported: isLocalH3Supported(),
       configured: Boolean(
         process.env.H3_BINARY?.trim() && process.env.H3_MODEL_DIR?.trim(),
       ),
@@ -53,10 +77,39 @@ app.get("/api/config", (_request, response) => {
 });
 
 app.post(
+  "/api/local/reference-image",
+  express.raw({
+    type: ["image/png", "image/jpeg", "image/webp", "application/octet-stream"],
+    limit: "25mb",
+  }),
+  async (request: Request, response: Response, next: NextFunction) => {
+    try {
+      assertLoopbackRequest(request);
+      if (!Buffer.isBuffer(request.body)) {
+        throw new LocalH3Error(
+          "Send the reference image as the request body.",
+          415,
+          "local_reference_error",
+          false,
+        );
+      }
+      const result = await uploadLocalReferenceImage(request.body);
+      response.setHeader("Cache-Control", "private, no-store");
+      response.status(201).json(result);
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+app.use(express.json({ limit: "100kb" }));
+
+app.post(
   "/api/video/generate",
   async (request: Request, response: Response, next: NextFunction) => {
     try {
       const input = validateGenerateVideoInput(request.body);
+      if (input.provider === "local") assertLoopbackRequest(request);
       const result =
         input.provider === "local"
           ? await generateLocalVideo(input)

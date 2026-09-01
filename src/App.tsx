@@ -1,4 +1,4 @@
-import { type FormEvent, type ReactNode, useEffect, useRef, useState } from "react";
+import { type ChangeEvent, type FormEvent, type ReactNode, useEffect, useRef, useState } from "react";
 import {
   DEFAULT_MODEL_ID,
   getVideoModel,
@@ -17,6 +17,7 @@ import {
   getAppConfig,
   getVideoContent,
   getVideoStatus,
+  uploadLocalReferenceImage,
   type GenerationStatus,
   type AppConfig,
   type VideoJob,
@@ -36,6 +37,8 @@ interface FormState {
   localFrames: number;
   localQuality: string;
   localSeed: number;
+  localFirstFramePath: string;
+  localLastFramePath: string;
   localSsdStreaming: boolean;
 }
 
@@ -114,6 +117,8 @@ function initialForm(model: VideoModelConfig): FormState {
     localFrames: 22,
     localQuality: "balanced",
     localSeed: 42,
+    localFirstFramePath: "",
+    localLastFramePath: "",
     localSsdStreaming: false,
   };
 }
@@ -319,7 +324,11 @@ export default function App() {
   const [sessionApiKey, setSessionApiKey] = useState("");
   const [temporaryVideoUrl, setTemporaryVideoUrl] = useState<string | null>(null);
   const [appConfig, setAppConfig] = useState<AppConfig | null>(null);
+  const [uploadingReference, setUploadingReference] = useState<"first" | "last" | null>(null);
+  const [referenceUploadStatus, setReferenceUploadStatus] = useState("");
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const firstFramePicker = useRef<HTMLInputElement>(null);
+  const lastFramePicker = useRef<HTMLInputElement>(null);
 
   const selectedModel = getVideoModel(form.model) || defaultModel;
   const selectedLocalQuality = getLocalH3QualityPreset(form.localQuality);
@@ -453,6 +462,43 @@ export default function App() {
     setForm((current) => ({ ...initialForm(model), prompt: current.prompt }));
   };
 
+  const selectLocalReference = async (
+    event: ChangeEvent<HTMLInputElement>,
+    position: "first" | "last",
+  ) => {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = "";
+    if (!file) return;
+
+    const extension = file.name.split(".").pop()?.toLowerCase();
+    const supportedType = ["image/png", "image/jpeg", "image/webp"].includes(file.type);
+    const supportedExtension = Boolean(extension && ["png", "jpg", "jpeg", "webp"].includes(extension));
+    if (!supportedType && !supportedExtension) {
+      setError("Reference images must be PNG, JPEG, or WebP files.");
+      return;
+    }
+    if (file.size < 1 || file.size > 25 * 1024 * 1024) {
+      setError("Reference images must be non-empty and no larger than 25 MB.");
+      return;
+    }
+
+    setUploadingReference(position);
+    setReferenceUploadStatus(`Uploading ${position} frame image.`);
+    setError(null);
+    try {
+      const result = await uploadLocalReferenceImage(file);
+      setForm((current) => position === "first"
+        ? { ...current, localFirstFramePath: result.path }
+        : { ...current, localLastFramePath: result.path });
+      setReferenceUploadStatus(`${position === "first" ? "First" : "Last"} frame image uploaded.`);
+    } catch (uploadError) {
+      setReferenceUploadStatus(`${position === "first" ? "First" : "Last"} frame image upload failed.`);
+      setError(messageFrom(uploadError));
+    } finally {
+      setUploadingReference(null);
+    }
+  };
+
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     setSubmitting(true);
@@ -471,6 +517,8 @@ export default function App() {
             frames: form.localFrames,
             quality: form.localQuality,
             seed: form.localSeed,
+            firstFramePath: form.localFirstFramePath || undefined,
+            lastFramePath: form.localLastFramePath || undefined,
             ssdStreaming: form.localSsdStreaming,
           })
         : await generateVideo(
@@ -597,7 +645,7 @@ export default function App() {
               <button
                 aria-pressed={form.provider === provider}
                 className={`h-12 text-xs font-bold uppercase tracking-[0.12em] transition disabled:cursor-not-allowed disabled:opacity-40 ${form.provider === provider ? "bg-black text-[#d9ff72]" : "text-stone-500 hover:bg-white/60 hover:text-black"}`}
-                disabled={submitting || isActive || (provider === "local" && appConfig?.localH3.supported === false)}
+                disabled={submitting || isActive || uploadingReference !== null || (provider === "local" && appConfig?.localH3.supported === false)}
                 key={provider}
                 onClick={() => setForm((current) => ({ ...current, provider }))}
                 type="button"
@@ -608,7 +656,7 @@ export default function App() {
           </div>
           {appConfig?.localH3.supported === false && (
             <p className="-mt-5 mb-7 text-[11px] leading-4 text-stone-500">
-              Local h3.c requires running this app directly on macOS with Apple Silicon; it is unavailable in Docker.
+              Local h3.c requires macOS on Apple Silicon and a loopback-only server; it is unavailable in Docker or with a public bind address.
             </p>
           )}
 
@@ -649,7 +697,7 @@ export default function App() {
           </div>
           )}
 
-          <fieldset disabled={submitting || isActive}>
+          <fieldset disabled={submitting || isActive || uploadingReference !== null}>
             <div>
               <FieldLabel htmlFor="prompt">Prompt</FieldLabel>
               <div className="relative">
@@ -848,6 +896,89 @@ export default function App() {
                 </fieldset>
               </div>
 
+              <div className="mt-7 border border-black/12 bg-[#e7e5dc] p-4 sm:p-5">
+                <div className="mb-4 flex items-start gap-3">
+                  <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center bg-white/70"><Icon name="image" /></div>
+                  <div>
+                    <h3 className="text-xs font-bold uppercase tracking-[0.12em]">Reference frames</h3>
+                    <p className="mt-1 text-[11px] leading-4 text-stone-500">
+                      Enter absolute paths from this Mac, or browse to upload PNG, JPEG, or WebP images up to 25 MB and fill server-owned paths automatically.
+                    </p>
+                    <p aria-live="polite" className="sr-only" role="status">
+                      {referenceUploadStatus}
+                    </p>
+                  </div>
+                </div>
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div>
+                    <FieldLabel htmlFor="local-first-frame-path" optional>First frame path</FieldLabel>
+                    <div className="flex gap-2">
+                      <input
+                        className="h-11 min-w-0 flex-1 border border-black/15 bg-[#faf9f3] px-3 font-mono text-xs outline-none transition placeholder:text-stone-400 focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
+                        id="local-first-frame-path"
+                        onChange={(event) => setForm((current) => ({ ...current, localFirstFramePath: event.target.value }))}
+                        placeholder="/Users/.../opening.png"
+                        spellCheck={false}
+                        type="text"
+                        value={form.localFirstFramePath}
+                      />
+                      <button
+                        aria-label={uploadingReference === "first" ? "Uploading first frame image" : "Browse for first frame image"}
+                        className="border border-black/15 px-3 text-[10px] font-bold uppercase tracking-[0.12em] hover:border-black disabled:cursor-wait disabled:opacity-45"
+                        disabled={uploadingReference !== null}
+                        onClick={() => firstFramePicker.current?.click()}
+                        type="button"
+                      >
+                        {uploadingReference === "first" ? "Uploading" : "Browse"}
+                      </button>
+                      <input
+                        accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp"
+                        aria-hidden="true"
+                        className="sr-only"
+                        disabled={uploadingReference !== null}
+                        onChange={(event) => void selectLocalReference(event, "first")}
+                        ref={firstFramePicker}
+                        tabIndex={-1}
+                        type="file"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <FieldLabel htmlFor="local-last-frame-path" optional>Last frame path</FieldLabel>
+                    <div className="flex gap-2">
+                      <input
+                        className="h-11 min-w-0 flex-1 border border-black/15 bg-[#faf9f3] px-3 font-mono text-xs outline-none transition placeholder:text-stone-400 focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
+                        id="local-last-frame-path"
+                        onChange={(event) => setForm((current) => ({ ...current, localLastFramePath: event.target.value }))}
+                        placeholder="/Users/.../closing.png"
+                        spellCheck={false}
+                        type="text"
+                        value={form.localLastFramePath}
+                      />
+                      <button
+                        aria-label={uploadingReference === "last" ? "Uploading last frame image" : "Browse for last frame image"}
+                        className="border border-black/15 px-3 text-[10px] font-bold uppercase tracking-[0.12em] hover:border-black disabled:cursor-wait disabled:opacity-45"
+                        disabled={uploadingReference !== null}
+                        onClick={() => lastFramePicker.current?.click()}
+                        type="button"
+                      >
+                        {uploadingReference === "last" ? "Uploading" : "Browse"}
+                      </button>
+                      <input
+                        accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp"
+                        aria-hidden="true"
+                        className="sr-only"
+                        disabled={uploadingReference !== null}
+                        onChange={(event) => void selectLocalReference(event, "last")}
+                        ref={lastFramePicker}
+                        tabIndex={-1}
+                        type="file"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+
               <div className="mt-6 sm:max-w-[calc(50%-0.625rem)]">
                   <FieldLabel htmlFor="local-seed">Seed / variation</FieldLabel>
                   <input
@@ -907,7 +1038,7 @@ export default function App() {
           <div className="mt-7 flex gap-3">
             <button
               className="group flex h-14 flex-1 items-center justify-between bg-black px-5 font-display text-sm uppercase tracking-[0.02em] text-white transition hover:bg-[#242722] disabled:cursor-not-allowed disabled:opacity-45"
-              disabled={submitting || isActive || !form.prompt.trim()}
+              disabled={submitting || isActive || uploadingReference !== null || !form.prompt.trim()}
               type="submit"
             >
               <span>{submitting ? "Submitting..." : isActive ? "Generation active" : form.provider === "local" ? "Generate locally" : "Generate video"}</span>

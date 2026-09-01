@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { access, mkdir, rename, rm, stat } from "node:fs/promises";
+import { access, lstat, mkdir, open, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   getLocalH3QualityPreset,
@@ -15,6 +15,10 @@ const MAX_DIAGNOSTIC_CHARS = 16_000;
 const MAX_PROGRESS_CARRY_CHARS = 4_096;
 const MAX_QUEUED_JOBS = 3;
 const MAX_RETAINED_JOBS = 20;
+const MAX_REFERENCE_IMAGE_BYTES = 25 * 1024 * 1024;
+const MAX_RETAINED_REFERENCE_IMAGES = 20;
+const REFERENCE_IMAGE_TTL_MS = 24 * 60 * 60_000;
+const REFERENCE_IMAGE_NAME = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(?:jpg|png|webp)$/;
 
 interface LocalH3Runtime {
   binary: string;
@@ -30,6 +34,8 @@ interface LocalJob {
   directory: string;
   temporaryOutput: string;
   output: string;
+  firstFrame?: string;
+  lastFrame?: string;
   status: "queued" | "processing" | "completed" | "failed";
   phase: string;
   progress: number;
@@ -55,6 +61,8 @@ const jobs = new Map<string, LocalJob>();
 const queue: string[] = [];
 let activeJobId: string | undefined;
 let activeChild: ChildProcess | undefined;
+let pendingJobReservations = 0;
+let referenceUploadTail: Promise<void> = Promise.resolve();
 
 process.once("exit", () => activeChild?.kill("SIGTERM"));
 
@@ -93,10 +101,27 @@ function jobTimeoutMs(): number {
   return minutes * 60_000;
 }
 
+export function isLocalH3Supported(): boolean {
+  const host = process.env.HOST?.trim() || "127.0.0.1";
+  return (
+    process.platform === "darwin" &&
+    process.arch === "arm64" &&
+    ["127.0.0.1", "::1"].includes(host)
+  );
+}
+
 async function resolveRuntime(): Promise<LocalH3Runtime> {
   if (process.platform !== "darwin" || process.arch !== "arm64") {
     throw new LocalH3Error(
       "Local h3.c generation requires macOS on Apple Silicon and is not available inside the Docker container.",
+      503,
+      "local_platform_error",
+      false,
+    );
+  }
+  if (!isLocalH3Supported()) {
+    throw new LocalH3Error(
+      "Local h3.c generation requires the server to bind only to 127.0.0.1 or ::1.",
       503,
       "local_platform_error",
       false,
@@ -180,6 +205,206 @@ async function resolveRuntime(): Promise<LocalH3Runtime> {
     );
   }
   return { binary, modelDirectory, runtimeDirectory, jobsDirectory };
+}
+
+function referenceImageExtension(data: Buffer): string | undefined {
+  if (
+    data.length >= 8 &&
+    data.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+  ) {
+    return ".png";
+  }
+  if (data.length >= 3 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff) {
+    return ".jpg";
+  }
+  if (
+    data.length >= 12 &&
+    data.toString("ascii", 0, 4) === "RIFF" &&
+    data.toString("ascii", 8, 12) === "WEBP"
+  ) {
+    return ".webp";
+  }
+  return undefined;
+}
+
+async function probeReferenceImage(filePath: string): Promise<void> {
+  const command = process.env.H3_FFMPEG?.trim() || "ffmpeg";
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(command, [
+      "-v",
+      "error",
+      "-nostdin",
+      "-i",
+      filePath,
+      "-frames:v",
+      "1",
+      "-f",
+      "null",
+      "-",
+    ], {
+      env: localProcessEnvironment(),
+      shell: false,
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+    let settled = false;
+    const finish = (error?: LocalH3Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (error) reject(error);
+      else resolve();
+    };
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      finish(new LocalH3Error(
+        "The reference image could not be decoded within 15 seconds.",
+        400,
+        "local_reference_error",
+        false,
+      ));
+    }, 15_000);
+    timeout.unref();
+
+    child.once("error", () => finish(new LocalH3Error(
+      "FFmpeg is required to validate local reference images.",
+      503,
+      "local_configuration_error",
+      false,
+    )));
+    child.once("close", (code) => {
+      if (code === 0) {
+        finish();
+        return;
+      }
+      finish(new LocalH3Error(
+        "Reference images must contain decodable PNG, JPEG, or WebP data.",
+        400,
+        "local_reference_error",
+        false,
+      ));
+    });
+  });
+}
+
+async function prepareReferenceDirectory(directory: string): Promise<void> {
+  await mkdir(directory, { recursive: true });
+  const directoryInfo = await lstat(directory);
+  if (!directoryInfo.isDirectory() || directoryInfo.isSymbolicLink()) {
+    throw new LocalH3Error(
+      "The local reference-image staging path must be a real directory.",
+      503,
+      "local_configuration_error",
+      false,
+    );
+  }
+
+  const entries = await readdir(directory, { withFileTypes: true });
+  const files = await Promise.all(entries
+    .filter((entry) => entry.isFile() && REFERENCE_IMAGE_NAME.test(entry.name))
+    .map(async (entry) => {
+      const filePath = path.join(directory, entry.name);
+      const info = await stat(filePath).catch(() => undefined);
+      return info ? { path: filePath, modifiedAt: info.mtimeMs } : undefined;
+    }));
+  const retained = files.filter((file): file is NonNullable<typeof file> => Boolean(file));
+  const cutoff = Date.now() - REFERENCE_IMAGE_TTL_MS;
+  const expired = retained.filter((file) => file.modifiedAt < cutoff);
+  await Promise.all(expired.map((file) => rm(file.path, { force: true })));
+  if (retained.length - expired.length >= MAX_RETAINED_REFERENCE_IMAGES) {
+    throw new LocalH3Error(
+      "The local reference-image staging area is full. Remove unused images or wait for staged images to expire.",
+      429,
+      "local_reference_limit",
+      true,
+    );
+  }
+}
+
+async function storeLocalReferenceImage(data: Buffer): Promise<{ path: string }> {
+  if (data.length < 1) {
+    throw new LocalH3Error("Select a non-empty reference image.", 400, "local_reference_error", false);
+  }
+  if (data.length > MAX_REFERENCE_IMAGE_BYTES) {
+    throw new LocalH3Error(
+      "Reference images must be 25 MB or smaller.",
+      413,
+      "local_reference_error",
+      false,
+    );
+  }
+
+  const extension = referenceImageExtension(data);
+  if (!extension) {
+    throw new LocalH3Error(
+      "Reference images must be PNG, JPEG, or WebP files.",
+      415,
+      "local_reference_error",
+      false,
+    );
+  }
+
+  const runtime = await resolveRuntime();
+  const directory = path.join(runtime.jobsDirectory, "reference-images");
+  await prepareReferenceDirectory(directory);
+  const output = path.join(directory, `${randomUUID()}${extension}`);
+  await writeFile(output, data, { flag: "wx", mode: 0o600 });
+  try {
+    await probeReferenceImage(output);
+    return { path: output };
+  } catch (error) {
+    await rm(output, { force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
+export function uploadLocalReferenceImage(data: Buffer): Promise<{ path: string }> {
+  const operation = referenceUploadTail.then(() => storeLocalReferenceImage(data));
+  referenceUploadTail = operation.then(() => undefined, () => undefined);
+  return operation;
+}
+
+async function copyReferenceImage(source: string, directory: string, name: string): Promise<string> {
+  let data: Buffer;
+  try {
+    const handle = await open(source, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+    try {
+      const file = await handle.stat();
+      if (!file.isFile() || file.size < 1 || file.size > MAX_REFERENCE_IMAGE_BYTES) {
+        throw new Error("invalid reference image size");
+      }
+      data = Buffer.alloc(file.size);
+      let offset = 0;
+      while (offset < data.length) {
+        const { bytesRead } = await handle.read(data, offset, data.length - offset, offset);
+        if (bytesRead < 1) throw new Error("reference image changed while reading");
+        offset += bytesRead;
+      }
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    throw new LocalH3Error(
+      "The reference image path must point to a readable file no larger than 25 MB.",
+      400,
+      "local_reference_error",
+      false,
+    );
+  }
+
+  const extension = referenceImageExtension(data);
+  if (!extension) {
+    throw new LocalH3Error(
+      "Reference images must contain valid PNG, JPEG, or WebP data.",
+      400,
+      "local_reference_error",
+      false,
+    );
+  }
+
+  const output = path.join(directory, `${name}${extension}`);
+  await writeFile(output, data, { flag: "wx", mode: 0o600 });
+  await probeReferenceImage(output);
+  return output;
 }
 
 function getJob(id: string): LocalJob {
@@ -277,6 +502,8 @@ async function executeJob(job: LocalJob): Promise<void> {
   ];
 
   if (job.input.ssdStreaming) args.push("--ssd-streaming");
+  if (job.firstFrame) args.push("--first-frame", job.firstFrame);
+  if (job.lastFrame) args.push("--last-frame", job.lastFrame);
   args.push("-o", job.temporaryOutput);
 
   job.status = "processing";
@@ -380,7 +607,20 @@ export async function generateLocalVideo(
   input: LocalGenerateVideoInput,
 ): Promise<VideoStatusResponse> {
   const runtime = await resolveRuntime();
-  if (queue.length >= MAX_QUEUED_JOBS) {
+  const firstFrameSource = input.firstFramePath;
+  const lastFrameSource = input.lastFramePath;
+  if (
+    (firstFrameSource && !path.isAbsolute(firstFrameSource)) ||
+    (lastFrameSource && !path.isAbsolute(lastFrameSource))
+  ) {
+    throw new LocalH3Error(
+      "Reference image paths must be absolute.",
+      400,
+      "local_reference_error",
+      false,
+    );
+  }
+  if (queue.length + pendingJobReservations >= MAX_QUEUED_JOBS) {
     throw new LocalH3Error(
       "The local h3.c queue is full. Wait for an existing generation to finish.",
       429,
@@ -388,40 +628,67 @@ export async function generateLocalVideo(
       true,
     );
   }
+  pendingJobReservations += 1;
 
-  const terminalJobs = [...jobs.values()]
-    .filter((job) => job.status === "completed" || job.status === "failed")
-    .sort((left, right) => left.createdAt - right.createdAt);
-  while (jobs.size >= MAX_RETAINED_JOBS && terminalJobs.length > 0) {
-    const expired = terminalJobs.shift();
-    if (!expired) break;
-    jobs.delete(expired.id);
-    await rm(expired.directory, { recursive: true, force: true }).catch(() => undefined);
+  try {
+    const terminalJobs = [...jobs.values()]
+      .filter((job) => job.status === "completed" || job.status === "failed")
+      .sort((left, right) => left.createdAt - right.createdAt);
+    while (jobs.size >= MAX_RETAINED_JOBS && terminalJobs.length > 0) {
+      const expired = terminalJobs.shift();
+      if (!expired) break;
+      jobs.delete(expired.id);
+      await rm(expired.directory, { recursive: true, force: true }).catch(() => undefined);
+    }
+
+    const id = `${LOCAL_JOB_PREFIX}${randomUUID()}`;
+    const directory = path.join(runtime.jobsDirectory, id);
+    await mkdir(directory, { recursive: false });
+
+    let firstFrame: string | undefined;
+    let lastFrame: string | undefined;
+    try {
+      if (firstFrameSource) {
+        firstFrame = await copyReferenceImage(firstFrameSource, directory, "first-frame");
+      }
+      if (lastFrameSource) {
+        lastFrame = await copyReferenceImage(lastFrameSource, directory, "last-frame");
+      }
+    } catch (error) {
+      await rm(directory, { recursive: true, force: true });
+      if (error instanceof LocalH3Error) throw error;
+      throw new LocalH3Error(
+        "The server could not copy a reference image into the local job.",
+        500,
+        "local_storage_error",
+        true,
+      );
+    }
+
+    const job: LocalJob = {
+      id,
+      input,
+      runtime,
+      directory,
+      temporaryOutput: path.join(directory, "result.tmp.mp4"),
+      output: path.join(directory, "result.mp4"),
+      firstFrame,
+      lastFrame,
+      status: "queued",
+      phase: activeJobId ? "Waiting for local GPU" : "Queued",
+      progress: 0,
+      diagnostics: "",
+      progressCarry: "",
+      createdAt: Date.now(),
+    };
+
+    jobs.set(id, job);
+    queue.push(id);
+    startNextJob();
+    return toResponse(job);
+  } finally {
+    pendingJobReservations -= 1;
   }
-
-  const id = `${LOCAL_JOB_PREFIX}${randomUUID()}`;
-  const directory = path.join(runtime.jobsDirectory, id);
-  await mkdir(directory, { recursive: false });
-
-  const job: LocalJob = {
-    id,
-    input,
-    runtime,
-    directory,
-    temporaryOutput: path.join(directory, "result.tmp.mp4"),
-    output: path.join(directory, "result.mp4"),
-    status: "queued",
-    phase: activeJobId ? "Waiting for local GPU" : "Queued",
-    progress: 0,
-    diagnostics: "",
-    progressCarry: "",
-    createdAt: Date.now(),
-  };
-
-  jobs.set(id, job);
-  queue.push(id);
-  startNextJob();
-  return toResponse(job);
 }
 
 export function getLocalVideoStatus(id: string): VideoStatusResponse {

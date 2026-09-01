@@ -31,6 +31,8 @@ export interface LocalGenerateVideoPayload {
   frames: number;
   quality: string;
   seed: number;
+  firstFramePath?: string;
+  lastFramePath?: string;
   ssdStreaming: boolean;
 }
 
@@ -119,6 +121,24 @@ export function generateVideo(
 
 export function getAppConfig(): Promise<AppConfig> {
   return request<AppConfig>("/api/config");
+}
+
+export function uploadLocalReferenceImage(file: File): Promise<{ path: string }> {
+  const extension = file.name.split(".").pop()?.toLowerCase();
+  const contentType = ["image/png", "image/jpeg", "image/webp"].includes(file.type)
+    ? file.type
+    : extension === "png"
+      ? "image/png"
+      : extension === "jpg" || extension === "jpeg"
+        ? "image/jpeg"
+        : extension === "webp"
+          ? "image/webp"
+          : "application/octet-stream";
+  return request<{ path: string }>("/api/local/reference-image", {
+    method: "POST",
+    headers: { "Content-Type": contentType },
+    body: file,
+  });
 }
 
 export function getVideoStatus(

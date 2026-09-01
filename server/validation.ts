@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { isIP } from "node:net";
+import path from "node:path";
 import {
   getLocalH3QualityPreset,
   getLocalH3Resolution,
@@ -59,6 +60,20 @@ const optionalPublicHttpsUrl = z
   .optional()
   .transform((value) => value || undefined);
 
+const optionalAbsolutePath = z
+  .union([
+    z
+      .string()
+      .trim()
+      .max(4_096, "The reference image path is too long.")
+      .refine((value) => path.isAbsolute(value), {
+        message: "Reference image paths must be absolute.",
+      }),
+    z.literal(""),
+  ])
+  .optional()
+  .transform((value) => value || undefined);
+
 const baseGenerateVideoSchema = z
   .object({
     provider: z.literal("openrouter"),
@@ -87,6 +102,8 @@ const localGenerateVideoSchema = z
       .int("Seed must be a whole number.")
       .min(0, "Seed cannot be negative.")
       .max(Number.MAX_SAFE_INTEGER, "Seed is too large."),
+    firstFramePath: optionalAbsolutePath,
+    lastFramePath: optionalAbsolutePath,
     ssdStreaming: z.boolean(),
   })
   .strict();

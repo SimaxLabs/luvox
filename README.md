@@ -51,9 +51,11 @@ H3_JOBS_DIR=/absolute/path/to/h3-jobs
 H3_TIMEOUT_MINUTES=120
 ```
 
-Run the app directly with `npm run dev`, or use `npm run build && NODE_ENV=production npm start`. Local mode is unavailable in Docker because the Linux container cannot access macOS Metal.
+Run the app directly with `npm run dev`, or use `npm run build && NODE_ENV=production npm start`. Local mode is unavailable in Docker because the Linux container cannot access macOS Metal. Because local generation intentionally accepts host filesystem paths, the server must remain bound to `127.0.0.1` or `::1`; local mode is disabled for public bind addresses.
 
-The backend runs one generation at a time and accepts at most three waiting jobs. The UI intentionally exposes only canvas, clip length, quality, seed, and optional SSD streaming presets. Outputs remain in `H3_JOBS_DIR`; local job status is held in server memory and is lost on restart.
+The backend runs one generation at a time and accepts at most three waiting jobs. The UI exposes resolution, duration, quality, seed, first/last reference frames, and optional SSD streaming presets. Outputs remain in `H3_JOBS_DIR`; local job status is held in server memory and is lost on restart.
+
+Local first/last frames can be entered as absolute paths to readable PNG, JPEG, or WebP files up to 25 MB. The Browse buttons upload a selected image to `H3_JOBS_DIR/reference-images` and fill that server-owned absolute path into the form. Browsers do not reveal the selected file's original absolute path. Each submitted job validates and copies its reference images into its own job directory before entering the queue. Staged uploads expire after 24 hours; the staging area accepts up to 20 unexpired images and never deletes a newer selection to admit another upload.
 
 The `h3.c` engine is MIT licensed, but MiniMax H3 weights use a separate community license with territorial and hosting restrictions. Review the model license before downloading, running, or distributing weights or outputs.
 
@@ -74,6 +76,7 @@ NODE_ENV=production npm start
 ## API
 
 - `POST /api/video/generate` validates model-specific controls and submits a generation.
+- `POST /api/local/reference-image` stores a browsed local reference image and returns its server-owned absolute path.
 - `GET /api/video/status/:id` returns the normalized `queued`, `processing`, `completed`, or `failed` state for either provider.
 - `GET /api/video/content/:id` securely proxies OpenRouter content or serves a completed local MP4 with range support.
 
