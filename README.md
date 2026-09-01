@@ -1,12 +1,14 @@
 # Motion Lab
 
-A local React interface for asynchronous video generation through OpenRouter, configured by default for `minimax/hailuo-3`. The API key is read only by the Express server and is never included in the browser bundle or API responses.
+A local React interface for MiniMax H3 video generation through OpenRouter or a host-installed h3.c engine. The environment API key remains server-only; an optional UI key exists only in volatile tab memory.
+
+The same UI can run MiniMax H3 locally through [antirez/h3.c](https://github.com/antirez/h3.c) on a compatible Mac.
 
 ## Docker
 
 ```bash
 cp .env.example .env
-# Set OPENROUTER_API_KEY in .env
+# Set OPENROUTER_API_KEY for OpenRouter mode, or configure local mode below
 docker compose up --build
 ```
 
@@ -25,7 +27,35 @@ npm run dev
 
 Vite runs at [http://localhost:3000](http://localhost:3000) and proxies `/api` to Express on port `3001`.
 
-Active generation IDs are kept in browser storage so polling resumes after a reload. Stopping an active watch does not cancel provider work because OpenRouter does not currently document a cancellation endpoint.
+Active generation IDs are kept in browser storage so polling resumes after a reload. A temporary OpenRouter key must be re-entered after reload. Stopping a watch does not cancel paid OpenRouter work or a running local h3.c process.
+
+## Local h3.c generation
+
+Local mode executes the one-shot `h3` CLI and does not use an API key. It requires:
+
+- macOS on Apple Silicon
+- A built `h3.c` checkout containing `h3` and `h3_shaders.metal`
+- The MiniMax H3 Hugging Face model snapshot
+- `ffmpeg` and `ffprobe` on `PATH`, with `libx264` available
+
+Build and verify `h3.c` following its upstream README, then add absolute paths to this app's `.env`:
+
+```dotenv
+H3_BINARY=/absolute/path/to/h3.c/h3
+H3_MODEL_DIR=/absolute/path/to/MiniMax-H3
+# Optional; defaults beside H3_BINARY.
+H3_RUNTIME_DIR=/absolute/path/to/h3.c
+# Optional; defaults to ./.h3-jobs.
+H3_JOBS_DIR=/absolute/path/to/h3-jobs
+# Optional local child-process timeout.
+H3_TIMEOUT_MINUTES=120
+```
+
+Run the app directly with `npm run dev`, or use `npm run build && NODE_ENV=production npm start`. Local mode is unavailable in Docker because the Linux container cannot access macOS Metal.
+
+The backend runs one generation at a time and accepts at most three waiting jobs. The UI intentionally exposes only canvas, clip length, quality, seed, and optional SSD streaming presets. Outputs remain in `H3_JOBS_DIR`; local job status is held in server memory and is lost on restart.
+
+The `h3.c` engine is MIT licensed, but MiniMax H3 weights use a separate community license with territorial and hosting restrictions. Review the model license before downloading, running, or distributing weights or outputs.
 
 ## API key selection
 
@@ -44,8 +74,8 @@ NODE_ENV=production npm start
 ## API
 
 - `POST /api/video/generate` validates model-specific controls and submits a generation.
-- `GET /api/video/status/:id` returns the normalized `queued`, `processing`, `completed`, or `failed` state.
-- `GET /api/video/content/:id` securely proxies the authenticated OpenRouter video stream for preview and download.
+- `GET /api/video/status/:id` returns the normalized `queued`, `processing`, `completed`, or `failed` state for either provider.
+- `GET /api/video/content/:id` securely proxies OpenRouter content or serves a completed local MP4 with range support.
 
 Model capabilities are defined once in `shared/videoModels.ts` and used by both the UI and server validation. Add future models there only after checking their records from OpenRouter's video model endpoint.
 

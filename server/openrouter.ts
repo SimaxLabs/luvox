@@ -1,4 +1,8 @@
 import type { GenerateVideoInput } from "./validation.js";
+import type {
+  GenerationStatus,
+  VideoStatusResponse,
+} from "./videoTypes.js";
 
 const OPENROUTER_API_BASE = "https://openrouter.ai/api/v1";
 const JSON_REQUEST_TIMEOUT_MS = 30_000;
@@ -14,7 +18,6 @@ const OPENROUTER_STATUSES = [
 ] as const;
 
 type OpenRouterStatus = (typeof OPENROUTER_STATUSES)[number];
-export type GenerationStatus = "queued" | "processing" | "completed" | "failed";
 
 interface OpenRouterVideoResponse {
   id: string;
@@ -27,15 +30,6 @@ interface OpenRouterVideoResponse {
     cost?: number | null;
     is_byok?: boolean;
   };
-}
-
-export interface VideoStatusResponse {
-  id: string;
-  status: GenerationStatus;
-  error?: string;
-  videoUrl?: string;
-  downloadUrl?: string;
-  cost?: number;
 }
 
 export class OpenRouterError extends Error {
@@ -243,6 +237,7 @@ function publicStatus(response: OpenRouterVideoResponse): VideoStatusResponse {
 
   const result: VideoStatusResponse = {
     id: response.id,
+    provider: "openrouter",
     status,
   };
 

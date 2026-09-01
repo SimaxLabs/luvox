@@ -5,6 +5,13 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import { z, ZodError } from "zod";
 import {
+  generateLocalVideo,
+  getLocalVideoPath,
+  getLocalVideoStatus,
+  isLocalJobId,
+  LocalH3Error,
+} from "./localH3.js";
+import {
   generateVideo,
   getVideoContent,
   getVideoStatus,
@@ -34,12 +41,26 @@ app.get("/api/health", (_request, response) => {
   response.json({ ok: true });
 });
 
+app.get("/api/config", (_request, response) => {
+  response.json({
+    localH3: {
+      supported: process.platform === "darwin" && process.arch === "arm64",
+      configured: Boolean(
+        process.env.H3_BINARY?.trim() && process.env.H3_MODEL_DIR?.trim(),
+      ),
+    },
+  });
+});
+
 app.post(
   "/api/video/generate",
   async (request: Request, response: Response, next: NextFunction) => {
     try {
       const input = validateGenerateVideoInput(request.body);
-      const result = await generateVideo(input, getSessionApiKey(request));
+      const result =
+        input.provider === "local"
+          ? await generateLocalVideo(input)
+          : await generateVideo(input, getSessionApiKey(request));
       response.status(202).json(result);
     } catch (error) {
       next(error);
@@ -52,7 +73,9 @@ app.get(
   async (request: Request, response: Response, next: NextFunction) => {
     try {
       const id = validateJobId(request.params.id);
-      const result = await getVideoStatus(id, getSessionApiKey(request));
+      const result = isLocalJobId(id)
+        ? getLocalVideoStatus(id)
+        : await getVideoStatus(id, getSessionApiKey(request));
       response.json(result);
     } catch (error) {
       next(error);
@@ -60,16 +83,50 @@ app.get(
   },
 );
 
-app.head("/api/video/content/:id", (_request, response) => {
-  response.setHeader("Allow", "GET");
-  response.status(405).end();
-});
+app.head(
+  "/api/video/content/:id",
+  async (request: Request, response: Response, next: NextFunction) => {
+    try {
+      const id = validateJobId(request.params.id);
+      if (!isLocalJobId(id)) {
+        response.setHeader("Allow", "GET");
+        response.status(405).end();
+        return;
+      }
+
+      const videoPath = await getLocalVideoPath(id);
+      response.setHeader("Cache-Control", "private, no-store");
+      response.setHeader("Content-Disposition", "inline");
+      response.sendFile(videoPath, (error) => {
+        if (error) next(error);
+      });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
 
 app.get(
   "/api/video/content/:id",
   async (request: Request, response: Response, next: NextFunction) => {
     try {
       const id = validateJobId(request.params.id);
+
+      if (isLocalJobId(id)) {
+        const videoPath = await getLocalVideoPath(id);
+        response.setHeader("Cache-Control", "private, no-store");
+        response.setHeader(
+          "Content-Disposition",
+          request.query.download === "1"
+            ? "attachment; filename=\"h3-local-video.mp4\""
+            : "inline",
+        );
+        response.sendFile(videoPath, (error) => {
+          if (error) next(error);
+        });
+        return;
+      }
+
       const upstream = await getVideoContent(
         id,
         request.headers.range,
@@ -137,7 +194,12 @@ app.use((request, response) => {
 });
 
 app.use(
-  (error: unknown, _request: Request, response: Response, _next: NextFunction) => {
+  (error: unknown, _request: Request, response: Response, next: NextFunction) => {
+    if (response.headersSent) {
+      next(error);
+      return;
+    }
+
     if (error instanceof ZodError) {
       response.status(400).json({
         error: {
@@ -152,6 +214,17 @@ app.use(
 
     if (error instanceof OpenRouterError) {
       if (error.retryAfter) response.setHeader("Retry-After", error.retryAfter);
+      response.status(error.status).json({
+        error: {
+          type: error.type,
+          message: error.message,
+          retryable: error.retryable,
+        },
+      });
+      return;
+    }
+
+    if (error instanceof LocalH3Error) {
       response.status(error.status).json({
         error: {
           type: error.type,
@@ -181,6 +254,15 @@ app.use(
       error.status >= 400 &&
       error.status < 500
     ) {
+      if (
+        "headers" in error &&
+        typeof error.headers === "object" &&
+        error.headers !== null
+      ) {
+        for (const [name, value] of Object.entries(error.headers)) {
+          if (typeof value === "string") response.setHeader(name, value);
+        }
+      }
       const message =
         error.status === 413
           ? "The request body is too large."

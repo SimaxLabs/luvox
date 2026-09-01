@@ -6,15 +6,24 @@ import {
   type VideoModelConfig,
 } from "../shared/videoModels";
 import {
+  getLocalH3QualityPreset,
+  LOCAL_H3_DURATIONS,
+  LOCAL_H3_QUALITY_PRESETS,
+  LOCAL_H3_RESOLUTIONS,
+} from "../shared/localH3";
+import {
   ApiError,
   generateVideo,
+  getAppConfig,
   getVideoContent,
   getVideoStatus,
   type GenerationStatus,
+  type AppConfig,
   type VideoJob,
 } from "./api";
 
 interface FormState {
+  provider: "openrouter" | "local";
   prompt: string;
   model: string;
   duration: number;
@@ -23,6 +32,11 @@ interface FormState {
   firstFrameUrl: string;
   lastFrameUrl: string;
   generateAudio: boolean;
+  localResolution: string;
+  localFrames: number;
+  localQuality: string;
+  localSeed: number;
+  localSsdStreaming: boolean;
 }
 
 interface DisplayJob extends VideoJob {
@@ -56,7 +70,30 @@ function loadStoredJob(): DisplayJob | null {
     ) {
       return null;
     }
-    return value as DisplayJob;
+    const status = value.status as GenerationStatus;
+    const provider =
+      "provider" in value && value.provider === "local" ? "local" : "openrouter";
+    const job: DisplayJob = {
+      id: value.id,
+      provider,
+      status,
+    };
+
+    if ("aspectRatio" in value && typeof value.aspectRatio === "string") {
+      job.aspectRatio = value.aspectRatio;
+    }
+    if ("error" in value && typeof value.error === "string") job.error = value.error;
+    if ("cost" in value && typeof value.cost === "number") job.cost = value.cost;
+    if ("phase" in value && typeof value.phase === "string") job.phase = value.phase;
+    if ("progress" in value && typeof value.progress === "number") {
+      job.progress = value.progress;
+    }
+    if (status === "completed") {
+      const id = encodeURIComponent(value.id);
+      job.videoUrl = `/api/video/content/${id}`;
+      job.downloadUrl = `/api/video/content/${id}?download=1`;
+    }
+    return job;
   } catch {
     return null;
   }
@@ -64,6 +101,7 @@ function loadStoredJob(): DisplayJob | null {
 
 function initialForm(model: VideoModelConfig): FormState {
   return {
+    provider: "openrouter",
     prompt: "",
     model: model.id,
     duration: model.defaultDuration,
@@ -72,6 +110,11 @@ function initialForm(model: VideoModelConfig): FormState {
     firstFrameUrl: "",
     lastFrameUrl: "",
     generateAudio: model.generateAudio.default,
+    localResolution: "512x512",
+    localFrames: 22,
+    localQuality: "balanced",
+    localSeed: 42,
+    localSsdStreaming: false,
   };
 }
 
@@ -213,8 +256,13 @@ function Preview({
             {job.status === "queued" ? "On the reel" : "Rendering motion"}
           </p>
           <p className="mt-2 font-mono text-[10px] uppercase tracking-[0.2em] text-white/45">
-            Automatic status checks are active
+            {job.phase || "Automatic status checks are active"}
           </p>
+          {typeof job.progress === "number" && (
+            <div className="mx-auto mt-4 h-1 w-40 overflow-hidden bg-white/10">
+              <div className="h-full bg-[#d9ff72] transition-[width]" style={{ width: `${job.progress}%` }} />
+            </div>
+          )}
         </div>
       </div>
     );
@@ -270,14 +318,21 @@ export default function App() {
   const [mediaLoading, setMediaLoading] = useState(false);
   const [sessionApiKey, setSessionApiKey] = useState("");
   const [temporaryVideoUrl, setTemporaryVideoUrl] = useState<string | null>(null);
+  const [appConfig, setAppConfig] = useState<AppConfig | null>(null);
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const selectedModel = getVideoModel(form.model) || defaultModel;
+  const selectedLocalQuality = getLocalH3QualityPreset(form.localQuality);
   const isActive = job?.status === "queued" || job?.status === "processing";
   const hasSessionApiKey = Boolean(sessionApiKey.trim());
-  const pollApiKey = sessionApiKey;
-  const videoSource = hasSessionApiKey ? temporaryVideoUrl || undefined : job?.videoUrl;
-  const downloadSource = hasSessionApiKey ? temporaryVideoUrl || undefined : job?.downloadUrl;
+  const usesSessionMedia = job?.provider !== "local" && hasSessionApiKey;
+  const pollApiKey = job?.provider === "local" ? "" : sessionApiKey;
+  const videoSource = usesSessionMedia ? temporaryVideoUrl || undefined : job?.videoUrl;
+  const downloadSource = usesSessionMedia ? temporaryVideoUrl || undefined : job?.downloadUrl;
+
+  useEffect(() => {
+    void getAppConfig().then(setAppConfig).catch(() => undefined);
+  }, []);
 
   useEffect(() => {
     if (!job || (job.status !== "queued" && job.status !== "processing")) return;
@@ -315,6 +370,13 @@ export default function App() {
         if (disposed || controller.signal.aborted) return;
 
         const apiError = pollError instanceof ApiError ? pollError : null;
+        if (job.provider === "local" && apiError?.status === 404) {
+          const message = apiError.message;
+          setJob((current) => current ? { ...current, status: "failed", error: message } : current);
+          setError(message);
+          return;
+        }
+
         consecutiveFailures += 1;
         const retryDelay = apiError?.retryAfterSeconds
           ? apiError.retryAfterSeconds * 1000
@@ -347,6 +409,7 @@ export default function App() {
 
     if (
       job?.status !== "completed" ||
+      job.provider === "local" ||
       !job.videoUrl ||
       !sessionApiKey.trim()
     ) {
@@ -400,22 +463,36 @@ export default function App() {
 
     try {
       const key = sessionApiKey.trim();
-      const nextJob = await generateVideo(
-        {
-          prompt: form.prompt,
-          model: form.model,
-          duration: form.duration,
-          aspectRatio: form.aspectRatio,
-          resolution: form.resolution || undefined,
-          firstFrameUrl: form.firstFrameUrl || undefined,
-          lastFrameUrl: form.lastFrameUrl || undefined,
-          generateAudio: selectedModel.generateAudio.supported ? form.generateAudio : undefined,
-        },
-        key || undefined,
-      );
+      const nextJob = form.provider === "local"
+        ? await generateVideo({
+            provider: "local",
+            prompt: form.prompt,
+            resolution: form.localResolution,
+            frames: form.localFrames,
+            quality: form.localQuality,
+            seed: form.localSeed,
+            ssdStreaming: form.localSsdStreaming,
+          })
+        : await generateVideo(
+            {
+              provider: "openrouter",
+              prompt: form.prompt,
+              model: form.model,
+              duration: form.duration,
+              aspectRatio: form.aspectRatio,
+              resolution: form.resolution || undefined,
+              firstFrameUrl: form.firstFrameUrl || undefined,
+              lastFrameUrl: form.lastFrameUrl || undefined,
+              generateAudio: selectedModel.generateAudio.supported ? form.generateAudio : undefined,
+            },
+            key || undefined,
+          );
       setJob({
         ...nextJob,
-        aspectRatio: form.aspectRatio,
+        aspectRatio:
+          form.provider === "local"
+            ? form.localResolution.replace("x", ":")
+            : form.aspectRatio,
       });
     } catch (submitError) {
       setError(messageFrom(submitError));
@@ -428,7 +505,9 @@ export default function App() {
     if (
       isActive &&
       !window.confirm(
-        "Stop watching this generation? OpenRouter does not provide a cancellation endpoint, so this will not stop provider work.",
+        job?.provider === "local"
+          ? "Stop watching this local generation? The h3.c process will continue running on this computer."
+          : "Stop watching this generation? OpenRouter does not provide a cancellation endpoint, so this will not stop provider work.",
       )
     ) {
       return;
@@ -480,13 +559,13 @@ export default function App() {
             </div>
             <div>
               <p className="font-display text-sm uppercase tracking-[-0.02em]">Motion Lab</p>
-              <p className="font-mono text-[8px] uppercase tracking-[0.2em] text-white/35">OpenRouter video studio</p>
+              <p className="font-mono text-[8px] uppercase tracking-[0.2em] text-white/35">Remote + local video studio</p>
             </div>
           </div>
           <div className="flex items-center gap-2 rounded-full border border-white/10 px-3 py-1.5 text-[9px] uppercase tracking-[0.15em] text-white/55">
             <Icon name="lock" className="size-3 text-[#d9ff72]" />
-            <span className="hidden sm:inline">{sessionApiKey.trim() ? "Session override active" : "API key secured"}</span>
-            <span className="sm:hidden">Secured</span>
+            <span className="hidden sm:inline">{form.provider === "local" ? "Local Metal" : sessionApiKey.trim() ? "Session override active" : "API key secured"}</span>
+            <span className="sm:hidden">{form.provider === "local" ? "Local" : "Secured"}</span>
           </div>
         </div>
       </header>
@@ -513,6 +592,27 @@ export default function App() {
             <span className="font-mono text-[9px] tracking-[0.15em] text-stone-400">01—05</span>
           </div>
 
+          <div className="mb-7 grid grid-cols-2 gap-1.5 bg-black/5 p-1.5" aria-label="Generation provider">
+            {(["openrouter", "local"] as const).map((provider) => (
+              <button
+                aria-pressed={form.provider === provider}
+                className={`h-12 text-xs font-bold uppercase tracking-[0.12em] transition disabled:cursor-not-allowed disabled:opacity-40 ${form.provider === provider ? "bg-black text-[#d9ff72]" : "text-stone-500 hover:bg-white/60 hover:text-black"}`}
+                disabled={submitting || isActive || (provider === "local" && appConfig?.localH3.supported === false)}
+                key={provider}
+                onClick={() => setForm((current) => ({ ...current, provider }))}
+                type="button"
+              >
+                {provider === "openrouter" ? "OpenRouter" : "Local h3.c"}
+              </button>
+            ))}
+          </div>
+          {appConfig?.localH3.supported === false && (
+            <p className="-mt-5 mb-7 text-[11px] leading-4 text-stone-500">
+              Local h3.c requires running this app directly on macOS with Apple Silicon; it is unavailable in Docker.
+            </p>
+          )}
+
+          {form.provider === "openrouter" && (
           <div className="mb-7 border border-black/12 bg-[#e7e5dc] p-4 sm:p-5">
             <div className="flex items-start gap-3">
               <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center bg-white/70"><Icon name="lock" /></div>
@@ -547,6 +647,7 @@ export default function App() {
               </div>
             </div>
           </div>
+          )}
 
           <fieldset disabled={submitting || isActive}>
             <div>
@@ -566,6 +667,8 @@ export default function App() {
               </div>
             </div>
 
+          {form.provider === "openrouter" ? (
+          <>
           <div className="mt-6 grid gap-5 sm:grid-cols-2">
             <div>
               <FieldLabel htmlFor="model">Model</FieldLabel>
@@ -682,6 +785,97 @@ export default function App() {
               </span>
             </label>
           )}
+          </>
+          ) : (
+            <div className="mt-6 border border-black/12 bg-[#e7e5dc] p-4 sm:p-5">
+              <div className="mb-5 flex items-start gap-3">
+                <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center bg-[#d9ff72] text-black"><Icon name="spark" /></div>
+                <div>
+                  <h3 className="text-xs font-bold uppercase tracking-[0.12em]">h3.c on Apple Silicon</h3>
+                  <p className="mt-1 text-[11px] leading-4 text-stone-500">
+                    {appConfig?.localH3.configured
+                      ? "Backend configured. Runs one local job at a time and generates native video with audio."
+                      : "Set H3_BINARY and H3_MODEL_DIR on the backend. The h3.c binary, model snapshot, and FFmpeg are required."}
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div>
+                  <FieldLabel htmlFor="local-resolution">Canvas</FieldLabel>
+                  <select
+                    className="h-11 w-full border border-black/15 bg-[#faf9f3] px-3 text-xs outline-none focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
+                    id="local-resolution"
+                    onChange={(event) => setForm((current) => ({ ...current, localResolution: event.target.value }))}
+                    value={form.localResolution}
+                  >
+                    {LOCAL_H3_RESOLUTIONS.map((resolution) => (
+                      <option key={resolution.id} value={resolution.id}>{resolution.label} - {resolution.note}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <FieldLabel htmlFor="local-duration">Clip length</FieldLabel>
+                  <select
+                    className="h-11 w-full border border-black/15 bg-[#faf9f3] px-3 text-xs outline-none focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
+                    id="local-duration"
+                    onChange={(event) => setForm((current) => ({ ...current, localFrames: Number(event.target.value) }))}
+                    value={form.localFrames}
+                  >
+                    {LOCAL_H3_DURATIONS.map((duration) => (
+                      <option key={duration.frames} value={duration.frames}>{duration.label} / {duration.frames} frames</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                <div>
+                  <FieldLabel htmlFor="local-quality">Quality</FieldLabel>
+                  <select
+                    className="h-11 w-full border border-black/15 bg-[#faf9f3] px-3 text-xs outline-none focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
+                    id="local-quality"
+                    onChange={(event) => setForm((current) => ({ ...current, localQuality: event.target.value }))}
+                    value={form.localQuality}
+                  >
+                    {LOCAL_H3_QUALITY_PRESETS.map((quality) => (
+                      <option key={quality.id} value={quality.id}>{quality.label}</option>
+                    ))}
+                  </select>
+                  <p className="mt-1.5 text-[10px] leading-4 text-stone-500">{selectedLocalQuality?.note}</p>
+                </div>
+                <div>
+                  <FieldLabel htmlFor="local-seed">Seed</FieldLabel>
+                  <input
+                    className="h-11 w-full border border-black/15 bg-[#faf9f3] px-3 font-mono text-xs outline-none focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
+                    id="local-seed"
+                    max={Number.MAX_SAFE_INTEGER}
+                    min={0}
+                    onChange={(event) => setForm((current) => ({ ...current, localSeed: Number(event.target.value) }))}
+                    required
+                    type="number"
+                    value={form.localSeed}
+                  />
+                </div>
+              </div>
+
+              <label className="mt-5 flex cursor-pointer items-center justify-between border-t border-black/10 pt-4">
+                <span>
+                  <span className="block text-xs font-bold uppercase tracking-[0.12em]">SSD streaming</span>
+                  <span className="mt-1 block text-[11px] text-stone-500">Use much less unified memory at the cost of slower generation.</span>
+                </span>
+                <span className={`relative h-7 w-12 rounded-full transition has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-black has-[:focus-visible]:ring-offset-2 ${form.localSsdStreaming ? "bg-black" : "bg-stone-300"}`}>
+                  <input
+                    checked={form.localSsdStreaming}
+                    className="sr-only"
+                    onChange={(event) => setForm((current) => ({ ...current, localSsdStreaming: event.target.checked }))}
+                    type="checkbox"
+                  />
+                  <span className={`absolute top-1 size-5 rounded-full transition ${form.localSsdStreaming ? "left-6 bg-[#d9ff72]" : "left-1 bg-white"}`} />
+                </span>
+              </label>
+            </div>
+          )}
           </fieldset>
 
           {error && (
@@ -696,7 +890,7 @@ export default function App() {
               disabled={submitting || isActive || !form.prompt.trim()}
               type="submit"
             >
-              <span>{submitting ? "Submitting..." : isActive ? "Generation active" : "Generate video"}</span>
+              <span>{submitting ? "Submitting..." : isActive ? "Generation active" : form.provider === "local" ? "Generate locally" : "Generate video"}</span>
               <span className="flex size-8 items-center justify-center rounded-full bg-[#d9ff72] text-black transition group-hover:translate-x-1"><Icon name="arrow" /></span>
             </button>
             {(job || error) && (
@@ -725,7 +919,7 @@ export default function App() {
           <div className="flex flex-1 items-center p-5 sm:p-8">
             <div className="w-full overflow-hidden border border-white/10 bg-black shadow-[0_24px_80px_rgba(0,0,0,0.35)]">
               <Preview
-                aspectRatio={job?.aspectRatio || form.aspectRatio}
+                aspectRatio={job?.aspectRatio || (form.provider === "local" ? form.localResolution.replace("x", ":") : form.aspectRatio)}
                 job={job}
                 mediaLoading={mediaLoading}
                 mediaError={mediaError}
@@ -746,7 +940,7 @@ export default function App() {
               <div className="flex flex-col gap-3 sm:flex-row">
                 <a
                   className="flex h-12 flex-1 items-center justify-center gap-2 bg-[#d9ff72] text-xs font-bold uppercase tracking-[0.12em] text-black transition hover:bg-white"
-                  download={hasSessionApiKey ? "openrouter-video.mp4" : undefined}
+                  download={usesSessionMedia ? "openrouter-video.mp4" : undefined}
                   href={downloadSource}
                 >
                   <Icon name="download" /> Download video
@@ -756,7 +950,7 @@ export default function App() {
                   onClick={copyVideoUrl}
                   type="button"
                 >
-                  <Icon name={copied ? "check" : "copy"} /> {copied ? "Copied" : hasSessionApiKey ? "Copy temporary URL" : "Copy video URL"}
+                  <Icon name={copied ? "check" : "copy"} /> {copied ? "Copied" : usesSessionMedia ? "Copy temporary URL" : "Copy video URL"}
                 </button>
               </div>
             ) : (

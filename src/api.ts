@@ -2,14 +2,18 @@ export type GenerationStatus = "queued" | "processing" | "completed" | "failed";
 
 export interface VideoJob {
   id: string;
+  provider: "openrouter" | "local";
   status: GenerationStatus;
   error?: string;
   videoUrl?: string;
   downloadUrl?: string;
   cost?: number;
+  phase?: string;
+  progress?: number;
 }
 
-export interface GenerateVideoPayload {
+export interface OpenRouterGenerateVideoPayload {
+  provider: "openrouter";
   prompt: string;
   model: string;
   duration: number;
@@ -20,10 +24,31 @@ export interface GenerateVideoPayload {
   generateAudio?: boolean;
 }
 
+export interface LocalGenerateVideoPayload {
+  provider: "local";
+  prompt: string;
+  resolution: string;
+  frames: number;
+  quality: string;
+  seed: number;
+  ssdStreaming: boolean;
+}
+
+export type GenerateVideoPayload =
+  | OpenRouterGenerateVideoPayload
+  | LocalGenerateVideoPayload;
+
 interface ApiErrorBody {
   error?: {
     message?: string;
     retryable?: boolean;
+  };
+}
+
+export interface AppConfig {
+  localH3: {
+    supported: boolean;
+    configured: boolean;
   };
 }
 
@@ -92,6 +117,10 @@ export function generateVideo(
   });
 }
 
+export function getAppConfig(): Promise<AppConfig> {
+  return request<AppConfig>("/api/config");
+}
+
 export function getVideoStatus(
   id: string,
   sessionApiKey?: string,
@@ -108,10 +137,19 @@ export async function getVideoContent(
   sessionApiKey: string,
   signal?: AbortSignal,
 ): Promise<Blob> {
+  const contentUrl = new URL(url, window.location.origin);
+  if (
+    contentUrl.origin !== window.location.origin ||
+    !contentUrl.pathname.startsWith("/api/video/content/") ||
+    contentUrl.search
+  ) {
+    throw new ApiError("Refused to send the temporary key outside the local video endpoint.", 400, false);
+  }
+
   let response: Response;
 
   try {
-    response = await fetch(url, {
+    response = await fetch(contentUrl.pathname, {
       headers: sessionKeyHeaders(sessionApiKey),
       signal,
     });

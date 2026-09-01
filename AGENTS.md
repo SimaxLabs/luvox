@@ -10,7 +10,7 @@
 
 ## Architecture
 
-- `src/` is the React client; it must call only the local `/api` routes. `server/index.ts` owns Express routes and static production serving. Keep all OpenRouter HTTP/auth logic in `server/openrouter.ts`.
+- `src/` is the React client; it must call only the local `/api` routes. `server/index.ts` dispatches provider-neutral routes. Keep OpenRouter HTTP/auth logic in `server/openrouter.ts` and h3.c process/queue logic in `server/localH3.ts`.
 - `shared/videoModels.ts` is the single capability registry used by both UI controls and server validation. Add or change model options there rather than duplicating capability checks.
 - Client TypeScript uses bundler resolution, while server TypeScript uses NodeNext. Relative imports in `server/` must use emitted `.js` suffixes even though the sources are `.ts`.
 - Tailwind is v4 through `@tailwindcss/vite` and `src/styles.css`; there is intentionally no `tailwind.config.*` or PostCSS config.
@@ -29,3 +29,11 @@
 
 - Compose reads the untracked `.env`, listens only on host `127.0.0.1:3000`, and sets container `HOST=0.0.0.0`. Preserve that split so the local paid API is not exposed to the LAN by default.
 - The runtime image contains only production dependencies plus `dist/` and `dist-server/`; server runtime imports must not depend on devDependencies or source files.
+
+## Local h3.c Constraints
+
+- Local mode is a macOS/Apple-Silicon host feature and cannot work inside the Linux Docker image. It requires absolute `H3_BINARY` and `H3_MODEL_DIR` paths; `H3_RUNTIME_DIR` defaults beside the binary so `h3_shaders.metal` can be loaded.
+- `h3.c` has no HTTP mode. `server/localH3.ts` deliberately spawns the one-shot CLI with an argument array and `shell: false`, owns all output paths under `.h3-jobs`/`H3_JOBS_DIR`, and serializes/caps jobs to avoid duplicate model residency. Preserve those boundaries and do not pass the full server environment to the child.
+- Keep local controls preset-based through `shared/localH3.ts`; do not expose h3.c diagnostic flags directly in the UI. First/last-frame local uploads are not implemented.
+- Never run h3.c generation as a smoke test: it can consume substantial unified memory and time. Safe checks should use missing/invalid local configuration paths.
+- h3.c engine code is MIT, but model weights have separate territorial and hosting restrictions. Do not download, redistribute, or bundle weights with this repository.

@@ -1,5 +1,10 @@
 import { z } from "zod";
 import { isIP } from "node:net";
+import {
+  getLocalH3QualityPreset,
+  getLocalH3Resolution,
+  LOCAL_H3_DURATIONS,
+} from "../shared/localH3.js";
 import { getVideoModel } from "../shared/videoModels.js";
 
 function isPublicHostname(hostname: string): boolean {
@@ -56,7 +61,8 @@ const optionalPublicHttpsUrl = z
 
 const baseGenerateVideoSchema = z
   .object({
-    prompt: z.string().trim().min(1, "Prompt is required."),
+    provider: z.literal("openrouter"),
+    prompt: z.string().trim().min(1, "Prompt is required.").max(10_000),
     model: z.string().trim().min(1, "Model is required."),
     duration: z.number().int("Duration must be a whole number."),
     aspectRatio: z.string().trim().min(1, "Aspect ratio is required."),
@@ -69,7 +75,63 @@ const baseGenerateVideoSchema = z
 
 export type GenerateVideoInput = z.infer<typeof baseGenerateVideoSchema>;
 
-export function validateGenerateVideoInput(value: unknown): GenerateVideoInput {
+const localGenerateVideoSchema = z
+  .object({
+    provider: z.literal("local"),
+    prompt: z.string().trim().min(1, "Prompt is required.").max(10_000),
+    resolution: z.string().trim().min(1, "Resolution is required."),
+    frames: z.number().int("Frame count must be a whole number."),
+    quality: z.string().trim().min(1, "Quality preset is required."),
+    seed: z
+      .number()
+      .int("Seed must be a whole number.")
+      .min(0, "Seed cannot be negative.")
+      .max(Number.MAX_SAFE_INTEGER, "Seed is too large."),
+    ssdStreaming: z.boolean(),
+  })
+  .strict();
+
+export type LocalGenerateVideoInput = z.infer<typeof localGenerateVideoSchema>;
+export type VideoGenerateInput = GenerateVideoInput | LocalGenerateVideoInput;
+
+export function validateGenerateVideoInput(value: unknown): VideoGenerateInput {
+  const provider = z
+    .object({ provider: z.enum(["openrouter", "local"]) })
+    .passthrough()
+    .parse(value).provider;
+
+  if (provider === "local") {
+    const input = localGenerateVideoSchema.parse(value);
+    const issues: z.ZodIssue[] = [];
+
+    if (!getLocalH3Resolution(input.resolution)) {
+      issues.push({
+        code: z.ZodIssueCode.custom,
+        path: ["resolution"],
+        message: "Unsupported local resolution preset.",
+      });
+    }
+
+    if (!LOCAL_H3_DURATIONS.some((duration) => duration.frames === input.frames)) {
+      issues.push({
+        code: z.ZodIssueCode.custom,
+        path: ["frames"],
+        message: "Unsupported local clip length.",
+      });
+    }
+
+    if (!getLocalH3QualityPreset(input.quality)) {
+      issues.push({
+        code: z.ZodIssueCode.custom,
+        path: ["quality"],
+        message: "Unsupported local quality preset.",
+      });
+    }
+
+    if (issues.length > 0) throw new z.ZodError(issues);
+    return input;
+  }
+
   const input = baseGenerateVideoSchema.parse(value);
   const model = getVideoModel(input.model);
 
