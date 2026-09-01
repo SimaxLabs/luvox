@@ -3,7 +3,7 @@ import "dotenv/config";
 import express, { type NextFunction, type Request, type Response } from "express";
 import path from "node:path";
 import { Readable } from "node:stream";
-import { ZodError } from "zod";
+import { z, ZodError } from "zod";
 import {
   generateVideo,
   getVideoContent,
@@ -16,6 +16,16 @@ const app = express();
 const isProduction = process.env.NODE_ENV === "production";
 const port = Number(process.env.PORT || (isProduction ? 3000 : 3001));
 const host = process.env.HOST?.trim() || "127.0.0.1";
+const sessionApiKeySchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(1_024, "The temporary API key is too long.")
+  .optional();
+
+function getSessionApiKey(request: Request): string | undefined {
+  return sessionApiKeySchema.parse(request.get("X-OpenRouter-Api-Key"));
+}
 
 app.disable("x-powered-by");
 app.use(express.json({ limit: "100kb" }));
@@ -29,7 +39,7 @@ app.post(
   async (request: Request, response: Response, next: NextFunction) => {
     try {
       const input = validateGenerateVideoInput(request.body);
-      const result = await generateVideo(input);
+      const result = await generateVideo(input, getSessionApiKey(request));
       response.status(202).json(result);
     } catch (error) {
       next(error);
@@ -42,7 +52,7 @@ app.get(
   async (request: Request, response: Response, next: NextFunction) => {
     try {
       const id = validateJobId(request.params.id);
-      const result = await getVideoStatus(id);
+      const result = await getVideoStatus(id, getSessionApiKey(request));
       response.json(result);
     } catch (error) {
       next(error);
@@ -60,7 +70,11 @@ app.get(
   async (request: Request, response: Response, next: NextFunction) => {
     try {
       const id = validateJobId(request.params.id);
-      const upstream = await getVideoContent(id, request.headers.range);
+      const upstream = await getVideoContent(
+        id,
+        request.headers.range,
+        getSessionApiKey(request),
+      );
 
       response.status(upstream.status);
       for (const header of [

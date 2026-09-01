@@ -51,12 +51,12 @@ export class OpenRouterError extends Error {
   }
 }
 
-function getApiKey(): string {
-  const apiKey = process.env.OPENROUTER_API_KEY?.trim();
+function getApiKey(overrideApiKey?: string): string {
+  const apiKey = overrideApiKey?.trim() || process.env.OPENROUTER_API_KEY?.trim();
 
   if (!apiKey) {
     throw new OpenRouterError(
-      "OPENROUTER_API_KEY is not configured on the server.",
+      "No OpenRouter API key is available. Configure OPENROUTER_API_KEY or enter a temporary session key.",
       503,
       "configuration_error",
       false,
@@ -98,7 +98,7 @@ function providerError(
 
   if (upstreamStatus === 401 || upstreamStatus === 403) {
     return new OpenRouterError(
-      "OpenRouter rejected the API key. Check OPENROUTER_API_KEY.",
+      "OpenRouter rejected the API key. Check the temporary key or OPENROUTER_API_KEY.",
       401,
       "authentication_error",
       false,
@@ -147,12 +147,13 @@ async function fetchOpenRouter(
   path: string,
   init: RequestInit,
   timeoutMs: number,
+  overrideApiKey?: string,
 ): Promise<Response> {
   try {
     return await fetch(`${OPENROUTER_API_BASE}${path}`, {
       ...init,
       headers: {
-        Authorization: `Bearer ${getApiKey()}`,
+        Authorization: `Bearer ${getApiKey(overrideApiKey)}`,
         ...init.headers,
       },
       signal: AbortSignal.timeout(timeoutMs),
@@ -181,8 +182,17 @@ async function fetchOpenRouter(
   }
 }
 
-async function requestJson(path: string, init: RequestInit): Promise<unknown> {
-  const response = await fetchOpenRouter(path, init, JSON_REQUEST_TIMEOUT_MS);
+async function requestJson(
+  path: string,
+  init: RequestInit,
+  overrideApiKey?: string,
+): Promise<unknown> {
+  const response = await fetchOpenRouter(
+    path,
+    init,
+    JSON_REQUEST_TIMEOUT_MS,
+    overrideApiKey,
+  );
   let payload: unknown;
 
   try {
@@ -261,6 +271,7 @@ function publicStatus(response: OpenRouterVideoResponse): VideoStatusResponse {
 
 export async function generateVideo(
   input: GenerateVideoInput,
+  overrideApiKey?: string,
 ): Promise<VideoStatusResponse> {
   const frameImages: Array<Record<string, unknown>> = [];
 
@@ -293,19 +304,28 @@ export async function generateVideo(
     body.generate_audio = input.generateAudio;
   }
 
-  const payload = await requestJson("/videos", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  const payload = await requestJson(
+    "/videos",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+    overrideApiKey,
+  );
 
   return publicStatus(parseVideoResponse(payload));
 }
 
-export async function getVideoStatus(id: string): Promise<VideoStatusResponse> {
-  const payload = await requestJson(`/videos/${encodeURIComponent(id)}`, {
-    method: "GET",
-  });
+export async function getVideoStatus(
+  id: string,
+  overrideApiKey?: string,
+): Promise<VideoStatusResponse> {
+  const payload = await requestJson(
+    `/videos/${encodeURIComponent(id)}`,
+    { method: "GET" },
+    overrideApiKey,
+  );
 
   return publicStatus(parseVideoResponse(payload));
 }
@@ -313,6 +333,7 @@ export async function getVideoStatus(id: string): Promise<VideoStatusResponse> {
 export async function getVideoContent(
   id: string,
   range?: string,
+  overrideApiKey?: string,
 ): Promise<Response> {
   const response = await fetchOpenRouter(
     `/videos/${encodeURIComponent(id)}/content?index=0`,
@@ -321,6 +342,7 @@ export async function getVideoContent(
       headers: range ? { Range: range } : undefined,
     },
     CONTENT_REQUEST_TIMEOUT_MS,
+    overrideApiKey,
   );
 
   if (response.status === 416) return response;

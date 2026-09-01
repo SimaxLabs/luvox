@@ -39,6 +39,11 @@ export class ApiError extends Error {
   }
 }
 
+function sessionKeyHeaders(sessionApiKey?: string): Record<string, string> {
+  const key = sessionApiKey?.trim();
+  return key ? { "X-OpenRouter-Api-Key": key } : {};
+}
+
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   let response: Response;
 
@@ -73,14 +78,61 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
-export function generateVideo(payload: GenerateVideoPayload): Promise<VideoJob> {
+export function generateVideo(
+  payload: GenerateVideoPayload,
+  sessionApiKey?: string,
+): Promise<VideoJob> {
   return request<VideoJob>("/api/video/generate", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...sessionKeyHeaders(sessionApiKey),
+    },
     body: JSON.stringify(payload),
   });
 }
 
-export function getVideoStatus(id: string, signal?: AbortSignal): Promise<VideoJob> {
-  return request<VideoJob>(`/api/video/status/${encodeURIComponent(id)}`, { signal });
+export function getVideoStatus(
+  id: string,
+  sessionApiKey?: string,
+  signal?: AbortSignal,
+): Promise<VideoJob> {
+  return request<VideoJob>(`/api/video/status/${encodeURIComponent(id)}`, {
+    headers: sessionKeyHeaders(sessionApiKey),
+    signal,
+  });
+}
+
+export async function getVideoContent(
+  url: string,
+  sessionApiKey: string,
+  signal?: AbortSignal,
+): Promise<Blob> {
+  let response: Response;
+
+  try {
+    response = await fetch(url, {
+      headers: sessionKeyHeaders(sessionApiKey),
+      signal,
+    });
+  } catch {
+    throw new ApiError("Could not load the generated video from the local API.", 0, true);
+  }
+
+  if (!response.ok) {
+    let body: ApiErrorBody = {};
+    try {
+      body = (await response.json()) as ApiErrorBody;
+    } catch {
+      // The content endpoint may return a non-JSON provider response.
+    }
+
+    throw new ApiError(
+      body.error?.message || `Video download failed with status ${response.status}.`,
+      response.status,
+      body.error?.retryable ?? response.status >= 500,
+    );
+  }
+
+  return response.blob();
 }

@@ -27,6 +27,13 @@ Vite runs at [http://localhost:3000](http://localhost:3000) and proxies `/api` t
 
 Active generation IDs are kept in browser storage so polling resumes after a reload. Stopping an active watch does not cancel provider work because OpenRouter does not currently document a cancellation endpoint.
 
+## API key selection
+
+- With no key entered in the UI, the server uses `OPENROUTER_API_KEY` from its environment.
+- A temporary key entered in the UI takes precedence for generation, polling, preview, and download requests.
+- The temporary key exists only in the current tab's React memory. It is sent to the local backend in the `X-OpenRouter-Api-Key` header and is never placed in request bodies, URLs, browser storage, server storage, or logs.
+- Session-key video content is fetched through the authenticated local proxy and exposed to the player as a temporary `blob:` URL. The object URL is revoked when the key, job, or page changes.
+
 Build and run the production server locally:
 
 ```bash

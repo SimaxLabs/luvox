@@ -8,6 +8,7 @@ import {
 import {
   ApiError,
   generateVideo,
+  getVideoContent,
   getVideoStatus,
   type GenerationStatus,
   type VideoJob,
@@ -143,15 +144,32 @@ function StatusRail({ status }: { status?: GenerationStatus }) {
 function Preview({
   aspectRatio,
   job,
+  mediaLoading,
   mediaError,
   onMediaError,
+  videoSource,
 }: {
   aspectRatio: string;
   job: DisplayJob | null;
+  mediaLoading: boolean;
   mediaError: string | null;
   onMediaError: () => void;
+  videoSource?: string;
 }) {
   const ratio = aspectRatio.replace(":", " / ");
+
+  if (job?.status === "completed" && mediaLoading) {
+    return (
+      <div className="relative flex min-h-72 w-full items-center justify-center overflow-hidden bg-[#111310]" style={{ aspectRatio: ratio }}>
+        <div className="absolute inset-0 preview-grid opacity-35" />
+        <div className="relative text-center">
+          <div className="mx-auto mb-5 size-12 animate-spin rounded-full border border-white/15 border-t-[#d9ff72]" />
+          <p className="font-display text-2xl uppercase text-white">Loading secure preview</p>
+          <p className="mt-2 font-mono text-[10px] uppercase tracking-[0.2em] text-white/45">Creating a temporary in-memory URL</p>
+        </div>
+      </div>
+    );
+  }
 
   if (job?.status === "completed" && mediaError) {
     return (
@@ -165,7 +183,7 @@ function Preview({
     );
   }
 
-  if (job?.status === "completed" && job.videoUrl) {
+  if (job?.status === "completed" && videoSource) {
     return (
       <video
         className="h-full w-full bg-black object-contain"
@@ -173,7 +191,7 @@ function Preview({
         onError={onMediaError}
         playsInline
         preload="metadata"
-        src={job.videoUrl}
+        src={videoSource}
         style={{ aspectRatio: ratio }}
       >
         Your browser does not support video playback.
@@ -249,10 +267,17 @@ export default function App() {
   const [pollWarning, setPollWarning] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [mediaError, setMediaError] = useState<string | null>(null);
+  const [mediaLoading, setMediaLoading] = useState(false);
+  const [sessionApiKey, setSessionApiKey] = useState("");
+  const [temporaryVideoUrl, setTemporaryVideoUrl] = useState<string | null>(null);
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const selectedModel = getVideoModel(form.model) || defaultModel;
   const isActive = job?.status === "queued" || job?.status === "processing";
+  const hasSessionApiKey = Boolean(sessionApiKey.trim());
+  const pollApiKey = sessionApiKey;
+  const videoSource = hasSessionApiKey ? temporaryVideoUrl || undefined : job?.videoUrl;
+  const downloadSource = hasSessionApiKey ? temporaryVideoUrl || undefined : job?.downloadUrl;
 
   useEffect(() => {
     if (!job || (job.status !== "queued" && job.status !== "processing")) return;
@@ -264,12 +289,19 @@ export default function App() {
 
     const poll = async () => {
       try {
-        const nextJob = await getVideoStatus(job.id, controller.signal);
+        const nextJob = await getVideoStatus(
+          job.id,
+          pollApiKey || undefined,
+          controller.signal,
+        );
         if (disposed) return;
 
         consecutiveFailures = 0;
         setPollWarning(null);
-        setJob({ ...nextJob, aspectRatio: job.aspectRatio });
+        setJob({
+          ...nextJob,
+          aspectRatio: job.aspectRatio,
+        });
 
         if (nextJob.status === "failed") {
           setError(nextJob.error || "The video provider could not complete this generation.");
@@ -301,12 +333,50 @@ export default function App() {
       controller.abort();
       clearTimeout(timer);
     };
-  }, [job?.id]);
+  }, [job?.id, pollApiKey]);
 
   useEffect(() => {
     if (job) localStorage.setItem(storedJobKey, JSON.stringify(job));
     else localStorage.removeItem(storedJobKey);
   }, [job]);
+
+  useEffect(() => {
+    setTemporaryVideoUrl(null);
+    setMediaError(null);
+    setMediaLoading(false);
+
+    if (
+      job?.status !== "completed" ||
+      !job.videoUrl ||
+      !sessionApiKey.trim()
+    ) {
+      return;
+    }
+
+    const key = sessionApiKey.trim();
+    const controller = new AbortController();
+    let objectUrl: string | undefined;
+    setMediaLoading(true);
+
+    void getVideoContent(job.videoUrl, key, controller.signal)
+      .then((blob) => {
+        objectUrl = URL.createObjectURL(blob);
+        setTemporaryVideoUrl(objectUrl);
+      })
+      .catch((contentError) => {
+        if (!controller.signal.aborted) {
+          setMediaError(messageFrom(contentError));
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setMediaLoading(false);
+      });
+
+    return () => {
+      controller.abort();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [job?.id, job?.status, job?.videoUrl, sessionApiKey]);
 
   useEffect(() => {
     return () => {
@@ -329,17 +399,24 @@ export default function App() {
     setMediaError(null);
 
     try {
-      const nextJob = await generateVideo({
-        prompt: form.prompt,
-        model: form.model,
-        duration: form.duration,
+      const key = sessionApiKey.trim();
+      const nextJob = await generateVideo(
+        {
+          prompt: form.prompt,
+          model: form.model,
+          duration: form.duration,
+          aspectRatio: form.aspectRatio,
+          resolution: form.resolution || undefined,
+          firstFrameUrl: form.firstFrameUrl || undefined,
+          lastFrameUrl: form.lastFrameUrl || undefined,
+          generateAudio: selectedModel.generateAudio.supported ? form.generateAudio : undefined,
+        },
+        key || undefined,
+      );
+      setJob({
+        ...nextJob,
         aspectRatio: form.aspectRatio,
-        resolution: form.resolution || undefined,
-        firstFrameUrl: form.firstFrameUrl || undefined,
-        lastFrameUrl: form.lastFrameUrl || undefined,
-        generateAudio: selectedModel.generateAudio.supported ? form.generateAudio : undefined,
       });
-      setJob({ ...nextJob, aspectRatio: form.aspectRatio });
     } catch (submitError) {
       setError(messageFrom(submitError));
     } finally {
@@ -361,18 +438,19 @@ export default function App() {
     setPollWarning(null);
     setCopied(false);
     setMediaError(null);
+    setMediaLoading(false);
   };
 
   const copyVideoUrl = async () => {
-    if (!job?.videoUrl) return;
+    if (!videoSource) return;
     try {
-      await navigator.clipboard.writeText(new URL(job.videoUrl, window.location.origin).href);
+      await navigator.clipboard.writeText(new URL(videoSource, window.location.origin).href);
       setError(null);
       setCopied(true);
       if (copyTimer.current) clearTimeout(copyTimer.current);
       copyTimer.current = setTimeout(() => setCopied(false), 2_000);
     } catch {
-      const videoUrl = new URL(job.videoUrl, window.location.origin).href;
+      const videoUrl = new URL(videoSource, window.location.origin).href;
       const input = document.createElement("textarea");
       input.value = videoUrl;
       input.style.position = "fixed";
@@ -407,7 +485,7 @@ export default function App() {
           </div>
           <div className="flex items-center gap-2 rounded-full border border-white/10 px-3 py-1.5 text-[9px] uppercase tracking-[0.15em] text-white/55">
             <Icon name="lock" className="size-3 text-[#d9ff72]" />
-            <span className="hidden sm:inline">API key secured</span>
+            <span className="hidden sm:inline">{sessionApiKey.trim() ? "Session override active" : "API key secured"}</span>
             <span className="sm:hidden">Secured</span>
           </div>
         </div>
@@ -435,10 +513,45 @@ export default function App() {
             <span className="font-mono text-[9px] tracking-[0.15em] text-stone-400">01—05</span>
           </div>
 
+          <div className="mb-7 border border-black/12 bg-[#e7e5dc] p-4 sm:p-5">
+            <div className="flex items-start gap-3">
+              <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center bg-white/70"><Icon name="lock" /></div>
+              <div className="min-w-0 flex-1">
+                <FieldLabel htmlFor="session-api-key" optional>Temporary API key</FieldLabel>
+                <div className="flex gap-2">
+                  <input
+                    aria-describedby="session-key-help"
+                    autoComplete="off"
+                    className="h-11 min-w-0 flex-1 border border-black/15 bg-[#faf9f3] px-3 font-mono text-xs outline-none transition placeholder:text-stone-400 focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
+                    id="session-api-key"
+                    maxLength={1_024}
+                    onChange={(event) => setSessionApiKey(event.target.value)}
+                    placeholder="sk-or-v1-..."
+                    spellCheck={false}
+                    type="password"
+                    value={sessionApiKey}
+                  />
+                  {sessionApiKey && (
+                    <button
+                      className="border border-black/15 px-3 text-[10px] font-bold uppercase tracking-[0.12em] hover:border-black"
+                      onClick={() => setSessionApiKey("")}
+                      type="button"
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
+                <p className="mt-2 text-[11px] leading-4 text-stone-500" id="session-key-help">
+                  Overrides <code>OPENROUTER_API_KEY</code> for this tab. Kept only in memory, sent only to the local backend, and erased when this page closes or reloads.
+                </p>
+              </div>
+            </div>
+          </div>
+
           <fieldset disabled={submitting || isActive}>
-          <div>
-            <FieldLabel htmlFor="prompt">Prompt</FieldLabel>
-            <div className="relative">
+            <div>
+              <FieldLabel htmlFor="prompt">Prompt</FieldLabel>
+              <div className="relative">
               <textarea
                 autoFocus
                 className="min-h-40 w-full resize-y border border-black/15 bg-[#faf9f3] px-4 py-4 text-[15px] leading-6 outline-none transition focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
@@ -450,8 +563,8 @@ export default function App() {
                 value={form.prompt}
               />
               <span className="absolute bottom-3 right-3 font-mono text-[9px] text-stone-400">{form.prompt.length} / 10K</span>
+              </div>
             </div>
-          </div>
 
           <div className="mt-6 grid gap-5 sm:grid-cols-2">
             <div>
@@ -614,8 +727,10 @@ export default function App() {
               <Preview
                 aspectRatio={job?.aspectRatio || form.aspectRatio}
                 job={job}
+                mediaLoading={mediaLoading}
                 mediaError={mediaError}
                 onMediaError={() => setMediaError("The completed video could not be loaded in the player. Try downloading it instead.")}
+                videoSource={videoSource}
               />
             </div>
           </div>
@@ -627,11 +742,12 @@ export default function App() {
           )}
 
           <div className="border-t border-white/10 px-5 py-5 sm:px-8">
-            {job?.status === "completed" && job.downloadUrl ? (
+            {job?.status === "completed" && downloadSource ? (
               <div className="flex flex-col gap-3 sm:flex-row">
                 <a
                   className="flex h-12 flex-1 items-center justify-center gap-2 bg-[#d9ff72] text-xs font-bold uppercase tracking-[0.12em] text-black transition hover:bg-white"
-                  href={job.downloadUrl}
+                  download={hasSessionApiKey ? "openrouter-video.mp4" : undefined}
+                  href={downloadSource}
                 >
                   <Icon name="download" /> Download video
                 </a>
@@ -640,7 +756,7 @@ export default function App() {
                   onClick={copyVideoUrl}
                   type="button"
                 >
-                  <Icon name={copied ? "check" : "copy"} /> {copied ? "Copied" : "Copy video URL"}
+                  <Icon name={copied ? "check" : "copy"} /> {copied ? "Copied" : hasSessionApiKey ? "Copy temporary URL" : "Copy video URL"}
                 </button>
               </div>
             ) : (
