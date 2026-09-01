@@ -1,3 +1,5 @@
+import type { LocalH3FrameFitId } from "../shared/localH3";
+
 export type GenerationStatus = "queued" | "processing" | "completed" | "failed";
 
 export interface VideoJob {
@@ -33,6 +35,7 @@ export interface LocalGenerateVideoPayload {
   seed: number;
   firstFramePath?: string;
   lastFramePath?: string;
+  frameFit: LocalH3FrameFitId;
   ssdStreaming: boolean;
 }
 

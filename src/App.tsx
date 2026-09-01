@@ -8,8 +8,10 @@ import {
 import {
   getLocalH3QualityPreset,
   LOCAL_H3_DURATIONS,
+  LOCAL_H3_FRAME_FITS,
   LOCAL_H3_QUALITY_PRESETS,
   LOCAL_H3_RESOLUTIONS,
+  type LocalH3FrameFitId,
 } from "../shared/localH3";
 import {
   ApiError,
@@ -39,6 +41,7 @@ interface FormState {
   localSeed: number;
   localFirstFramePath: string;
   localLastFramePath: string;
+  localFrameFit: LocalH3FrameFitId;
   localSsdStreaming: boolean;
 }
 
@@ -119,6 +122,7 @@ function initialForm(model: VideoModelConfig): FormState {
     localSeed: 42,
     localFirstFramePath: "",
     localLastFramePath: "",
+    localFrameFit: "contain",
     localSsdStreaming: false,
   };
 }
@@ -468,7 +472,17 @@ export default function App() {
   const updateModel = (modelId: string) => {
     const model = getVideoModel(modelId);
     if (!model) return;
-    setForm((current) => ({ ...initialForm(model), prompt: current.prompt }));
+    const defaults = initialForm(model);
+    setForm((current) => ({
+      ...current,
+      model: defaults.model,
+      duration: defaults.duration,
+      aspectRatio: defaults.aspectRatio,
+      resolution: defaults.resolution,
+      firstFrameUrl: "",
+      lastFrameUrl: "",
+      generateAudio: defaults.generateAudio,
+    }));
   };
 
   const selectLocalReference = async (
@@ -497,8 +511,8 @@ export default function App() {
     try {
       const result = await uploadLocalReferenceImage(file);
       setForm((current) => position === "first"
-        ? { ...current, localFirstFramePath: result.path }
-        : { ...current, localLastFramePath: result.path });
+        ? { ...current, localFirstFramePath: result.path, localFrameFit: "contain" }
+        : { ...current, localLastFramePath: result.path, localFrameFit: "contain" });
       setReferenceUploadStatus(`${position === "first" ? "First" : "Last"} frame image uploaded.`);
     } catch (uploadError) {
       setReferenceUploadStatus(`${position === "first" ? "First" : "Last"} frame image upload failed.`);
@@ -528,6 +542,7 @@ export default function App() {
             seed: form.localSeed,
             firstFramePath: form.localFirstFramePath || undefined,
             lastFramePath: form.localLastFramePath || undefined,
+            frameFit: form.localFrameFit,
             ssdStreaming: form.localSsdStreaming,
           })
         : await generateVideo(
@@ -925,7 +940,11 @@ export default function App() {
                       <input
                         className="h-11 min-w-0 flex-1 border border-black/15 bg-[#faf9f3] px-3 font-mono text-xs outline-none transition placeholder:text-stone-400 focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
                         id="local-first-frame-path"
-                        onChange={(event) => setForm((current) => ({ ...current, localFirstFramePath: event.target.value }))}
+                        onChange={(event) => setForm((current) => ({
+                          ...current,
+                          localFirstFramePath: event.target.value,
+                          localFrameFit: event.target.value ? "contain" : current.localFrameFit,
+                        }))}
                         placeholder="/Users/.../opening.png"
                         spellCheck={false}
                         type="text"
@@ -958,7 +977,11 @@ export default function App() {
                       <input
                         className="h-11 min-w-0 flex-1 border border-black/15 bg-[#faf9f3] px-3 font-mono text-xs outline-none transition placeholder:text-stone-400 focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
                         id="local-last-frame-path"
-                        onChange={(event) => setForm((current) => ({ ...current, localLastFramePath: event.target.value }))}
+                        onChange={(event) => setForm((current) => ({
+                          ...current,
+                          localLastFramePath: event.target.value,
+                          localFrameFit: event.target.value ? "contain" : current.localFrameFit,
+                        }))}
                         placeholder="/Users/.../closing.png"
                         spellCheck={false}
                         type="text"
@@ -986,6 +1009,29 @@ export default function App() {
                     </div>
                   </div>
                 </div>
+                {(form.localFirstFramePath || form.localLastFramePath) && (
+                  <fieldset className="mt-4 border-t border-black/10 pt-4">
+                    <legend className="mb-2 text-[11px] font-bold uppercase tracking-[0.18em] text-stone-700">Reference framing</legend>
+                    <div className="grid grid-cols-2 gap-1.5">
+                      {LOCAL_H3_FRAME_FITS.map((fit) => (
+                        <button
+                          aria-describedby={`local-frame-fit-${fit.id}-description`}
+                          aria-pressed={form.localFrameFit === fit.id}
+                          className={`min-h-11 border px-3 text-xs font-bold transition ${form.localFrameFit === fit.id ? "border-black bg-black text-[#d9ff72]" : "border-black/15 bg-[#faf9f3] hover:border-black/50"}`}
+                          key={fit.id}
+                          onClick={() => setForm((current) => ({ ...current, localFrameFit: fit.id }))}
+                          type="button"
+                        >
+                          {fit.label}
+                          <span className="sr-only" id={`local-frame-fit-${fit.id}-description`}>{fit.note}</span>
+                        </button>
+                      ))}
+                    </div>
+                    <p className="mt-2 text-[11px] leading-4 text-stone-600">
+                      {LOCAL_H3_FRAME_FITS.find((fit) => fit.id === form.localFrameFit)?.note}
+                    </p>
+                  </fieldset>
+                )}
               </div>
 
               <div className="mt-6 sm:max-w-[calc(50%-0.625rem)]">

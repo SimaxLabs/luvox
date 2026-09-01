@@ -1,11 +1,12 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { access, lstat, mkdir, open, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { access, chmod, lstat, mkdir, open, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   getLocalH3QualityPreset,
   getLocalH3Resolution,
+  type LocalH3FrameFitId,
 } from "../shared/localH3.js";
 import type { LocalGenerateVideoInput } from "./validation.js";
 import type { VideoStatusResponse } from "./videoTypes.js";
@@ -17,6 +18,8 @@ const MAX_PROGRESS_CARRY_CHARS = 4_096;
 const MAX_QUEUED_JOBS = 3;
 const MAX_RETAINED_JOBS = 20;
 const MAX_REFERENCE_IMAGE_BYTES = 25 * 1024 * 1024;
+const MAX_REFERENCE_IMAGE_PIXELS = 50_000_000;
+const MAX_REFERENCE_ASPECT_RATIO = 16;
 const MAX_RETAINED_REFERENCE_IMAGES = 20;
 const REFERENCE_IMAGE_TTL_MS = 24 * 60 * 60_000;
 const REFERENCE_IMAGE_NAME = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(?:jpg|png|webp)$/;
@@ -64,6 +67,7 @@ let activeJobId: string | undefined;
 let activeChild: ChildProcess | undefined;
 let pendingJobReservations = 0;
 let referenceUploadTail: Promise<void> = Promise.resolve();
+let referenceProcessingTail: Promise<void> = Promise.resolve();
 
 process.once("exit", () => activeChild?.kill("SIGTERM"));
 
@@ -238,7 +242,88 @@ function referenceImageExtension(data: Buffer): string | undefined {
   return undefined;
 }
 
+function serializeReferenceProcessing<T>(work: () => Promise<T>): Promise<T> {
+  const operation = referenceProcessingTail.then(work);
+  referenceProcessingTail = operation.then(() => undefined, () => undefined);
+  return operation;
+}
+
+async function inspectReferenceImage(filePath: string): Promise<void> {
+  const command = process.env.H3_FFPROBE?.trim() || "ffprobe";
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(command, [
+      "-v",
+      "error",
+      "-select_streams",
+      "v:0",
+      "-show_entries",
+      "stream=width,height",
+      "-of",
+      "csv=p=0:s=x",
+      filePath,
+    ], {
+      env: localProcessEnvironment(),
+      shell: false,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    let output = "";
+    let settled = false;
+    const finish = (error?: LocalH3Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (error) reject(error);
+      else resolve();
+    };
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      finish(new LocalH3Error(
+        "The reference image could not be inspected within 15 seconds.",
+        400,
+        "local_reference_error",
+        false,
+      ));
+    }, 15_000);
+    timeout.unref();
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      output = `${output}${chunk.toString("utf8")}`.slice(-1_024);
+    });
+    child.once("error", () => finish(new LocalH3Error(
+      "FFprobe is required to inspect local reference images.",
+      503,
+      "local_configuration_error",
+      false,
+    )));
+    child.once("close", (code) => {
+      const match = output.trim().match(/^(\d+)x(\d+)$/);
+      const width = Number(match?.[1]);
+      const height = Number(match?.[2]);
+      const aspect = Math.max(width / height, height / width);
+      if (
+        code === 0 &&
+        Number.isInteger(width) &&
+        Number.isInteger(height) &&
+        width > 0 &&
+        height > 0 &&
+        width * height <= MAX_REFERENCE_IMAGE_PIXELS &&
+        aspect <= MAX_REFERENCE_ASPECT_RATIO
+      ) {
+        finish();
+        return;
+      }
+      finish(new LocalH3Error(
+        "Reference images must be decodable, at most 50 megapixels, and no more extreme than a 16:1 aspect ratio.",
+        400,
+        "local_reference_error",
+        false,
+      ));
+    });
+  });
+}
+
 async function probeReferenceImage(filePath: string): Promise<void> {
+  await inspectReferenceImage(filePath);
   const command = process.env.H3_FFMPEG?.trim() || "ffmpeg";
   await new Promise<void>((resolve, reject) => {
     const child = spawn(command, [
@@ -295,6 +380,100 @@ async function probeReferenceImage(filePath: string): Promise<void> {
       ));
     });
   });
+}
+
+async function processReferenceImage(
+  source: string,
+  directory: string,
+  name: string,
+  width: number,
+  height: number,
+  fit: LocalH3FrameFitId,
+): Promise<string> {
+  const command = process.env.H3_FFMPEG?.trim() || "ffmpeg";
+  const output = path.join(directory, `${name}-framed.png`);
+  const filter = fit === "cover"
+    ? `setsar=1,crop='if(gt(iw/ih,${width}/${height}),ih*${width}/${height},iw)':'if(gt(iw/ih,${width}/${height}),ih,iw*${height}/${width})',scale=${width}:${height},setsar=1`
+    : `setsar=1,scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1`;
+
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(command, [
+      "-v",
+      "error",
+      "-nostdin",
+      "-i",
+      source,
+      "-vf",
+      filter,
+      "-frames:v",
+      "1",
+      "-an",
+      "-sn",
+      "-pix_fmt",
+      "rgb24",
+      output,
+    ], {
+      env: localProcessEnvironment(),
+      shell: false,
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    let diagnostics = "";
+    let settled = false;
+    const finish = (error?: LocalH3Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (error) reject(error);
+      else resolve();
+    };
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      finish(new LocalH3Error(
+        "Reference-image framing exceeded 30 seconds.",
+        400,
+        "local_reference_error",
+        false,
+      ));
+    }, 30_000);
+    timeout.unref();
+
+    child.stderr.on("data", (chunk: Buffer) => {
+      diagnostics = `${diagnostics}${chunk.toString("utf8")}`.slice(-2_000);
+    });
+    child.once("error", () => finish(new LocalH3Error(
+      "FFmpeg is required to frame local reference images.",
+      503,
+      "local_configuration_error",
+      false,
+    )));
+    child.once("close", (code) => {
+      if (code === 0) {
+        finish();
+        return;
+      }
+      const detail = diagnostics.trim();
+      finish(new LocalH3Error(
+        detail
+          ? `The reference image could not be framed: ${detail}`
+          : "The reference image could not be framed for the selected resolution.",
+        400,
+        "local_reference_error",
+        false,
+      ));
+    });
+  });
+
+  const framed = await stat(output).catch(() => undefined);
+  if (!framed?.isFile() || framed.size < 1) {
+    throw new LocalH3Error(
+      "FFmpeg did not create the framed reference image.",
+      500,
+      "local_storage_error",
+      true,
+    );
+  }
+  await chmod(output, 0o600);
+  return output;
 }
 
 async function prepareReferenceDirectory(directory: string): Promise<void> {
@@ -360,7 +539,7 @@ async function storeLocalReferenceImage(data: Buffer): Promise<{ path: string }>
   const output = path.join(directory, `${randomUUID()}${extension}`);
   await writeFile(output, data, { flag: "wx", mode: 0o600 });
   try {
-    await probeReferenceImage(output);
+    await serializeReferenceProcessing(() => probeReferenceImage(output));
     return { path: output };
   } catch (error) {
     await rm(output, { force: true }).catch(() => undefined);
@@ -416,6 +595,20 @@ async function copyReferenceImage(source: string, directory: string, name: strin
   await writeFile(output, data, { flag: "wx", mode: 0o600 });
   await probeReferenceImage(output);
   return output;
+}
+
+function prepareReferenceImage(
+  source: string,
+  directory: string,
+  name: string,
+  width: number,
+  height: number,
+  fit: LocalH3FrameFitId,
+): Promise<string> {
+  return serializeReferenceProcessing(async () => {
+    const copied = await copyReferenceImage(source, directory, name);
+    return processReferenceImage(copied, directory, name, width, height, fit);
+  });
 }
 
 function getJob(id: string): LocalJob {
@@ -618,6 +811,15 @@ export async function generateLocalVideo(
   input: LocalGenerateVideoInput,
 ): Promise<VideoStatusResponse> {
   const runtime = await resolveRuntime();
+  const resolution = getLocalH3Resolution(input.resolution);
+  if (!resolution) {
+    throw new LocalH3Error(
+      "The selected local resolution preset is not supported.",
+      400,
+      "local_resolution_error",
+      false,
+    );
+  }
   const firstFrameSource = input.firstFramePath;
   const lastFrameSource = input.lastFramePath;
   if (
@@ -654,16 +856,30 @@ export async function generateLocalVideo(
 
     const id = `${LOCAL_JOB_PREFIX}${randomUUID()}`;
     const directory = path.join(runtime.jobsDirectory, id);
-    await mkdir(directory, { recursive: false });
+    await mkdir(directory, { recursive: false, mode: 0o700 });
 
     let firstFrame: string | undefined;
     let lastFrame: string | undefined;
     try {
       if (firstFrameSource) {
-        firstFrame = await copyReferenceImage(firstFrameSource, directory, "first-frame");
+        firstFrame = await prepareReferenceImage(
+          firstFrameSource,
+          directory,
+          "first-frame",
+          resolution.width,
+          resolution.height,
+          input.frameFit,
+        );
       }
       if (lastFrameSource) {
-        lastFrame = await copyReferenceImage(lastFrameSource, directory, "last-frame");
+        lastFrame = await prepareReferenceImage(
+          lastFrameSource,
+          directory,
+          "last-frame",
+          resolution.width,
+          resolution.height,
+          input.frameFit,
+        );
       }
     } catch (error) {
       await rm(directory, { recursive: true, force: true });

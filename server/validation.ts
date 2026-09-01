@@ -5,6 +5,7 @@ import {
   getLocalH3QualityPreset,
   getLocalH3Resolution,
   LOCAL_H3_DURATIONS,
+  LOCAL_H3_FRAME_FIT_IDS,
 } from "../shared/localH3.js";
 import { getVideoModel } from "../shared/videoModels.js";
 
@@ -104,6 +105,7 @@ const localGenerateVideoSchema = z
       .max(Number.MAX_SAFE_INTEGER, "Seed is too large."),
     firstFramePath: optionalAbsolutePath,
     lastFramePath: optionalAbsolutePath,
+    frameFit: z.enum(LOCAL_H3_FRAME_FIT_IDS).default("contain"),
     ssdStreaming: z.boolean(),
   })
   .strict();
