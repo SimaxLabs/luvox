@@ -6,7 +6,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { access, chmod, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { access, chmod, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import {
@@ -69,6 +69,7 @@ interface LocalJob {
   error?: string;
   diagnostics: string;
   progressCarry: string;
+  discardOnCompletion?: boolean;
 }
 
 export class LocalH3Error extends Error {
@@ -98,6 +99,7 @@ let storageServerStartedAt: string | undefined;
 let shuttingDown = false;
 let storageReady = false;
 let inFlightOperations = 0;
+let localWorkspaceVersion = 0;
 const idleResolvers = new Set<() => void>();
 const childProcessGroups = new Set<number>();
 const persistedProcessGroups = new Map<number, StorageProcessGroup>();
@@ -538,9 +540,22 @@ async function releaseStorageLock(): Promise<void> {
     const tombstone = `${lockPath}.stale-${lockInfo.dev}-${lockInfo.ino}`;
     await rename(lockPath, tombstone);
     storageLockPath = undefined;
+    await rm(tombstone, { recursive: true, force: true });
     return;
   }
   throw new Error("H3_JOBS_DIR lock ownership changed before release.");
+}
+
+async function isOwnedStorageLockTombstone(tombstonePath: string): Promise<boolean> {
+  const info = await lstat(tombstonePath).catch(() => undefined);
+  if (!info || info.isSymbolicLink()) return false;
+  if (path.basename(tombstonePath) !== `${STORAGE_LOCK}.stale-${info.dev}-${info.ino}`) return false;
+  const owner = info.isDirectory()
+    ? await readFile(path.join(tombstonePath, STORAGE_LOCK_OWNER), "utf8").catch(() => "")
+    : info.isFile()
+      ? await readFile(tombstonePath, "utf8").catch(() => "")
+      : "";
+  return Boolean(owner.trim());
 }
 
 async function ensureStorageOwnership(jobsDirectory: string): Promise<void> {
@@ -563,18 +578,10 @@ async function ensureStorageOwnership(jobsDirectory: string): Promise<void> {
   const entries = await readdir(jobsDirectory, { withFileTypes: true });
   for (const entry of entries) {
     if (entry.name === STORAGE_LOCK && entry.isDirectory()) continue;
-    if (STORAGE_LOCK_TOMBSTONE.test(entry.name) && (entry.isDirectory() || entry.isFile())) {
-      const tombstonePath = path.join(jobsDirectory, entry.name);
-      const tombstoneInfo = await lstat(tombstonePath);
-      const expectedName = `${STORAGE_LOCK}.stale-${tombstoneInfo.dev}-${tombstoneInfo.ino}`;
-      let owner = "";
-      if (entry.isDirectory() && !tombstoneInfo.isSymbolicLink()) {
-        owner = await readFile(path.join(tombstonePath, STORAGE_LOCK_OWNER), "utf8").catch(() => "");
-      } else if (entry.isFile()) {
-        owner = await readFile(tombstonePath, "utf8").catch(() => "");
-      }
-      if (entry.name === expectedName && owner.trim()) continue;
-    }
+    if (
+      STORAGE_LOCK_TOMBSTONE.test(entry.name) &&
+      await isOwnedStorageLockTombstone(path.join(jobsDirectory, entry.name))
+    ) continue;
     if (entry.name === "reference-images" && entry.isDirectory()) {
       const references = await readdir(path.join(jobsDirectory, entry.name));
       if (references.length === 0) continue;
@@ -589,24 +596,37 @@ async function ensureStorageOwnership(jobsDirectory: string): Promise<void> {
   await writeFile(marker, STORAGE_OWNER_CONTENT, { flag: "wx", mode: 0o600 });
 }
 
+async function cleanReferenceStorage(jobsDirectory: string): Promise<void> {
+  const referenceDirectory = path.join(jobsDirectory, "reference-images");
+  const referenceInfo = await lstat(referenceDirectory).catch(() => undefined);
+  if (!referenceInfo?.isDirectory() || referenceInfo.isSymbolicLink()) return;
+
+  const references = await readdir(referenceDirectory, { withFileTypes: true });
+  for (const reference of references) {
+    if (reference.isFile() && REFERENCE_IMAGE_NAME.test(reference.name)) {
+      await rm(path.join(referenceDirectory, reference.name), { force: true });
+    }
+  }
+  if ((await readdir(referenceDirectory)).length === 0) {
+    await rmdir(referenceDirectory).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT" && error.code !== "ENOTEMPTY") throw error;
+    });
+  }
+}
+
 async function cleanOwnedStorage(jobsDirectory: string): Promise<void> {
   const entries = await readdir(jobsDirectory, { withFileTypes: true });
   for (const entry of entries) {
-    if (entry.isDirectory() && LOCAL_JOB_ID.test(entry.name)) {
-      await rm(path.join(jobsDirectory, entry.name), { recursive: true, force: true });
+    const entryPath = path.join(jobsDirectory, entry.name);
+    if (
+      (entry.isDirectory() && LOCAL_JOB_ID.test(entry.name)) ||
+      (STORAGE_LOCK_TOMBSTONE.test(entry.name) && await isOwnedStorageLockTombstone(entryPath))
+    ) {
+      await rm(entryPath, { recursive: true, force: true });
     }
   }
 
-  const referenceDirectory = path.join(jobsDirectory, "reference-images");
-  const referenceInfo = await lstat(referenceDirectory).catch(() => undefined);
-  if (referenceInfo?.isDirectory() && !referenceInfo.isSymbolicLink()) {
-    const references = await readdir(referenceDirectory, { withFileTypes: true });
-    for (const reference of references) {
-      if (reference.isFile() && REFERENCE_IMAGE_NAME.test(reference.name)) {
-        await rm(path.join(referenceDirectory, reference.name), { force: true });
-      }
-    }
-  }
+  await cleanReferenceStorage(jobsDirectory);
 
   jobs.clear();
   queue.length = 0;
@@ -1194,6 +1214,31 @@ export function deleteLocalReferenceImage(token: string): Promise<{ deleted: boo
   return operation.finally(release);
 }
 
+export function discardLocalH3Workspace(): Promise<{ cleared: true }> {
+  const release = beginLocalOperation();
+  localWorkspaceVersion += 1;
+  for (const job of jobs.values()) job.discardOnCompletion = true;
+  const operation = referenceUploadTail.then(async () => {
+    assertLocalOperationMayContinue();
+    // ponytail: local mode is one loopback workspace; add per-tab ownership only if concurrent tabs are supported.
+    const jobsDirectory = path.dirname(storageLockPath!);
+    for (const job of jobs.values()) {
+      if (!job.discardOnCompletion || job.id === activeJobId || queue.includes(job.id)) continue;
+      try {
+        await rm(job.directory, { recursive: true, force: true });
+        jobs.delete(job.id);
+      } catch {
+        // Keep the job registered so a later reload or shutdown can retry cleanup.
+      }
+    }
+    await serializeReferenceProcessing(() => cleanReferenceStorage(jobsDirectory));
+    referenceUploads.clear();
+    return { cleared: true } as const;
+  });
+  referenceUploadTail = operation.then(() => undefined, () => undefined);
+  return operation.finally(release);
+}
+
 async function copyReferenceImage(source: string, directory: string, name: string): Promise<string> {
   let data: Buffer;
   try {
@@ -1446,7 +1491,15 @@ function startNextJob(): void {
   }
 
   activeJobId = id;
-  const execution = executeJob(job).finally(() => {
+  const execution = executeJob(job).finally(async () => {
+    if (job.discardOnCompletion) {
+      try {
+        await rm(job.directory, { recursive: true, force: true });
+        jobs.delete(id);
+      } catch {
+        // Keep the job registered so a later reload or shutdown can retry cleanup.
+      }
+    }
     activeJobId = undefined;
     if (activeExecution === execution) activeExecution = undefined;
     startNextJob();
@@ -1477,6 +1530,7 @@ export function isLocalJobId(id: string): boolean {
 
 async function generateLocalVideoOperation(
   input: LocalGenerateVideoInput,
+  submissionWorkspaceVersion: number,
 ): Promise<VideoStatusResponse> {
   const runtime = await resolveRuntime();
   // ponytail: the sole caller validates this static preset before dispatch.
@@ -1546,6 +1600,7 @@ async function generateLocalVideoOperation(
       progress: 0,
       diagnostics: "",
       progressCarry: "",
+      discardOnCompletion: submissionWorkspaceVersion !== localWorkspaceVersion || undefined,
     };
 
     if (shuttingDown) {
@@ -1571,7 +1626,7 @@ async function generateLocalVideoOperation(
 
 export function generateLocalVideo(input: LocalGenerateVideoInput): Promise<VideoStatusResponse> {
   const release = beginLocalOperation();
-  return generateLocalVideoOperation(input).finally(release);
+  return generateLocalVideoOperation(input, localWorkspaceVersion).finally(release);
 }
 
 export function getLocalVideoStatus(id: string): VideoStatusResponse {

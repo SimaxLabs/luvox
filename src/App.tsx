@@ -10,6 +10,7 @@ import {
 } from "../shared/localH3";
 import {
   ApiError,
+  discardLocalWorkspace,
   deleteLocalReferenceImage,
   generateVideo,
   getAppConfig,
@@ -320,6 +321,12 @@ export default function App() {
   };
 
   useEffect(() => {
+    const navigation = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined;
+    const root = document.documentElement;
+    if (navigation?.type === "reload" && !root.dataset.localWorkspaceDiscarded) {
+      root.dataset.localWorkspaceDiscarded = "true";
+      void discardLocalWorkspace().catch(() => undefined);
+    }
     try {
       localStorage.removeItem("motion-lab:video-job");
     } catch {

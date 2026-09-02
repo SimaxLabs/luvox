@@ -25,7 +25,7 @@ npm run dev
 
 Vite runs at [http://localhost:3000](http://localhost:3000) and proxies `/api` to Express on port `3001`.
 
-Generation IDs, video state, reference paths, and prompts are not persisted in browser storage. Each server boot has a new session ID; the UI checks it every three seconds and resets the workspace when the API stops or restarts. This UI reset does not cancel paid OpenRouter work already submitted to the provider.
+Generation IDs, video state, reference paths, and prompts are not persisted in browser storage. Reloading the page discards completed local jobs and staged references; active local work finishes and deletes itself afterward. Each server boot has a new session ID; the UI checks it every three seconds and resets the workspace when the API stops or restarts. This UI reset does not cancel paid OpenRouter work already submitted to the provider.
 
 ## Local h3.c generation
 
@@ -42,7 +42,7 @@ Run the app directly with `npm run dev`, or use `npm run build && NODE_ENV=produ
 
 The backend runs one generation at a time and accepts at most three waiting jobs. The local presets include exact `576x1024` (`9:16`) output and h3.c's documented 22, 39, 56, 107, 243, and 362-frame durations. The UI also exposes quality, seed, first/last reference frames, and optional SSD streaming presets. When a new local job is successfully accepted, the previous job folder identified by the UI is removed only if that job is completed or failed; active and queued jobs are preserved.
 
-On startup the server acquires an ownership lock for `H3_JOBS_DIR` and removes prior Motion Lab generation folders and staged UUID reference images. An unmarked directory is adopted only when empty (an empty `reference-images` directory is also allowed); a non-empty unmarked directory is rejected rather than cleaned. Graceful `SIGINT`/`SIGTERM` shutdown stops child process groups, removes the same app-owned artifacts, and releases the lock. A crash may leave files temporarily, but the next boot removes them before accepting requests. Unknown files and manually entered reference sources are not touched.
+On startup the server acquires an ownership lock for `H3_JOBS_DIR` and removes prior Motion Lab generation folders, lock tombstones, and staged UUID reference images. An unmarked directory is adopted only when empty (an empty `reference-images` directory is also allowed); a non-empty unmarked directory is rejected rather than cleaned. Graceful `SIGINT`/`SIGTERM` shutdown stops child process groups, removes the same app-owned artifacts and empty staging directory, then releases and removes the lock. A crash may leave files temporarily, but the next boot removes them before accepting requests. The `.motion-lab-owned` safety marker remains; unknown files and manually entered reference sources are not touched.
 
 Local first/last frames can be entered as absolute paths to readable PNG, JPEG, or WebP files up to 25 MB. The Browse buttons upload a selected image to `H3_JOBS_DIR/reference-images` and fill that server-owned absolute path into the form. Browsers do not reveal the selected file's original absolute path. Each submitted job validates, copies, and frames its references to the selected output canvas before entering the queue. **Preserve full image** is the default: it keeps every source pixel in proportion and pads the extra canvas required by a different output ratio. **Crop to fill** is an explicit alternative that removes image edges. Both avoid h3.c's native first-frame stretching. Each upload uses a volatile client-generated idempotency and ownership token registered by the server; replacing or clearing that field removes the old staging file atomically by token, and an interrupted response can be retried safely. Path text alone can never authorize deletion, so manually entered files are never deleted. Staged uploads otherwise expire after 24 hours, and the staging area accepts up to 20 unexpired images.
 
@@ -59,6 +59,7 @@ The `h3.c` engine is MIT licensed, but MiniMax H3 weights use a separate communi
 
 - `POST /api/video/generate` validates model-specific controls and submits a generation.
 - `POST /api/local/reference-image` stores a browsed local reference image and returns its server-owned absolute path.
+- `DELETE /api/local/workspace` discards completed local jobs and staged reference images after a page reload.
 - `GET /api/video/status/:id` returns the normalized `queued`, `processing`, `completed`, or `failed` state for either provider.
 - `GET /api/video/content/:id` securely proxies OpenRouter content or serves a completed local MP4 with range support.
 

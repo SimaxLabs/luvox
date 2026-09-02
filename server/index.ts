@@ -5,6 +5,7 @@ import { Readable } from "node:stream";
 import { z, ZodError } from "zod";
 import {
   beginLocalH3Shutdown,
+  discardLocalH3Workspace,
   deleteLocalReferenceImage,
   generateLocalVideo,
   getLocalVideoPath,
@@ -123,6 +124,20 @@ app.delete(
       assertLoopbackRequest(request);
       const input = localReferenceDeleteSchema.parse(request.body);
       const result = await deleteLocalReferenceImage(input.token);
+      response.setHeader("Cache-Control", "private, no-store");
+      response.json(result);
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+app.delete(
+  "/api/local/workspace",
+  async (request: Request, response: Response, next: NextFunction) => {
+    try {
+      assertLoopbackRequest(request);
+      const result = await discardLocalH3Workspace();
       response.setHeader("Cache-Control", "private, no-store");
       response.json(result);
     } catch (error) {
@@ -390,7 +405,7 @@ function closeServer(): Promise<void> {
   return closing;
 }
 
-for (const signal of ["SIGINT", "SIGTERM"] as const) {
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
   process.once(signal, () => {
     void closeServer()
       .then(() => process.exit(0))

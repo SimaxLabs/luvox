@@ -137,6 +137,10 @@ export function deleteLocalReferenceImage(token: string): Promise<{ deleted: boo
   });
 }
 
+export function discardLocalWorkspace(): Promise<{ cleared: true }> {
+  return request<{ cleared: true }>("/api/local/workspace", { method: "DELETE" });
+}
+
 export function getVideoStatus(
   id: string,
   sessionApiKey?: string,
