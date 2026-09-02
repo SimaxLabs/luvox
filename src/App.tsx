@@ -1,5 +1,5 @@
 import { type ChangeEvent, type FormEvent, type ReactNode, useEffect, useRef, useState } from "react";
-import { VIDEO_MODELS } from "../shared/videoModels";
+import { getVideoModel, VIDEO_MODELS } from "../shared/videoModels";
 import {
   getLocalH3QualityPreset,
   LOCAL_H3_DURATIONS,
@@ -25,8 +25,10 @@ import {
 interface FormState {
   provider: "openrouter" | "local";
   prompt: string;
+  model: string;
   duration: number;
   aspectRatio: string;
+  resolution: string;
   firstFrameUrl: string;
   lastFrameUrl: string;
   generateAudio: boolean;
@@ -63,8 +65,10 @@ function initialForm(): FormState {
   return {
     provider: "openrouter",
     prompt: "",
+    model: model.id,
     duration: model.defaultDuration,
     aspectRatio: model.defaultAspectRatio,
+    resolution: model.defaultResolution,
     firstFrameUrl: "",
     lastFrameUrl: "",
     generateAudio: model.generateAudio.default,
@@ -300,7 +304,7 @@ export default function App() {
   const serviceState = useRef<"unknown" | "online" | "offline">("unknown");
   const workspaceVersion = useRef(0);
 
-  const selectedModel = VIDEO_MODELS[0];
+  const selectedModel = getVideoModel(form.model) ?? VIDEO_MODELS[0];
   const selectedLocalQuality = getLocalH3QualityPreset(form.localQuality);
   const isActive = job?.status === "queued" || job?.status === "processing";
   const jobApiKey = job?.provider === "openrouter" ? job.temporaryApiKey : undefined;
@@ -623,7 +627,7 @@ export default function App() {
               model: selectedModel.id,
               duration: form.duration,
               aspectRatio: form.aspectRatio,
-              resolution: selectedModel.defaultResolution,
+              resolution: form.resolution,
               firstFrameUrl: form.firstFrameUrl || undefined,
               lastFrameUrl: form.lastFrameUrl || undefined,
               generateAudio: selectedModel.generateAudio.supported ? form.generateAudio : undefined,
@@ -737,7 +741,7 @@ export default function App() {
           </div>
           {appConfig?.localH3.supported === false && (
             <p className="-mt-5 mb-7 text-[11px] leading-4 text-stone-500">
-              Local h3.c requires macOS on Apple Silicon and a loopback-only server; it is unavailable in Docker or with a public bind address.
+              Local h3.c requires macOS on Apple Silicon and a loopback-only server. It is unavailable in Docker.
             </p>
           )}
 
@@ -802,12 +806,37 @@ export default function App() {
           <>
           <div className="mt-6 grid gap-5 sm:grid-cols-2">
             <div>
-              <p className="mb-2 text-[11px] font-bold uppercase tracking-[0.18em] text-stone-700">Model</p>
-              <p className="flex h-12 items-center border border-black/15 bg-[#faf9f3] px-3 text-sm">{selectedModel.name}</p>
+              <FieldLabel htmlFor="model">Model</FieldLabel>
+              <select
+                className="h-12 w-full border border-black/15 bg-[#faf9f3] px-3 text-sm outline-none transition focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
+                id="model"
+                onChange={(event) => {
+                  const model = getVideoModel(event.target.value);
+                  if (!model) return;
+                  setForm((current) => ({
+                    ...current,
+                    model: model.id,
+                    duration: model.defaultDuration,
+                    aspectRatio: model.defaultAspectRatio,
+                    resolution: model.defaultResolution,
+                    generateAudio: model.generateAudio.default,
+                  }));
+                }}
+                value={selectedModel.id}
+              >
+                {VIDEO_MODELS.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}
+              </select>
             </div>
             <div>
-              <p className="mb-2 text-[11px] font-bold uppercase tracking-[0.18em] text-stone-700">Resolution</p>
-              <p className="flex h-12 items-center border border-black/15 bg-[#faf9f3] px-3 text-sm">{selectedModel.defaultResolution}</p>
+              <FieldLabel htmlFor="resolution">Resolution</FieldLabel>
+              <select
+                className="h-12 w-full border border-black/15 bg-[#faf9f3] px-3 text-sm outline-none transition focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
+                id="resolution"
+                onChange={(event) => setForm((current) => ({ ...current, resolution: event.target.value }))}
+                value={form.resolution}
+              >
+                {selectedModel.resolutions.map((resolution) => <option key={resolution} value={resolution}>{resolution}</option>)}
+              </select>
             </div>
           </div>
 

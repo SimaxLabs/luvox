@@ -6,7 +6,7 @@ export interface VideoModelConfig {
   aspectRatios: readonly string[];
   defaultAspectRatio: string;
   resolutions: readonly string[];
-  defaultResolution?: string;
+  defaultResolution: string;
   frameImages: {
     supported: readonly ("first_frame" | "last_frame")[];
     input: "public_url" | "none";
@@ -38,6 +38,24 @@ export const VIDEO_MODELS = [
     generateAudio: {
       supported: true,
       default: true,
+    },
+  },
+  {
+    id: "minimax/hailuo-3-max",
+    name: "MiniMax: H3 Max",
+    durations: [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+    defaultDuration: 5,
+    aspectRatios: ["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"],
+    defaultAspectRatio: "16:9",
+    resolutions: ["480p", "768p"],
+    defaultResolution: "768p",
+    frameImages: {
+      supported: ["first_frame", "last_frame"],
+      input: "public_url",
+    },
+    generateAudio: {
+      supported: false,
+      default: false,
     },
   },
 ] as const satisfies readonly VideoModelConfig[];
