@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="public/logo.png" alt="Motio logo" width="160" />
+</p>
+
 # Motio
 
 **Start with an idea or a frame. Choose how it runs. Set it in motion.**

@@ -51,6 +51,7 @@ type IconName =
   | "copy"
   | "download"
   | "film"
+  | "github"
   | "image"
   | "lock"
   | "spark";
@@ -85,6 +86,7 @@ function Icon({ name, className = "size-4" }: { name: IconName; className?: stri
     copy: <><rect x="9" y="9" width="11" height="11" rx="2" /><path d="M15 9V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h3" /></>,
     download: <><path d="M12 3v12m-5-5 5 5 5-5" /><path d="M5 21h14" /></>,
     film: <><rect x="3" y="5" width="18" height="14" rx="2" /><path d="M7 5v14M17 5v14M3 9h4m10 0h4M3 15h4m10 0h4" /></>,
+    github: <><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3.3-.4 6.8-1.6 6.8-7A5.4 5.4 0 0 0 19.3 4 5 5 0 0 0 19.2.5S18 0 15 1.8a13.4 13.4 0 0 0-7 0C5-.1 3.8.5 3.8.5A5 5 0 0 0 3.7 4a5.4 5.4 0 0 0-1.5 3.7c0 5.4 3.5 6.6 6.8 7A4.8 4.8 0 0 0 8 18v4" /><path d="M8 19c-3 .9-3-1.5-4-2" /></>,
     image: <><rect x="3" y="4" width="18" height="16" rx="2" /><circle cx="8.5" cy="9" r="1.5" /><path d="m21 15-5-5L5 20" /></>,
     lock: <><rect x="5" y="10" width="14" height="11" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></>,
     spark: <path d="m12 3 1.3 4.2L17 9l-3.7 1.8L12 15l-1.3-4.2L7 9l3.7-1.8L12 3Zm6 11 .7 2.3L21 17l-2.3.7L18 20l-.7-2.3L15 17l2.3-.7L18 14ZM5 4l.7 2.3L8 7l-2.3.7L5 10l-.7-2.3L2 7l2.3-.7L5 4Z" />,
@@ -687,34 +689,28 @@ export default function App() {
       <header className="border-b border-white/10 bg-[#0c0d0c] text-white">
         <div className="mx-auto flex max-w-[1500px] items-center justify-between px-5 py-4 sm:px-8 lg:px-10">
           <div className="flex items-center gap-3">
-            <div className="flex size-8 items-center justify-center bg-[#d9ff72] text-black">
-              <Icon name="film" className="size-4" />
-            </div>
-            <div>
-              <p className="font-display text-sm uppercase tracking-[-0.02em]">Motio</p>
-              <p className="font-mono text-[8px] uppercase tracking-[0.2em] text-white/35">Remote + local video studio</p>
-            </div>
+            <img alt="" className="size-8 object-contain" src="/logo.png" />
+            <p className="font-display text-sm uppercase tracking-[-0.02em]">Motio</p>
           </div>
-          <div className="flex items-center gap-2 rounded-full border border-white/10 px-3 py-1.5 text-[9px] uppercase tracking-[0.15em] text-white/55">
-            <Icon name="lock" className="size-3 text-[#d9ff72]" />
-            <span className="hidden sm:inline">{form.provider === "local" ? "Local Metal" : sessionApiKey.trim() ? "Session override active" : "API key secured"}</span>
-            <span className="sm:hidden">{form.provider === "local" ? "Local" : "Secured"}</span>
-          </div>
+          <a
+            className="flex items-center gap-2 rounded-full border border-white/10 px-3 py-1.5 text-[9px] uppercase tracking-[0.15em] text-white/55 transition hover:border-[#d9ff72]/50 hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#d9ff72]"
+            href="https://github.com/SimaxLabs/motio"
+            rel="noreferrer"
+            target="_blank"
+          >
+            <Icon name="github" className="size-3 text-[#d9ff72]" />
+            GitHub
+          </a>
         </div>
       </header>
 
       <section className="border-b border-white/10 bg-[#0c0d0c] text-white">
-        <div className="mx-auto grid max-w-[1500px] gap-7 px-5 py-10 sm:px-8 md:grid-cols-[1fr_auto] md:items-end lg:px-10 lg:py-14">
-          <div>
-            <p className="mb-4 font-mono text-[10px] uppercase tracking-[0.28em] text-[#d9ff72]">Director's console / 001</p>
-            <h1 className="max-w-4xl font-display text-[clamp(3.25rem,8vw,7.8rem)] uppercase leading-[0.77] tracking-[-0.075em]">
-              Make the still
-              <span className="block text-white/32">start moving.</span>
-            </h1>
-          </div>
-          <p className="max-w-xs border-l border-[#d9ff72]/50 pl-4 text-xs leading-5 text-white/45 md:mb-1">
-            Compose a scene, set the frame, and render audiovisual motion with the selected model.
-          </p>
+        <div className="mx-auto max-w-[1500px] px-3 py-8 sm:px-8 sm:py-10 lg:px-10 lg:py-12">
+          <h1 className="w-full text-center font-display text-[clamp(1.75rem,9vw,2.5rem)] uppercase leading-[0.9] tracking-[-0.065em] md:whitespace-nowrap md:text-[clamp(1.25rem,3vw,3rem)] lg:text-left">
+            <span className="block md:inline">Start with an idea</span>{" "}
+            <span className="block text-white/35 md:inline">Choose how it runs</span>{" "}
+            <span className="block text-[#d9ff72] md:inline">Set it in motion</span>
+          </h1>
         </div>
       </section>
 
@@ -750,7 +746,7 @@ export default function App() {
             <div className="flex items-start gap-3">
               <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center bg-white/70"><Icon name="lock" /></div>
               <div className="min-w-0 flex-1">
-                <FieldLabel htmlFor="session-api-key" optional>Temporary API key</FieldLabel>
+                <FieldLabel htmlFor="session-api-key">Temporary OpenRouter API key</FieldLabel>
                 <div className="flex gap-2">
                   <input
                     aria-describedby="session-key-help"
@@ -777,7 +773,7 @@ export default function App() {
                   )}
                 </div>
                 <p className="mt-2 text-[11px] leading-4 text-stone-500" id="session-key-help">
-                  Overrides <code>OPENROUTER_API_KEY</code> for future jobs in this tab. A submitted job keeps its chosen credential in memory until it is cleared.
+                  Temporary for this browser tab only. The key is never stored server-side; submitted jobs keep it in tab memory for authenticated requests until the workspace is cleared or the tab closes.
                 </p>
               </div>
             </div>
@@ -852,7 +848,7 @@ export default function App() {
                 <div>
                   <h3 className="text-xs font-bold uppercase tracking-[0.12em]">Reference frames</h3>
                   <p className="mt-1 text-[11px] leading-4 text-stone-500">
-                    OpenRouter documents public HTTPS image URLs for this endpoint. Local file uploads and base64 are not sent because they are not documented for video generation.
+                    Reference images must use public HTTPS URLs that the model provider can access.
                   </p>
                 </div>
               </div>
@@ -1184,12 +1180,6 @@ export default function App() {
         </section>
       </div>
 
-      <footer className="border-t border-white/10 bg-[#0c0d0c] px-5 py-5 text-white/30 sm:px-8 lg:px-10">
-        <div className="mx-auto flex max-w-[1420px] flex-col gap-2 font-mono text-[9px] uppercase tracking-[0.15em] sm:flex-row sm:items-center sm:justify-between">
-          <span>Local interface / server-side credentials</span>
-          <span>OpenRouter asynchronous video API</span>
-        </div>
-      </footer>
     </main>
   );
 }
