@@ -19,7 +19,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  REGISTRY: ${{ vars.REGISTRY_URL }}
+  REGISTRY: ${{ secrets.REGISTRY_URL }}
   IMAGE_NAME: motio
 
 jobs:
