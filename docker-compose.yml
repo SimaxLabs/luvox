@@ -1,5 +1,5 @@
 services:
-  motion-lab:
+  motio:
     build: .
     init: true
     ports:

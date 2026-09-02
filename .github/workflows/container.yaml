@@ -20,7 +20,7 @@ concurrency:
 
 env:
   REGISTRY: ${{ vars.REGISTRY_URL }}
-  IMAGE_NAME: h3-web
+  IMAGE_NAME: motio
 
 jobs:
   verify:

@@ -19,11 +19,11 @@ import type { GenerationStatus, VideoStatusResponse } from "../shared/videoTypes
 
 const LOCAL_JOB_ID = /^local_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const TERMINAL_MARKER = "terminal-status";
-const STORAGE_LOCK = ".motion-lab.lock";
+const STORAGE_LOCK = ".motio.lock";
 const STORAGE_LOCK_OWNER = "owner.json";
-const STORAGE_LOCK_TOMBSTONE = /^\.motion-lab\.lock\.stale-\d+-\d+$/;
-const STORAGE_OWNER = ".motion-lab-owned";
-const STORAGE_OWNER_CONTENT = "motion-lab-h3-jobs-v1\n";
+const STORAGE_LOCK_TOMBSTONE = /^\.motio\.lock\.stale-\d+-\d+$/;
+const STORAGE_OWNER = ".motio-owned";
+const STORAGE_OWNER_CONTENT = "motio-h3-jobs-v1\n";
 const MAX_DIAGNOSTIC_CHARS = 16_000;
 const MAX_PROGRESS_CARRY_CHARS = 4_096;
 const MAX_QUEUED_JOBS = 3;
@@ -491,7 +491,7 @@ async function acquireStorageLock(jobsDirectory: string): Promise<void> {
       if (processIsRunning(pid)) {
         if (!owner?.serverStartedAt) {
           throw new LocalH3Error(
-            "H3_JOBS_DIR is already owned by another running Motion Lab server.",
+            "H3_JOBS_DIR is already owned by another running Motio server.",
             503,
             "local_storage_locked",
             true,
@@ -500,7 +500,7 @@ async function acquireStorageLock(jobsDirectory: string): Promise<void> {
         const identity = await readProcessIdentity(pid);
         if (!identity || identity.startedAt === owner.serverStartedAt) {
           throw new LocalH3Error(
-            "H3_JOBS_DIR is already owned by another running Motion Lab server.",
+            "H3_JOBS_DIR is already owned by another running Motio server.",
             503,
             "local_storage_locked",
             true,
@@ -567,7 +567,7 @@ async function ensureStorageOwnership(jobsDirectory: string): Promise<void> {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
       throw new LocalH3Error(
-        "H3_JOBS_DIR has an invalid Motion Lab ownership marker.",
+        "H3_JOBS_DIR has an invalid Motio ownership marker.",
         503,
         "local_storage_ownership_error",
         false,
@@ -587,7 +587,7 @@ async function ensureStorageOwnership(jobsDirectory: string): Promise<void> {
       if (references.length === 0) continue;
     }
     throw new LocalH3Error(
-      "H3_JOBS_DIR is not empty and is not marked as Motion Lab-owned storage.",
+      "H3_JOBS_DIR is not empty and is not marked as Motio-owned storage.",
       503,
       "local_storage_ownership_error",
       false,

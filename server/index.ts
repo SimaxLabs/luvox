@@ -383,7 +383,7 @@ if (!Number.isInteger(port) || port < 1 || port > 65_535) {
 await initializeLocalH3Storage();
 
 const server = app.listen(port, host, () => {
-  console.log(`Motion Lab server listening on http://${host}:${port}`);
+  console.log(`Motio server listening on http://${host}:${port}`);
 });
 
 let closing: Promise<void> | undefined;

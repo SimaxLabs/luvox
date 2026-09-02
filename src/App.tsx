@@ -327,11 +327,6 @@ export default function App() {
       root.dataset.localWorkspaceDiscarded = "true";
       void discardLocalWorkspace().catch(() => undefined);
     }
-    try {
-      localStorage.removeItem("motion-lab:video-job");
-    } catch {
-      // Persistence is no longer used; inaccessible legacy storage can be ignored.
-    }
     let disposed = false;
     let timer: ReturnType<typeof setTimeout>;
     let controller: AbortController | undefined;
@@ -696,7 +691,7 @@ export default function App() {
               <Icon name="film" className="size-4" />
             </div>
             <div>
-              <p className="font-display text-sm uppercase tracking-[-0.02em]">Motion Lab</p>
+              <p className="font-display text-sm uppercase tracking-[-0.02em]">Motio</p>
               <p className="font-mono text-[8px] uppercase tracking-[0.2em] text-white/35">Remote + local video studio</p>
             </div>
           </div>
