@@ -1,6 +1,7 @@
 {
   "name": "motio",
   "private": true,
+  "license": "GPL-3.0-only",
   "type": "module",
   "scripts": {
     "dev": "concurrently -k -n web,api -c cyan,magenta \"vite --host 127.0.0.1\" \"tsx watch --env-file-if-exists=.env server/index.ts\"",

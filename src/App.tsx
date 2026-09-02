@@ -713,7 +713,7 @@ export default function App() {
             </h1>
           </div>
           <p className="max-w-xs border-l border-[#d9ff72]/50 pl-4 text-xs leading-5 text-white/45 md:mb-1">
-            Compose a scene, set the frame, and render native audiovisual motion with MiniMax Hailuo 3.
+            Compose a scene, set the frame, and render audiovisual motion with the selected model.
           </p>
         </div>
       </section>
