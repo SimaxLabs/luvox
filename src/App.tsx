@@ -1,5 +1,6 @@
 import { type ChangeEvent, type FormEvent, type ReactNode, useEffect, useRef, useState } from "react";
 import { getVideoModel, VIDEO_MODELS } from "../shared/videoModels";
+import { MUSE_IMAGE_MODEL } from "../shared/imageModels";
 import {
   getLocalH3QualityPreset,
   LOCAL_H3_DURATIONS,
@@ -12,6 +13,7 @@ import {
   ApiError,
   discardLocalWorkspace,
   deleteLocalReferenceImage,
+  generateImage,
   generateVideo,
   getAppConfig,
   getVideoContent,
@@ -19,8 +21,11 @@ import {
   uploadLocalReferenceImage,
   type GenerationStatus,
   type AppConfig,
+  type ImageGenerationResponse,
   type VideoJob,
 } from "./api";
+
+type Workflow = "video" | "image";
 
 interface FormState {
   provider: "openrouter" | "local";
@@ -59,6 +64,16 @@ type IconName =
   | "spark";
 
 const statusOrder: GenerationStatus[] = ["queued", "processing", "completed", "failed"];
+const imageReferenceMaxBytes = 10 * 1024 * 1024;
+const uncertainSubmissionMessage = "OpenRouter may already be processing a paid request that Motio cannot track. Check OpenRouter Activity before unlocking another submission.";
+const uncertainSubmissionErrors = new Set([
+  "invalid_local_response",
+  "invalid_provider_response",
+  "local_network_error",
+  "network_error",
+  "provider_error",
+  "timeout",
+]);
 
 function initialForm(): FormState {
   const model = VIDEO_MODELS[0];
@@ -155,6 +170,7 @@ function Preview({
   job,
   mediaLoading,
   mediaError,
+  pollingStopped,
   onMediaError,
   onMediaRetry,
   videoSource,
@@ -163,6 +179,7 @@ function Preview({
   job: DisplayJob | null;
   mediaLoading: boolean;
   mediaError: string | null;
+  pollingStopped: boolean;
   onMediaError: () => void;
   onMediaRetry: () => void;
   videoSource?: string;
@@ -231,7 +248,7 @@ function Preview({
             {job.status === "queued" ? "On the reel" : "Rendering motion"}
           </p>
           <p className="mt-2 font-mono text-[10px] uppercase tracking-[0.2em] text-white/45">
-            {job.phase || "Automatic status checks are active"}
+            {job.phase || (pollingStopped ? "Automatic status checks stopped" : "Automatic status checks are active")}
           </p>
           {typeof job.progress === "number" && (
             <div className="mx-auto mt-4 h-1 w-40 overflow-hidden bg-white/10">
@@ -282,11 +299,18 @@ function messageFrom(error: unknown): string {
 }
 
 export default function App() {
+  const [workflow, setWorkflow] = useState<Workflow>("video");
   const [form, setForm] = useState<FormState>(initialForm);
+  const [imagePrompt, setImagePrompt] = useState("");
+  const [imageReference, setImageReference] = useState<{ name: string; dataUrl: string } | null>(null);
+  const [readingImageReference, setReadingImageReference] = useState(false);
+  const [imageResult, setImageResult] = useState<ImageGenerationResponse | null>(null);
   const [job, setJob] = useState<DisplayJob | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pollWarning, setPollWarning] = useState<string | null>(null);
+  const [pollingStopped, setPollingStopped] = useState(false);
+  const [submissionUncertain, setSubmissionUncertain] = useState(false);
   const [copied, setCopied] = useState(false);
   const [mediaError, setMediaError] = useState<string | null>(null);
   const [mediaLoading, setMediaLoading] = useState(false);
@@ -298,6 +322,8 @@ export default function App() {
   const [referenceUploadStatus, setReferenceUploadStatus] = useState("");
   const [referenceUploadTokens, setReferenceUploadTokens] = useState<Partial<Record<"first" | "last", string>>>({});
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const generationController = useRef<AbortController | null>(null);
+  const remoteWorkMayContinue = useRef(false);
   const firstFramePathOnFocus = useRef("");
   const lastFramePathOnFocus = useRef("");
   const serverSession = useRef<string | null>(null);
@@ -311,6 +337,12 @@ export default function App() {
   const usesSessionMedia = Boolean(jobApiKey);
   const videoSource = usesSessionMedia ? temporaryVideoUrl || undefined : job?.videoUrl;
   const downloadSource = usesSessionMedia ? temporaryVideoUrl || undefined : job?.downloadUrl;
+  const imageSource = imageResult
+    ? `data:${imageResult.mediaType};base64,${imageResult.b64Json}`
+    : undefined;
+  const imageExtension = imageResult?.mediaType === "image/jpeg"
+    ? "jpg"
+    : imageResult?.mediaType.split("/")[1] || "png";
 
   const clearOutput = () => {
     workspaceVersion.current += 1;
@@ -321,9 +353,17 @@ export default function App() {
     setJob(null);
     setError(null);
     setPollWarning(null);
+    setPollingStopped(false);
+    setSubmissionUncertain(false);
+    remoteWorkMayContinue.current = false;
     setCopied(false);
     setMediaError(null);
     setMediaLoading(false);
+  };
+
+  const clearImageOutput = () => {
+    setImageResult(null);
+    setError(null);
   };
 
   useEffect(() => {
@@ -340,8 +380,16 @@ export default function App() {
     let firstFailureAt = 0;
 
     const resetWorkspace = () => {
+      const preserveSubmissionLock = remoteWorkMayContinue.current;
+      generationController.current?.abort();
+      generationController.current = null;
       clearOutput();
+      clearImageOutput();
+      setWorkflow("video");
       setForm(initialForm());
+      setImagePrompt("");
+      setImageReference(null);
+      setReadingImageReference(false);
       setSubmitting(false);
       setMediaRetry(0);
       setTemporaryVideoUrl(null);
@@ -350,6 +398,11 @@ export default function App() {
       setReferenceUploadTokens({});
       firstFramePathOnFocus.current = "";
       lastFramePathOnFocus.current = "";
+      if (preserveSubmissionLock) {
+        remoteWorkMayContinue.current = true;
+        setSubmissionUncertain(true);
+        setError(uncertainSubmissionMessage);
+      }
     };
 
     const refreshConfig = async () => {
@@ -391,6 +444,7 @@ export default function App() {
     return () => {
       disposed = true;
       workspaceVersion.current += 1;
+      generationController.current?.abort();
       controller?.abort();
       clearTimeout(timer);
     };
@@ -416,6 +470,7 @@ export default function App() {
 
         consecutiveFailures = 0;
         setPollWarning(null);
+        setPollingStopped(false);
         setJob((current) => current?.id === job.id
           ? {
               ...nextJob,
@@ -423,6 +478,10 @@ export default function App() {
               temporaryApiKey: nextJob.status === "failed" ? undefined : current.temporaryApiKey,
             }
           : current);
+
+        if (nextJob.status === "completed" || nextJob.status === "failed") {
+          remoteWorkMayContinue.current = false;
+        }
 
         if (nextJob.status === "failed") {
           setError(nextJob.error || "The video provider could not complete this generation.");
@@ -443,12 +502,16 @@ export default function App() {
           return;
         }
 
+        if (apiError && !apiError.retryable) {
+          setPollingStopped(true);
+          setPollWarning(`${apiError.message} Automatic status checks stopped${job.provider === "openrouter" ? "; verify the job in OpenRouter Activity before clearing it" : ""}.`);
+          return;
+        }
+
         consecutiveFailures += 1;
         const retryDelay = apiError?.retryAfterSeconds
           ? apiError.retryAfterSeconds * 1000
-          : apiError && !apiError.retryable
-            ? 30_000
-            : Math.min(30_000, 5_000 * 2 ** (consecutiveFailures - 1));
+          : Math.min(30_000, 5_000 * 2 ** (consecutiveFailures - 1));
         setPollWarning(`${messageFrom(pollError)} Generation status is unknown; retrying automatically.`);
         timer = setTimeout(poll, retryDelay);
       }
@@ -511,6 +574,17 @@ export default function App() {
       if (copyTimer.current) clearTimeout(copyTimer.current);
     };
   }, []);
+
+  useEffect(() => {
+    if (!submitting && !isActive && !submissionUncertain) return;
+
+    const warnBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = true;
+    };
+    window.addEventListener("beforeunload", warnBeforeUnload);
+    return () => window.removeEventListener("beforeunload", warnBeforeUnload);
+  }, [submitting, isActive, submissionUncertain]);
 
   const releaseChangedReference = (
     position: "first" | "last",
@@ -595,17 +669,101 @@ export default function App() {
     }
   };
 
+  const selectImageReference = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = "";
+    if (!file) return;
+
+    setError(null);
+    if (file.size > imageReferenceMaxBytes) {
+      setError("The reference image must be 10 MB or smaller.");
+      return;
+    }
+
+    const version = workspaceVersion.current;
+    setImageReference(null);
+    setReadingImageReference(true);
+    try {
+      const bytes = new Uint8Array(await file.slice(0, 12).arrayBuffer());
+      const mediaType =
+        bytes[0] === 0x89 &&
+        bytes[1] === 0x50 &&
+        bytes[2] === 0x4e &&
+        bytes[3] === 0x47 &&
+        bytes[4] === 0x0d &&
+        bytes[5] === 0x0a &&
+        bytes[6] === 0x1a &&
+        bytes[7] === 0x0a
+          ? "image/png"
+          : bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff
+            ? "image/jpeg"
+            : new TextDecoder().decode(bytes.slice(0, 4)) === "RIFF" &&
+                new TextDecoder().decode(bytes.slice(8, 12)) === "WEBP"
+              ? "image/webp"
+              : undefined;
+      if (!mediaType) throw new Error("Choose a PNG, JPEG, or WebP reference image.");
+
+      const rawDataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => typeof reader.result === "string"
+          ? resolve(reader.result)
+          : reject(new Error("The browser could not read the reference image."));
+        reader.onerror = () => reject(new Error("The browser could not read the reference image."));
+        reader.readAsDataURL(file);
+      });
+      if (version !== workspaceVersion.current) return;
+      setImageReference({
+        name: file.name,
+        dataUrl: `data:${mediaType};base64,${rawDataUrl.slice(rawDataUrl.indexOf(",") + 1)}`,
+      });
+    } catch (referenceError) {
+      if (version === workspaceVersion.current) setError(messageFrom(referenceError));
+    } finally {
+      if (version === workspaceVersion.current) setReadingImageReference(false);
+    }
+  };
+
   const submit = async (event: FormEvent) => {
     event.preventDefault();
+    if (
+      generationController.current ||
+      submissionUncertain ||
+      submitting ||
+      readingImageReference ||
+      (workflow === "video" && isActive)
+    ) return;
+
+    const requestController = new AbortController();
+    generationController.current = requestController;
+    const isPaidSubmission = workflow === "image" || form.provider === "openrouter";
+    remoteWorkMayContinue.current = isPaidSubmission;
     const version = workspaceVersion.current;
     setSubmitting(true);
     setError(null);
     setPollWarning(null);
+    setPollingStopped(false);
     setCopied(false);
     setMediaError(null);
 
     try {
       const key = sessionApiKey.trim();
+      if (workflow === "image") {
+        setImageResult(null);
+        const result = await generateImage(
+          {
+            prompt: imagePrompt,
+            model: MUSE_IMAGE_MODEL.id,
+            inputReference: imageReference?.dataUrl,
+          },
+          key || undefined,
+          requestController.signal,
+        );
+        if (version !== workspaceVersion.current) return;
+        remoteWorkMayContinue.current = false;
+        setImageResult(result);
+        return;
+      }
+
       const nextJob = form.provider === "local"
         ? await generateVideo({
             provider: "local",
@@ -619,7 +777,7 @@ export default function App() {
             frameFit: form.localFrameFit,
             previousJobId: job?.provider === "local" ? job.id : undefined,
             ssdStreaming: form.localSsdStreaming,
-          })
+          }, undefined, requestController.signal)
         : await generateVideo(
             {
               provider: "openrouter",
@@ -633,8 +791,11 @@ export default function App() {
               generateAudio: selectedModel.generateAudio.supported ? form.generateAudio : undefined,
             },
             key || undefined,
+            requestController.signal,
           );
       if (version !== workspaceVersion.current) return;
+      remoteWorkMayContinue.current = nextJob.provider === "openrouter" &&
+        (nextJob.status === "queued" || nextJob.status === "processing");
       setJob({
         ...nextJob,
         temporaryApiKey:
@@ -648,14 +809,37 @@ export default function App() {
       });
     } catch (submitError) {
       if (version !== workspaceVersion.current) return;
-      setError(messageFrom(submitError));
+      const apiError = submitError instanceof ApiError ? submitError : null;
+      if (
+        isPaidSubmission &&
+        (apiError?.status === 0 || (apiError?.type && uncertainSubmissionErrors.has(apiError.type)))
+      ) {
+        setSubmissionUncertain(true);
+        setError(uncertainSubmissionMessage);
+      } else {
+        remoteWorkMayContinue.current = false;
+        setError(messageFrom(submitError));
+      }
     } finally {
+      if (generationController.current === requestController) {
+        generationController.current = null;
+      }
       if (version === workspaceVersion.current) setSubmitting(false);
     }
   };
 
   const clear = () => {
     if (submitting || uploadingReference !== null) return;
+    if (
+      submissionUncertain &&
+      !window.confirm("OpenRouter may already be processing this request. Check OpenRouter Activity first. Unlock another paid submission anyway?")
+    ) return;
+    if (workflow === "image") {
+      remoteWorkMayContinue.current = false;
+      setSubmissionUncertain(false);
+      clearImageOutput();
+      return;
+    }
     if (
       isActive &&
       !window.confirm(
@@ -721,15 +905,39 @@ export default function App() {
       <div className="mx-auto grid max-w-[1500px] lg:grid-cols-[minmax(0,0.88fr)_minmax(440px,1.12fr)]">
         <form className="bg-[#f0efe8] px-5 py-8 sm:px-8 lg:px-10 lg:py-10" onSubmit={submit}>
           <div className="mb-8 flex items-center justify-between border-b border-black/10 pb-4">
-            <h2 className="font-display text-xl uppercase tracking-[-0.04em]">Scene setup</h2>
-            <span className="font-mono text-[9px] tracking-[0.15em] text-stone-400">01—05</span>
+            <h2 className="font-display text-xl uppercase tracking-[-0.04em]">
+              {workflow === "video" ? "Scene setup" : "First frame setup"}
+            </h2>
+            <span className="font-mono text-[9px] tracking-[0.15em] text-stone-400">
+              {workflow === "video" ? "01—05" : "01—02"}
+            </span>
           </div>
 
-          <div className="mb-7 grid grid-cols-2 gap-1.5 bg-black/5 p-1.5" aria-label="Generation provider">
+          <div className="mb-7 grid grid-cols-2 gap-1.5 bg-black/5 p-1.5" aria-label="Generation workflow" role="group">
+            {(["video", "image"] as const).map((option) => (
+              <button
+                aria-pressed={workflow === option}
+                className={`h-12 text-xs font-bold uppercase tracking-[0.12em] transition disabled:cursor-not-allowed disabled:opacity-40 ${workflow === option ? "bg-black text-[#d9ff72]" : "text-stone-500 hover:bg-white/60 hover:text-black"}`}
+                disabled={submitting || isActive || submissionUncertain || uploadingReference !== null || readingImageReference}
+                key={option}
+                onClick={() => {
+                  setWorkflow(option);
+                  setError(null);
+                }}
+                type="button"
+              >
+                {option === "video" ? "Text to video" : "Generate first frame"}
+              </button>
+            ))}
+          </div>
+
+          {workflow === "video" && (
+          <>
+          <div className="mb-7 grid grid-cols-2 gap-1.5 border border-black/10 p-1.5" aria-label="Video generation provider">
             {(["openrouter", "local"] as const).map((provider) => (
               <button
                 aria-pressed={form.provider === provider}
-                className={`h-12 text-xs font-bold uppercase tracking-[0.12em] transition disabled:cursor-not-allowed disabled:opacity-40 ${form.provider === provider ? "bg-black text-[#d9ff72]" : "text-stone-500 hover:bg-white/60 hover:text-black"}`}
+                className={`h-11 text-[10px] font-bold uppercase tracking-[0.12em] transition disabled:cursor-not-allowed disabled:opacity-40 ${form.provider === provider ? "bg-black text-[#d9ff72]" : "text-stone-500 hover:bg-white/60 hover:text-black"}`}
                 disabled={submitting || isActive || uploadingReference !== null || (provider === "local" && appConfig?.localH3.supported === false)}
                 key={provider}
                 onClick={() => setForm((current) => ({ ...current, provider }))}
@@ -744,8 +952,10 @@ export default function App() {
               Local h3.c requires macOS on Apple Silicon and a loopback-only server. It is unavailable in Docker.
             </p>
           )}
+          </>
+          )}
 
-          {form.provider === "openrouter" && (
+          {(workflow === "image" || form.provider === "openrouter") && (
           <div className="mb-7 border border-black/12 bg-[#e7e5dc] p-4 sm:p-5">
             <div className="flex items-start gap-3">
               <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center bg-white/70"><Icon name="lock" /></div>
@@ -777,13 +987,83 @@ export default function App() {
                   )}
                 </div>
                 <p className="mt-2 text-[11px] leading-4 text-stone-500" id="session-key-help">
-                  Temporary for this browser tab only. The key is never stored server-side; submitted jobs keep it in tab memory for authenticated requests until the workspace is cleared or the tab closes.
+                  Temporary for this browser tab only. The key is never stored server-side; video jobs pin it in tab memory for authenticated status and content requests until the workspace is cleared or the tab closes.
                 </p>
               </div>
             </div>
           </div>
           )}
 
+          {workflow === "image" ? (
+          <fieldset disabled={submitting || readingImageReference}>
+            <div>
+              <FieldLabel htmlFor="image-prompt">Image prompt</FieldLabel>
+              <div className="relative">
+                <textarea
+                  autoFocus
+                  className="min-h-40 w-full resize-y border border-black/15 bg-[#faf9f3] px-4 py-4 text-[15px] leading-6 outline-none transition focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
+                  id="image-prompt"
+                  maxLength={10_000}
+                  onChange={(event) => setImagePrompt(event.target.value)}
+                  placeholder="The opening frame of a rain-soaked night market, cinematic lighting, reflections rippling across the pavement..."
+                  required
+                  value={imagePrompt}
+                />
+                <span className="absolute bottom-3 right-3 font-mono text-[9px] text-stone-400">{imagePrompt.length} / 10K</span>
+              </div>
+            </div>
+            <div className="mt-6 border border-black/12 bg-[#e7e5dc] p-4 sm:p-5">
+              <div className="mb-4 flex items-start gap-3">
+                <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center bg-white/70"><Icon name="image" /></div>
+                <div>
+                  <h3 className="text-xs font-bold uppercase tracking-[0.12em]">Reference image</h3>
+                  <p className="mt-1 text-[11px] leading-4 text-stone-500">
+                    Add one optional PNG, JPEG, or WebP image up to 10 MB.
+                  </p>
+                </div>
+              </div>
+              <FieldLabel htmlFor="image-reference" optional>Image file</FieldLabel>
+              <input
+                accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp"
+                className="h-11 w-full cursor-pointer text-[0] outline-none file:h-11 file:w-full file:cursor-pointer file:border file:border-black/15 file:bg-[#faf9f3] file:px-3 file:text-[10px] file:font-bold file:uppercase file:tracking-[0.12em] hover:file:border-black focus-visible:ring-2 focus-visible:ring-black"
+                id="image-reference"
+                onChange={(event) => void selectImageReference(event)}
+                type="file"
+              />
+              <p aria-live="polite" className="sr-only" role="status">
+                {readingImageReference
+                  ? "Reading reference image."
+                  : imageReference
+                    ? `Reference image ${imageReference.name} is ready.`
+                    : ""}
+              </p>
+              {imageReference && (
+                <div className="mt-3 flex items-center justify-between gap-3 border-t border-black/10 pt-3">
+                  <span className="truncate text-xs text-stone-600">{imageReference.name}</span>
+                  <button
+                    className="shrink-0 text-[10px] font-bold uppercase tracking-[0.12em] text-stone-600 hover:text-black"
+                    onClick={() => setImageReference(null)}
+                    type="button"
+                  >
+                    Remove
+                  </button>
+                </div>
+              )}
+            </div>
+            <div className="mt-6">
+              <p className="mb-2 text-[11px] font-bold uppercase tracking-[0.18em] text-stone-700">Model</p>
+              <p className="flex h-12 items-center border border-black/15 bg-[#faf9f3] px-3 text-sm text-stone-700">
+                {MUSE_IMAGE_MODEL.name}
+              </p>
+              <p className="mt-2 font-mono text-[10px] text-stone-600">
+                OpenRouter price: {MUSE_IMAGE_MODEL.price}
+              </p>
+              <p className="mt-2 text-[11px] leading-4 text-stone-500">
+                The reference is sent through OpenRouter's documented input_references field.
+              </p>
+            </div>
+          </fieldset>
+          ) : (
           <fieldset disabled={submitting || isActive || uploadingReference !== null}>
             <div>
               <FieldLabel htmlFor="prompt">Prompt</FieldLabel>
@@ -826,6 +1106,9 @@ export default function App() {
               >
                 {VIDEO_MODELS.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}
               </select>
+              <p className="mt-2 font-mono text-[10px] leading-4 text-stone-600">
+                OpenRouter price: {selectedModel.price}
+              </p>
             </div>
             <div>
               <FieldLabel htmlFor="resolution">Resolution</FieldLabel>
@@ -1111,6 +1394,7 @@ export default function App() {
             </>
           )}
           </fieldset>
+          )}
 
           {error && (
             <div className="mt-5 border-l-4 border-[#e44d38] bg-[#f9dfd9] px-4 py-3 text-sm leading-5 text-[#712519]" role="alert">
@@ -1121,26 +1405,120 @@ export default function App() {
           <div className="mt-7 flex gap-3">
             <button
               className="group flex h-14 flex-1 items-center justify-between bg-black px-5 font-display text-sm uppercase tracking-[0.02em] text-white transition hover:bg-[#242722] disabled:cursor-not-allowed disabled:opacity-45"
-              disabled={submitting || isActive || uploadingReference !== null || !form.prompt.trim()}
+              disabled={
+                submitting ||
+                readingImageReference ||
+                submissionUncertain ||
+                (workflow === "video" && (isActive || uploadingReference !== null || !form.prompt.trim())) ||
+                (workflow === "image" && !imagePrompt.trim())
+              }
               type="submit"
             >
-              <span>{submitting ? "Submitting..." : isActive ? "Generation active" : form.provider === "local" ? "Generate locally" : "Generate video"}</span>
+              <span>
+                {submitting
+                  ? "Submitting..."
+                  : workflow === "image"
+                    ? "Generate first frame"
+                    : isActive
+                      ? "Generation active"
+                      : form.provider === "local"
+                        ? "Generate locally"
+                        : submissionUncertain
+                          ? "Submission status unknown"
+                          : "Generate video"}
+              </span>
               <span className="flex size-8 items-center justify-center rounded-full bg-[#d9ff72] text-black transition group-hover:translate-x-1"><Icon name="arrow" /></span>
             </button>
-            {(job || error) && (
+            {((workflow === "video" && job) || (workflow === "image" && imageResult) || error || submissionUncertain) && (
               <button
                 className="h-14 border border-black/20 px-4 text-[10px] font-bold uppercase tracking-[0.12em] hover:border-black disabled:cursor-not-allowed disabled:opacity-45"
-                disabled={submitting || uploadingReference !== null}
+                disabled={submitting || uploadingReference !== null || readingImageReference}
                 onClick={clear}
                 type="button"
               >
-                {isActive ? "Stop watching" : "Clear"}
+                {submissionUncertain ? "Unlock retry" : workflow === "video" && isActive ? "Stop watching" : "Clear"}
               </button>
             )}
           </div>
         </form>
 
         <section className="flex min-h-[620px] flex-col bg-[#171917] text-white lg:min-h-full">
+          {workflow === "image" ? (
+          <>
+          <div className="flex items-center justify-between px-5 py-5 sm:px-8">
+            <div>
+              <p className="font-mono text-[9px] uppercase tracking-[0.2em] text-white/60">First frame monitor</p>
+              <h2 className="mt-1 font-display text-lg uppercase">
+                {imageResult ? MUSE_IMAGE_MODEL.name : "No generated frame"}
+              </h2>
+              <p aria-live="polite" className="sr-only" role="status">
+                {submitting ? "Generating first frame." : imageResult ? "First frame generation completed." : ""}
+              </p>
+            </div>
+            {imageResult && (
+              <span className="rounded-full border border-[#d9ff72]/30 px-3 py-1.5 text-[9px] font-bold uppercase tracking-[0.14em] text-[#d9ff72]">
+                Completed
+              </span>
+            )}
+          </div>
+
+          <div className="flex flex-1 items-center p-5 sm:p-8">
+            <div className="relative flex min-h-72 w-full items-center justify-center overflow-hidden border border-white/10 bg-black shadow-[0_24px_80px_rgba(0,0,0,0.35)]">
+              {submitting ? (
+                <div className="relative flex min-h-96 w-full items-center justify-center overflow-hidden bg-[#111310]">
+                  <div className="absolute inset-0 preview-grid opacity-35" />
+                  <div className="relative text-center">
+                    <div className="mx-auto mb-5 size-12 animate-spin rounded-full border border-white/15 border-t-[#d9ff72]" />
+                    <p className="font-display text-2xl uppercase text-white">Rendering first frame</p>
+                    <p className="mt-2 font-mono text-[10px] uppercase tracking-[0.2em] text-white/60">Muse is composing the image</p>
+                  </div>
+                </div>
+              ) : imageSource ? (
+                <img
+                  alt="Generated first frame"
+                  className="max-h-[760px] w-full object-contain"
+                  src={imageSource}
+                />
+              ) : (
+                <div className="relative flex min-h-96 w-full items-center justify-center overflow-hidden bg-[#111310]">
+                  <div className="absolute inset-0 preview-grid opacity-30" />
+                  <div className="relative px-6 text-center">
+                    <Icon name="image" className="mx-auto size-9 text-[#d9ff72]/80" />
+                    <p className="mt-5 font-display text-2xl uppercase tracking-[-0.04em] text-white">Awaiting first frame</p>
+                    <p className="mt-2 max-w-xs text-xs leading-5 text-white/65">
+                      Describe the opening image for your next video.
+                    </p>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="border-t border-white/10 px-5 py-5 sm:px-8">
+            {imageResult && imageSource ? (
+              <>
+                <a
+                  className="flex h-12 w-full items-center justify-center gap-2 bg-[#d9ff72] text-xs font-bold uppercase tracking-[0.12em] text-black transition hover:bg-white"
+                  download={`muse-first-frame.${imageExtension}`}
+                  href={imageSource}
+                >
+                  <Icon name="download" /> Download first frame
+                </a>
+                {typeof imageResult.cost === "number" && (
+                  <p className="mt-3 text-right font-mono text-[9px] uppercase tracking-[0.15em] text-white/60">
+                    OpenRouter cost ${imageResult.cost.toFixed(4)}
+                  </p>
+                )}
+              </>
+            ) : (
+              <p className="font-mono text-[9px] uppercase tracking-[0.15em] text-white/60">
+                Output controls unlock on completion
+              </p>
+            )}
+          </div>
+          </>
+          ) : (
+          <>
           <div className="flex items-center justify-between px-5 py-5 sm:px-8">
             <div>
               <p className="font-mono text-[9px] uppercase tracking-[0.2em] text-white/35">Output monitor</p>
@@ -1162,6 +1540,7 @@ export default function App() {
                 job={job}
                 mediaLoading={mediaLoading}
                 mediaError={mediaError}
+                pollingStopped={pollingStopped}
                 onMediaError={() => setMediaError("The completed video could not be loaded in the player. Try downloading it instead.")}
                 onMediaRetry={() => {
                   setMediaError(null);
@@ -1198,7 +1577,7 @@ export default function App() {
               </div>
             ) : (
               <div className="flex items-center justify-between font-mono text-[9px] uppercase tracking-[0.15em] text-white/28">
-                <span>{isActive ? "Polling every 10 seconds" : "Output controls unlock on completion"}</span>
+                <span>{pollingStopped ? "Automatic polling stopped" : isActive ? "Polling every 10 seconds" : "Output controls unlock on completion"}</span>
                 {typeof job?.cost === "number" && <span>Cost ${job.cost.toFixed(4)}</span>}
               </div>
             )}
@@ -1206,6 +1585,8 @@ export default function App() {
               <p className="mt-3 text-right font-mono text-[9px] uppercase tracking-[0.15em] text-white/35">OpenRouter cost ${job.cost.toFixed(4)}</p>
             )}
           </div>
+          </>
+          )}
         </section>
       </div>
 

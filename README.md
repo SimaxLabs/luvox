@@ -1,14 +1,12 @@
 <p align="center">
-  <img src="public/logo.png" alt="Motio logo" width="160" />
+  <img src="name.png" alt="Motio" width="420" />
 </p>
-
-# Motio
 
 **Start with an idea or a frame. Choose how it runs. Set it in motion.**
 
-Motio is a local studio for shaping prompts, reference frames, and model-specific controls without changing tools every time the backend changes. Generate remotely through [OpenRouter](https://openrouter.ai/docs/guides/overview/multimodal/video-generation), or run [h3.c](https://github.com/antirez/h3.c) directly on a compatible Mac.
+Motio is a local studio for shaping prompts, reference frames, and model-specific controls without changing tools every time the backend changes. Generate videos remotely through [OpenRouter](https://openrouter.ai/docs/guides/overview/multimodal/video-generation), create first-frame images from a prompt and optional reference with [Meta Muse Image](https://openrouter.ai/meta/muse-image) through OpenRouter's [Image API](https://openrouter.ai/docs/guides/overview/multimodal/image-generation), or run [h3.c](https://github.com/antirez/h3.c) directly on a compatible Mac.
 
-The first integrations are intentionally focused. The goal is a small interface that can grow with new video models and workflows while keeping credentials and local files behind your own server.
+The first integrations are intentionally focused. The goal is a small interface that can grow with new generation models and workflows while keeping credentials and local files behind your own server.
 
 ## AI Development Disclosure
 
@@ -27,6 +25,8 @@ docker compose up --build
 ```
 
 Open [http://localhost:3000](http://localhost:3000).
+
+Compose intentionally publishes Motio only on `127.0.0.1`. Keep that host binding so paid generation routes are not exposed to the network.
 
 Local h3.c generation is not available in Docker because the Linux container cannot access macOS Metal or host model files.
 
@@ -66,7 +66,7 @@ The h3.c source and MiniMax H3 model weights have their own licenses and usage r
 
 ## Privacy
 
-The environment API key stays on the server. A key entered in the UI remains only in the current browser tab. Prompts and jobs are not persisted by Motio.
+The environment API key stays on the server. A key entered in the UI remains only in the current browser tab. Prompts, generated images, and jobs are not persisted by Motio.
 
 ## License
 

@@ -18,17 +18,23 @@ import {
   uploadLocalReferenceImage,
 } from "./localH3.js";
 import {
+  generateImage,
   generateVideo,
   getVideoContent,
   getVideoStatus,
   OpenRouterError,
 } from "./openrouter.js";
-import { validateGenerateVideoInput, validateJobId } from "./validation.js";
+import {
+  validateGenerateImageInput,
+  validateGenerateVideoInput,
+  validateJobId,
+} from "./validation.js";
 
 const app = express();
 const isProduction = process.env.NODE_ENV === "production";
 const port = Number(process.env.PORT || (isProduction ? 3000 : 3001));
 const host = process.env.HOST?.trim() || "127.0.0.1";
+const trustContainerProxy = process.env.MOTIO_TRUST_CONTAINER_PROXY === "1";
 const serverSessionId = randomUUID();
 const sessionApiKeySchema = z
   .string()
@@ -46,9 +52,10 @@ function getSessionApiKey(request: Request): string | undefined {
 }
 
 function assertLoopbackRequest(request: Request): void {
-  const normalizeHostname = (value: string) => value.toLowerCase().replace(/^\[|\]$/g, "");
+  const normalizeHostname = (value: string) => value.toLowerCase().replace(/^\[|\]$/g, "").replace(/^::ffff:/, "");
   const allowedHostnames = new Set(["127.0.0.1", "::1", "localhost"]);
   const hostname = normalizeHostname(request.hostname);
+  const remoteAddress = normalizeHostname(request.socket.remoteAddress || "");
   const origin = request.get("Origin");
   let originHostname: string | undefined;
   if (origin) {
@@ -58,13 +65,26 @@ function assertLoopbackRequest(request: Request): void {
       originHostname = "";
     }
   }
-  if (!allowedHostnames.has(hostname) || (originHostname !== undefined && !allowedHostnames.has(originHostname))) {
+  if (
+    (!allowedHostnames.has(remoteAddress) && !trustContainerProxy) ||
+    !allowedHostnames.has(hostname) ||
+    (originHostname !== undefined && !allowedHostnames.has(originHostname))
+  ) {
     throw new LocalH3Error(
-      "Local h3.c operations accept requests only from a loopback origin.",
+      "Motio accepts this operation only from a loopback origin.",
       403,
       "local_request_forbidden",
       false,
     );
+  }
+}
+
+function loopbackOnly(request: Request, _response: Response, next: NextFunction): void {
+  try {
+    assertLoopbackRequest(request);
+    next();
+  } catch (error) {
+    next(error);
   }
 }
 
@@ -115,6 +135,33 @@ app.post(
   },
 );
 
+app.post(
+  "/api/image/generate",
+  loopbackOnly,
+  express.json({ limit: "15mb" }),
+  async (request: Request, response: Response, next: NextFunction) => {
+    const controller = new AbortController();
+    const abortUpstream = () => {
+      if (!response.writableEnded) controller.abort();
+    };
+    response.once("close", abortUpstream);
+    try {
+      const input = validateGenerateImageInput(request.body);
+      const result = await generateImage(
+        input,
+        getSessionApiKey(request),
+        controller.signal,
+      );
+      response.setHeader("Cache-Control", "private, no-store");
+      response.json(result);
+    } catch (error) {
+      if (!controller.signal.aborted) next(error);
+    } finally {
+      response.off("close", abortUpstream);
+    }
+  },
+);
+
 app.use(express.json({ limit: "100kb" }));
 
 app.delete(
@@ -148,38 +195,58 @@ app.delete(
 
 app.post(
   "/api/video/generate",
+  loopbackOnly,
   async (request: Request, response: Response, next: NextFunction) => {
+    const controller = new AbortController();
+    const abortUpstream = () => {
+      if (!response.writableEnded) controller.abort();
+    };
+    response.once("close", abortUpstream);
     try {
       const input = validateGenerateVideoInput(request.body);
-      if (input.provider === "local") assertLoopbackRequest(request);
       const result =
         input.provider === "local"
           ? await generateLocalVideo(input)
-          : await generateVideo(input, getSessionApiKey(request));
+          : await generateVideo(
+              input,
+              getSessionApiKey(request),
+              controller.signal,
+            );
       response.status(202).json(result);
     } catch (error) {
-      next(error);
+      if (!controller.signal.aborted) next(error);
+    } finally {
+      response.off("close", abortUpstream);
     }
   },
 );
 
 app.get(
   "/api/video/status/:id",
+  loopbackOnly,
   async (request: Request, response: Response, next: NextFunction) => {
+    const controller = new AbortController();
+    const abortUpstream = () => {
+      if (!response.writableEnded) controller.abort();
+    };
+    response.once("close", abortUpstream);
     try {
       const id = validateJobId(request.params.id);
       const result = isLocalJobId(id)
         ? getLocalVideoStatus(id)
-        : await getVideoStatus(id, getSessionApiKey(request));
+        : await getVideoStatus(id, getSessionApiKey(request), controller.signal);
       response.json(result);
     } catch (error) {
-      next(error);
+      if (!controller.signal.aborted) next(error);
+    } finally {
+      response.off("close", abortUpstream);
     }
   },
 );
 
 app.head(
   "/api/video/content/:id",
+  loopbackOnly,
   async (request: Request, response: Response, next: NextFunction) => {
     try {
       const id = validateJobId(request.params.id);
@@ -203,7 +270,13 @@ app.head(
 
 app.get(
   "/api/video/content/:id",
+  loopbackOnly,
   async (request: Request, response: Response, next: NextFunction) => {
+    const controller = new AbortController();
+    const abortUpstream = () => {
+      if (!response.writableEnded) controller.abort();
+    };
+    response.once("close", abortUpstream);
     try {
       const id = validateJobId(request.params.id);
 
@@ -226,6 +299,7 @@ app.get(
         id,
         request.headers.range,
         getSessionApiKey(request),
+        controller.signal,
       );
 
       response.status(upstream.status);
@@ -257,7 +331,7 @@ app.get(
       response.on("close", () => stream.destroy());
       stream.pipe(response);
     } catch (error) {
-      next(error);
+      if (!controller.signal.aborted) next(error);
     }
   },
 );

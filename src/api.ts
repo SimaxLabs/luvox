@@ -1,7 +1,9 @@
 import type { LocalH3FrameFitId } from "../shared/localH3";
 import type { VideoStatusResponse as VideoJob } from "../shared/videoTypes";
+import type { ImageGenerationResponse } from "../shared/imageTypes";
 
 export type { GenerationStatus, VideoStatusResponse as VideoJob } from "../shared/videoTypes";
+export type { ImageGenerationResponse } from "../shared/imageTypes";
 
 export interface OpenRouterGenerateVideoPayload {
   provider: "openrouter";
@@ -31,6 +33,7 @@ export interface LocalGenerateVideoPayload {
 
 interface ApiErrorBody {
   error?: {
+    type?: string;
     message?: string;
     retryable?: boolean;
   };
@@ -50,6 +53,7 @@ export class ApiError extends Error {
     public readonly status: number,
     public readonly retryable: boolean,
     public readonly retryAfterSeconds?: number,
+    public readonly type?: string,
   ) {
     super(message);
     this.name = "ApiError";
@@ -71,6 +75,8 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
       "Could not reach the local API. Make sure the backend is running.",
       0,
       true,
+      undefined,
+      "local_network_error",
     );
   }
 
@@ -78,7 +84,13 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   try {
     body = (await response.json()) as ApiErrorBody | T;
   } catch {
-    throw new ApiError("The local API returned an unreadable response.", response.status, true);
+    throw new ApiError(
+      "The local API returned an unreadable response.",
+      response.status,
+      true,
+      undefined,
+      "invalid_local_response",
+    );
   }
 
   if (!response.ok) {
@@ -89,6 +101,7 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
       response.status,
       errorBody.error?.retryable ?? response.status >= 500,
       Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : undefined,
+      errorBody.error?.type,
     );
   }
 
@@ -98,6 +111,7 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 export function generateVideo(
   payload: OpenRouterGenerateVideoPayload | LocalGenerateVideoPayload,
   sessionApiKey?: string,
+  signal?: AbortSignal,
 ): Promise<VideoJob> {
   return request<VideoJob>("/api/video/generate", {
     method: "POST",
@@ -106,6 +120,23 @@ export function generateVideo(
       ...sessionKeyHeaders(sessionApiKey),
     },
     body: JSON.stringify(payload),
+    signal,
+  });
+}
+
+export function generateImage(
+  payload: { prompt: string; model: string; inputReference?: string },
+  sessionApiKey?: string,
+  signal?: AbortSignal,
+): Promise<ImageGenerationResponse> {
+  return request<ImageGenerationResponse>("/api/image/generate", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...sessionKeyHeaders(sessionApiKey),
+    },
+    body: JSON.stringify(payload),
+    signal,
   });
 }
 

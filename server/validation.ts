@@ -8,6 +8,32 @@ import {
   LOCAL_H3_FRAME_FIT_IDS,
 } from "../shared/localH3.js";
 import { getVideoModel } from "../shared/videoModels.js";
+import { MUSE_IMAGE_MODEL } from "../shared/imageModels.js";
+import type { ImageMediaType } from "../shared/imageTypes.js";
+
+const IMAGE_REFERENCE_MAX_BYTES = 10 * 1024 * 1024;
+
+export function rasterMediaType(base64: string): ImageMediaType | undefined {
+  const bytes = Buffer.from(base64.slice(0, 24), "base64");
+  if (
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47 &&
+    bytes[4] === 0x0d &&
+    bytes[5] === 0x0a &&
+    bytes[6] === 0x1a &&
+    bytes[7] === 0x0a
+  ) return "image/png";
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    return "image/jpeg";
+  }
+  if (
+    bytes.toString("ascii", 0, 4) === "RIFF" &&
+    bytes.toString("ascii", 8, 12) === "WEBP"
+  ) return "image/webp";
+  return undefined;
+}
 
 function isPublicHostname(hostname: string): boolean {
   const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, "");
@@ -68,6 +94,37 @@ const optionalAbsolutePath = z
   .optional();
 
 const promptSchema = z.string().trim().min(1, "Prompt is required.").max(10_000);
+const imageReferenceDataUrl = z
+  .string()
+  .max(14_000_000, "The reference image must be 10 MB or smaller.")
+  .regex(
+    /^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}$/,
+    "The reference must be a PNG, JPEG, or WebP image.",
+  )
+  .refine((value) => {
+    const base64 = value.slice(value.indexOf(",") + 1);
+    return Buffer.from(base64, "base64").byteLength <= IMAGE_REFERENCE_MAX_BYTES;
+  }, "The reference image must be 10 MB or smaller.")
+  .refine((value) => {
+    const [header, base64] = value.split(",", 2);
+    const mediaType = rasterMediaType(base64 || "");
+    return Boolean(mediaType && header === `data:${mediaType};base64`);
+  }, "The reference image content does not match its image type.")
+  .optional();
+
+const generateImageSchema = z
+  .object({
+    prompt: promptSchema,
+    model: z.literal(MUSE_IMAGE_MODEL.id),
+    inputReference: imageReferenceDataUrl,
+  })
+  .strict();
+
+export type GenerateImageInput = z.infer<typeof generateImageSchema>;
+
+export function validateGenerateImageInput(value: unknown): GenerateImageInput {
+  return generateImageSchema.parse(value);
+}
 
 function customIssue(path: string, message: string): z.ZodIssue {
   return { code: z.ZodIssueCode.custom, path: [path], message };

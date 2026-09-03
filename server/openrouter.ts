@@ -1,11 +1,19 @@
-import type { GenerateVideoInput } from "./validation.js";
+import {
+  rasterMediaType,
+  type GenerateImageInput,
+  type GenerateVideoInput,
+} from "./validation.js";
 import type {
   GenerationStatus,
   VideoStatusResponse,
 } from "../shared/videoTypes.js";
+import type {
+  ImageGenerationResponse,
+} from "../shared/imageTypes.js";
 
 const OPENROUTER_API_BASE = "https://openrouter.ai/api/v1";
 const JSON_REQUEST_TIMEOUT_MS = 30_000;
+const IMAGE_REQUEST_TIMEOUT_MS = 300_000;
 const CONTENT_REQUEST_TIMEOUT_MS = 300_000;
 
 const OPENROUTER_STATUSES = [
@@ -24,6 +32,16 @@ interface OpenRouterVideoResponse {
   polling_url: string;
   status: OpenRouterStatus;
   error?: string;
+  usage?: {
+    cost?: number | null;
+  };
+}
+
+interface OpenRouterImageResponse {
+  data: Array<{
+    b64_json: string;
+    media_type?: string;
+  }>;
   usage?: {
     cost?: number | null;
   };
@@ -134,7 +152,7 @@ function providerError(
 
   const suffix = details ? `: ${details}` : ".";
   return new OpenRouterError(
-    `OpenRouter or its video provider returned an error${suffix}`,
+    `OpenRouter or its provider returned an error${suffix}`,
     502,
     "provider_error",
     true,
@@ -149,16 +167,28 @@ async function fetchOpenRouter(
   overrideApiKey?: string,
 ): Promise<Response> {
   try {
+    const timeoutSignal = AbortSignal.timeout(timeoutMs);
     return await fetch(`${OPENROUTER_API_BASE}${path}`, {
       ...init,
       headers: {
         Authorization: `Bearer ${getApiKey(overrideApiKey)}`,
         ...init.headers,
       },
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: init.signal
+        ? AbortSignal.any([init.signal, timeoutSignal])
+        : timeoutSignal,
     });
   } catch (error) {
     if (error instanceof OpenRouterError) throw error;
+
+    if (init.signal?.aborted) {
+      throw new OpenRouterError(
+        "The OpenRouter request was cancelled.",
+        499,
+        "request_cancelled",
+        false,
+      );
+    }
 
     if (
       error instanceof Error &&
@@ -185,11 +215,12 @@ async function requestJson(
   path: string,
   init: RequestInit,
   overrideApiKey?: string,
+  timeoutMs = JSON_REQUEST_TIMEOUT_MS,
 ): Promise<unknown> {
   const response = await fetchOpenRouter(
     path,
     init,
-    JSON_REQUEST_TIMEOUT_MS,
+    timeoutMs,
     overrideApiKey,
   );
   const payload = await readJsonOrUndefined(response);
@@ -203,6 +234,45 @@ async function requestJson(
   }
 
   return payload;
+}
+
+function parseImageResponse(value: unknown): ImageGenerationResponse {
+  if (!isRecord(value) || !Array.isArray(value.data) || !isRecord(value.data[0])) {
+    throw new OpenRouterError(
+      "OpenRouter returned an invalid image generation response.",
+      502,
+      "invalid_provider_response",
+      true,
+    );
+  }
+
+  const image = value.data[0];
+  if (typeof image.b64_json !== "string" || !image.b64_json) {
+    throw new OpenRouterError(
+      "OpenRouter returned an invalid image generation response.",
+      502,
+      "invalid_provider_response",
+      true,
+    );
+  }
+
+  const mediaType = rasterMediaType(image.b64_json);
+  if (!mediaType) {
+    throw new OpenRouterError(
+      "OpenRouter returned an unsupported image format.",
+      502,
+      "invalid_provider_response",
+      true,
+    );
+  }
+
+  const response = value as unknown as OpenRouterImageResponse;
+  const result: ImageGenerationResponse = {
+    b64Json: image.b64_json,
+    mediaType,
+  };
+  if (typeof response.usage?.cost === "number") result.cost = response.usage.cost;
+  return result;
 }
 
 function parseVideoResponse(value: unknown): OpenRouterVideoResponse {
@@ -266,6 +336,7 @@ function publicStatus(response: OpenRouterVideoResponse): VideoStatusResponse {
 export async function generateVideo(
   input: GenerateVideoInput,
   overrideApiKey?: string,
+  signal?: AbortSignal,
 ): Promise<VideoStatusResponse> {
   const frameImages: Array<Record<string, unknown>> = [];
 
@@ -304,6 +375,7 @@ export async function generateVideo(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
+      signal,
     },
     overrideApiKey,
   );
@@ -311,13 +383,45 @@ export async function generateVideo(
   return publicStatus(parseVideoResponse(payload));
 }
 
+export async function generateImage(
+  input: GenerateImageInput,
+  overrideApiKey?: string,
+  signal?: AbortSignal,
+): Promise<ImageGenerationResponse> {
+  const body: Record<string, unknown> = {
+    model: input.model,
+    prompt: input.prompt,
+  };
+  if (input.inputReference) {
+    body.input_references = [{
+      type: "image_url",
+      image_url: { url: input.inputReference },
+    }];
+  }
+
+  const payload = await requestJson(
+    "/images",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    },
+    overrideApiKey,
+    IMAGE_REQUEST_TIMEOUT_MS,
+  );
+
+  return parseImageResponse(payload);
+}
+
 export async function getVideoStatus(
   id: string,
   overrideApiKey?: string,
+  signal?: AbortSignal,
 ): Promise<VideoStatusResponse> {
   const payload = await requestJson(
     `/videos/${encodeURIComponent(id)}`,
-    { method: "GET" },
+    { method: "GET", signal },
     overrideApiKey,
   );
 
@@ -328,12 +432,14 @@ export async function getVideoContent(
   id: string,
   range?: string,
   overrideApiKey?: string,
+  signal?: AbortSignal,
 ): Promise<Response> {
   const response = await fetchOpenRouter(
     `/videos/${encodeURIComponent(id)}/content?index=0`,
     {
       method: "GET",
       headers: range ? { Range: range } : undefined,
+      signal,
     },
     CONTENT_REQUEST_TIMEOUT_MS,
     overrideApiKey,

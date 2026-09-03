@@ -1,6 +1,7 @@
 export interface VideoModelConfig {
   id: string;
   name: string;
+  price: string;
   durations: readonly number[];
   defaultDuration: number;
   aspectRatios: readonly string[];
@@ -25,6 +26,7 @@ export const VIDEO_MODELS = [
   {
     id: DEFAULT_MODEL_ID,
     name: "MiniMax: Hailuo 3",
+    price: "$0.13/sec + $0.04/reference image",
     durations: [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
     defaultDuration: 6,
     aspectRatios: ["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"],
@@ -43,6 +45,7 @@ export const VIDEO_MODELS = [
   {
     id: "minimax/hailuo-3-max",
     name: "MiniMax: H3 Max",
+    price: "$0.05/sec at 480p; $0.08/sec at 768p",
     durations: [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
     defaultDuration: 5,
     aspectRatios: ["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"],
