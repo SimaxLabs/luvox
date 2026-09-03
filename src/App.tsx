@@ -1294,11 +1294,19 @@ export default function App() {
                           <input
                             accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp"
                             aria-label={uploadingReference === position ? `Uploading ${position} frame image` : `Browse for ${position} frame image`}
-                            className="h-11 w-24 cursor-pointer text-[0] outline-none file:h-11 file:w-full file:cursor-pointer file:border file:border-black/15 file:bg-transparent file:px-3 file:text-[10px] file:font-bold file:uppercase file:tracking-[0.12em] hover:file:border-black focus-visible:ring-2 focus-visible:ring-black disabled:cursor-wait disabled:opacity-45"
+                            className="peer sr-only"
                             id={`local-${position}-frame-picker`}
                             onChange={(event) => void selectLocalReference(event, position)}
                             type="file"
                           />
+                          <label
+                            className="flex size-11 shrink-0 cursor-pointer items-center justify-center border border-black/15 text-stone-600 transition hover:border-black hover:text-black peer-focus-visible:ring-2 peer-focus-visible:ring-black peer-disabled:cursor-wait peer-disabled:opacity-45"
+                            htmlFor={`local-${position}-frame-picker`}
+                            title={`Browse for ${position} frame image`}
+                          >
+                            <Icon name="image" />
+                            <span className="sr-only">Browse for {position} frame image</span>
+                          </label>
                         </div>
                       </div>
                     );
