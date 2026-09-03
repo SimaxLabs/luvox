@@ -46,9 +46,14 @@ const localReferenceDeleteSchema = z
   .object({ token: z.string().uuid() })
   .strict();
 const localReferenceTokenSchema = z.string().uuid();
+const localWorkspaceTokenSchema = z.string().uuid();
 
 function getSessionApiKey(request: Request): string | undefined {
   return sessionApiKeySchema.parse(request.get("X-OpenRouter-Api-Key"));
+}
+
+function getLocalWorkspaceToken(request: Request): string {
+  return localWorkspaceTokenSchema.parse(request.get("X-Motio-Workspace-Token"));
 }
 
 function assertLoopbackRequest(request: Request): void {
@@ -89,9 +94,12 @@ function loopbackOnly(request: Request, _response: Response, next: NextFunction)
 }
 
 app.disable("x-powered-by");
+app.use("/api", (_request, response, next) => {
+  response.setHeader("Cache-Control", "private, no-store");
+  next();
+});
 
 app.get("/api/config", (_request, response) => {
-  response.setHeader("Cache-Control", "no-store");
   response.json({
     sessionId: serverSessionId,
     localH3: {
@@ -126,8 +134,12 @@ app.post(
       const previousToken = localReferenceTokenSchema.optional().parse(
         request.get("X-Previous-Reference-Token"),
       );
-      const result = await uploadLocalReferenceImage(request.body, uploadToken, previousToken);
-      response.setHeader("Cache-Control", "private, no-store");
+      const result = await uploadLocalReferenceImage(
+        request.body,
+        uploadToken,
+        getLocalWorkspaceToken(request),
+        previousToken,
+      );
       response.status(201).json(result);
     } catch (error) {
       next(error);
@@ -152,7 +164,6 @@ app.post(
         getSessionApiKey(request),
         controller.signal,
       );
-      response.setHeader("Cache-Control", "private, no-store");
       response.json(result);
     } catch (error) {
       if (!controller.signal.aborted) next(error);
@@ -170,8 +181,7 @@ app.delete(
     try {
       assertLoopbackRequest(request);
       const input = localReferenceDeleteSchema.parse(request.body);
-      const result = await deleteLocalReferenceImage(input.token);
-      response.setHeader("Cache-Control", "private, no-store");
+      const result = await deleteLocalReferenceImage(input.token, getLocalWorkspaceToken(request));
       response.json(result);
     } catch (error) {
       next(error);
@@ -184,8 +194,7 @@ app.delete(
   async (request: Request, response: Response, next: NextFunction) => {
     try {
       assertLoopbackRequest(request);
-      const result = await discardLocalH3Workspace();
-      response.setHeader("Cache-Control", "private, no-store");
+      const result = await discardLocalH3Workspace(getLocalWorkspaceToken(request));
       response.json(result);
     } catch (error) {
       next(error);
@@ -206,7 +215,7 @@ app.post(
       const input = validateGenerateVideoInput(request.body);
       const result =
         input.provider === "local"
-          ? await generateLocalVideo(input)
+          ? await generateLocalVideo(input, getLocalWorkspaceToken(request))
           : await generateVideo(
               input,
               getSessionApiKey(request),
@@ -233,7 +242,7 @@ app.get(
     try {
       const id = validateJobId(request.params.id);
       const result = isLocalJobId(id)
-        ? getLocalVideoStatus(id)
+        ? getLocalVideoStatus(id, getLocalWorkspaceToken(request))
         : await getVideoStatus(id, getSessionApiKey(request), controller.signal);
       response.json(result);
     } catch (error) {
@@ -256,8 +265,7 @@ app.head(
         return;
       }
 
-      const videoPath = await getLocalVideoPath(id);
-      response.setHeader("Cache-Control", "private, no-store");
+      const videoPath = await getLocalVideoPath(id, getLocalWorkspaceToken(request));
       response.setHeader("Content-Disposition", "inline");
       response.sendFile(videoPath, { dotfiles: "allow" }, (error) => {
         if (error) next(error);
@@ -281,8 +289,7 @@ app.get(
       const id = validateJobId(request.params.id);
 
       if (isLocalJobId(id)) {
-        const videoPath = await getLocalVideoPath(id);
-        response.setHeader("Cache-Control", "private, no-store");
+        const videoPath = await getLocalVideoPath(id, getLocalWorkspaceToken(request));
         response.setHeader(
           "Content-Disposition",
           request.query.download === "1"
@@ -313,7 +320,6 @@ app.get(
         if (value) response.setHeader(header, value);
       }
 
-      response.setHeader("Cache-Control", "private, no-store");
       response.setHeader(
         "Content-Disposition",
         request.query.download === "1"

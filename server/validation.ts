@@ -164,10 +164,6 @@ const localGenerateVideoSchema = z
     firstFramePath: optionalAbsolutePath,
     lastFramePath: optionalAbsolutePath,
     frameFit: z.enum(LOCAL_H3_FRAME_FIT_IDS).default("contain"),
-    previousJobId: z
-      .string()
-      .regex(/^local_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
-      .optional(),
     ssdStreaming: z.boolean(),
   })
   .strict();

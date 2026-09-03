@@ -1,4 +1,4 @@
-import { type ChangeEvent, type FormEvent, type ReactNode, useEffect, useRef, useState } from "react";
+import { type ChangeEvent, type Dispatch, type FormEvent, type ReactNode, type SetStateAction, useEffect, useRef, useState } from "react";
 import { getVideoModel, VIDEO_MODELS } from "../shared/videoModels";
 import { MUSE_IMAGE_MODEL } from "../shared/imageModels";
 import {
@@ -54,6 +54,8 @@ interface FormState {
 interface DisplayJob extends VideoJob {
   aspectRatio?: string;
   temporaryApiKey?: string;
+  pollWarning?: string;
+  pollingStopped?: boolean;
 }
 
 type IconName =
@@ -70,6 +72,8 @@ type IconName =
 const statusOrder: GenerationStatus[] = ["queued", "processing", "completed", "failed"];
 const imageReferenceMaxBytes = 10 * 1024 * 1024;
 const uncertainSubmissionMessage = "OpenRouter may already be processing a paid request that Motio cannot track. Check OpenRouter Activity before unlocking another submission.";
+const pendingRemoteSubmission = "__motio_pending_submission__";
+const untrackedRemoteWork = "__motio_untracked_remote_work__";
 const uncertainSubmissionErrors = new Set([
   "invalid_local_response",
   "invalid_provider_response",
@@ -303,6 +307,103 @@ function messageFrom(error: unknown): string {
   return error instanceof Error ? error.message : "An unexpected error occurred.";
 }
 
+function JobPoller({
+  job,
+  localWorkspaceToken,
+  remoteWork,
+  setAnnouncement,
+  setJobs,
+  workspaceVersion,
+}: {
+  job: DisplayJob;
+  localWorkspaceToken: string;
+  remoteWork: { current: Set<string> };
+  setAnnouncement: Dispatch<SetStateAction<string>>;
+  setJobs: Dispatch<SetStateAction<DisplayJob[]>>;
+  workspaceVersion: { current: number };
+}) {
+  const { id, provider, temporaryApiKey } = job;
+
+  useEffect(() => {
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout>;
+    let consecutiveFailures = 0;
+    const controller = new AbortController();
+    const version = workspaceVersion.current;
+
+    const poll = async () => {
+      try {
+        const nextJob = await getVideoStatus(
+          id,
+          temporaryApiKey,
+          controller.signal,
+          provider === "local" ? localWorkspaceToken : undefined,
+        );
+        if (disposed || version !== workspaceVersion.current) return;
+
+        consecutiveFailures = 0;
+        setJobs((current) => current.map((existing) => existing.id === id
+          ? {
+              ...nextJob,
+              aspectRatio: existing.aspectRatio,
+              temporaryApiKey: nextJob.status === "failed" ? undefined : existing.temporaryApiKey,
+              pollWarning: undefined,
+              pollingStopped: false,
+            }
+          : existing));
+
+        if (nextJob.status === "completed" || nextJob.status === "failed") {
+          remoteWork.current.delete(id);
+          setAnnouncement(`${provider === "local" ? "Local h3.c" : "OpenRouter"} job ${id.slice(0, 12)} ${nextJob.status}.`);
+          return;
+        }
+
+        timer = setTimeout(poll, 10_000);
+      } catch (pollError) {
+        if (disposed || controller.signal.aborted || version !== workspaceVersion.current) return;
+
+        const apiError = pollError instanceof ApiError ? pollError : null;
+        if (provider === "local" && apiError?.status === 404) {
+          setJobs((current) => current.map((existing) => existing.id === id
+            ? { ...existing, status: "failed", error: apiError.message }
+            : existing));
+          setAnnouncement(`Local h3.c job ${id.slice(0, 12)} failed.`);
+          return;
+        }
+
+        if (apiError && !apiError.retryable) {
+          setJobs((current) => current.map((existing) => existing.id === id
+            ? {
+                ...existing,
+                pollingStopped: true,
+                pollWarning: `${apiError.message} Automatic status checks stopped${provider === "openrouter" ? "; verify the job in OpenRouter Activity before clearing it" : ""}.`,
+              }
+            : existing));
+          return;
+        }
+
+        consecutiveFailures += 1;
+        const retryDelay = apiError?.retryAfterSeconds
+          ? apiError.retryAfterSeconds * 1000
+          : Math.min(30_000, 5_000 * 2 ** (consecutiveFailures - 1));
+        setJobs((current) => current.map((existing) => existing.id === id
+          ? { ...existing, pollWarning: `${messageFrom(pollError)} Generation status is unknown; retrying automatically.` }
+          : existing));
+        timer = setTimeout(poll, retryDelay);
+      }
+    };
+
+    timer = setTimeout(poll, 3_000);
+    return () => {
+      disposed = true;
+      controller.abort();
+      clearTimeout(timer);
+    };
+  }, [id, localWorkspaceToken, provider, remoteWork, setAnnouncement, setJobs, temporaryApiKey, workspaceVersion]);
+
+  return null;
+}
+
 export default function App() {
   const [workflow, setWorkflow] = useState<Workflow>("video");
   const [form, setForm] = useState<FormState>(initialForm);
@@ -310,11 +411,10 @@ export default function App() {
   const [imageReference, setImageReference] = useState<{ name: string; dataUrl: string } | null>(null);
   const [readingImageReference, setReadingImageReference] = useState(false);
   const [imageResult, setImageResult] = useState<ImageGenerationResponse | null>(null);
-  const [job, setJob] = useState<DisplayJob | null>(null);
+  const [jobs, setJobs] = useState<DisplayJob[]>([]);
+  const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [pollWarning, setPollWarning] = useState<string | null>(null);
-  const [pollingStopped, setPollingStopped] = useState(false);
   const [submissionUncertain, setSubmissionUncertain] = useState(false);
   const [copied, setCopied] = useState(false);
   const [mediaError, setMediaError] = useState<string | null>(null);
@@ -326,10 +426,16 @@ export default function App() {
   const [uploadingReference, setUploadingReference] = useState<"first" | "last" | null>(null);
   const [referenceUploadStatus, setReferenceUploadStatus] = useState("");
   const [localAdvancedStatus, setLocalAdvancedStatus] = useState("");
+  const [clearingWorkspace, setClearingWorkspace] = useState(false);
+  const [localCleanupFailed, setLocalCleanupFailed] = useState(false);
+  const [jobAnnouncement, setJobAnnouncement] = useState("");
   const [referenceUploadTokens, setReferenceUploadTokens] = useState<Partial<Record<"first" | "last", string>>>({});
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const generationController = useRef<AbortController | null>(null);
-  const remoteWorkMayContinue = useRef(false);
+  const localWorkspaceToken = useRef(crypto.randomUUID());
+  const pendingLocalWorkspaceDiscards = useRef(new Set<string>());
+  const remoteWork = useRef(new Set<string>());
+  const selectionVersion = useRef(0);
   const firstFramePathOnFocus = useRef("");
   const lastFramePathOnFocus = useRef("");
   const serverSession = useRef<string | null>(null);
@@ -343,9 +449,14 @@ export default function App() {
     resolutions.findIndex((candidate) => candidate.label === resolution.label) === index);
   const localAspectRatioOptions = LOCAL_H3_RESOLUTIONS.filter((resolution, index, resolutions) =>
     resolutions.findIndex((candidate) => candidate.aspectRatio === resolution.aspectRatio) === index);
+  const job = jobs.find((candidate) => candidate.id === selectedJobId) ?? null;
   const isActive = job?.status === "queued" || job?.status === "processing";
+  const activeJobCount = jobs.filter((candidate) => candidate.status === "queued" || candidate.status === "processing").length;
+  const hasActiveJobs = activeJobCount > 0;
   const jobApiKey = job?.provider === "openrouter" ? job.temporaryApiKey : undefined;
-  const usesSessionMedia = Boolean(jobApiKey);
+  const pollWarning = job?.pollWarning;
+  const pollingStopped = Boolean(job?.pollingStopped);
+  const usesSessionMedia = Boolean(job && (job.provider === "local" || jobApiKey));
   const videoSource = usesSessionMedia ? temporaryVideoUrl || undefined : job?.videoUrl;
   const downloadSource = usesSessionMedia ? temporaryVideoUrl || undefined : job?.downloadUrl;
   const imageSource = imageResult
@@ -365,47 +476,57 @@ export default function App() {
     setLocalAdvancedStatus(resetAcceleration ? "Acceleration reset to Standard for the selected resolution." : "");
   };
 
-  const resetWorkspace = (preserveSubmissionLock: boolean) => {
-    workspaceVersion.current += 1;
-    generationController.current?.abort();
-    generationController.current = null;
+  const leaveJobView = () => {
+    selectionVersion.current += 1;
     if (copyTimer.current) {
       clearTimeout(copyTimer.current);
       copyTimer.current = null;
     }
+    setSelectedJobId(null);
+    setTemporaryVideoUrl(null);
+    setCopied(false);
+    setMediaError(null);
+    setMediaLoading(false);
+    setMediaRetry(0);
+  };
+
+  const viewJob = (nextJob: DisplayJob) => {
+    leaveJobView();
+    setSelectedJobId(nextJob.id);
+    setWorkflow("video");
+    setForm((current) => ({ ...current, provider: nextJob.provider }));
+    setError(null);
+  };
+
+  const resetWorkspace = (preserveSubmissionLock: boolean) => {
+    workspaceVersion.current += 1;
+    generationController.current?.abort();
+    generationController.current = null;
+    leaveJobView();
     setWorkflow("video");
     setForm(initialForm());
     setImagePrompt("");
     setImageReference(null);
     setReadingImageReference(false);
     setImageResult(null);
-    setJob(null);
+    setJobs([]);
     setSubmitting(false);
     setError(preserveSubmissionLock ? uncertainSubmissionMessage : null);
-    setPollWarning(null);
-    setPollingStopped(false);
     setSubmissionUncertain(preserveSubmissionLock);
-    remoteWorkMayContinue.current = preserveSubmissionLock;
-    setCopied(false);
-    setMediaError(null);
-    setMediaLoading(false);
-    setMediaRetry(0);
-    setTemporaryVideoUrl(null);
+    remoteWork.current.clear();
+    if (preserveSubmissionLock) remoteWork.current.add(untrackedRemoteWork);
     setUploadingReference(null);
     setReferenceUploadStatus("");
     setLocalAdvancedStatus("");
     setReferenceUploadTokens({});
+    setClearingWorkspace(false);
+    setLocalCleanupFailed(false);
+    setJobAnnouncement("");
     firstFramePathOnFocus.current = "";
     lastFramePathOnFocus.current = "";
   };
 
   useEffect(() => {
-    const navigation = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined;
-    const root = document.documentElement;
-    if (navigation?.type === "reload" && !root.dataset.localWorkspaceDiscarded) {
-      root.dataset.localWorkspaceDiscarded = "true";
-      void discardLocalWorkspace().catch(() => undefined);
-    }
     let disposed = false;
     let timer: ReturnType<typeof setTimeout>;
     let controller: AbortController | undefined;
@@ -419,11 +540,26 @@ export default function App() {
       try {
         const config = await getAppConfig(requestController.signal);
         if (disposed) return;
+        if (serverSession.current && serverSession.current !== config.sessionId) {
+          pendingLocalWorkspaceDiscards.current.add(localWorkspaceToken.current);
+          localWorkspaceToken.current = crypto.randomUUID();
+          resetWorkspace(remoteWork.current.size > 0);
+          serverSession.current = config.sessionId;
+          setAppConfig(null);
+        }
+        let cleanupPending = false;
+        for (const token of pendingLocalWorkspaceDiscards.current) {
+          try {
+            await discardLocalWorkspace(token, false, requestController.signal);
+            pendingLocalWorkspaceDiscards.current.delete(token);
+          } catch {
+            cleanupPending = true;
+            break;
+          }
+        }
+        if (disposed || cleanupPending) return;
         consecutiveFailures = 0;
         firstFailureAt = 0;
-        if (serverSession.current && serverSession.current !== config.sessionId) {
-          resetWorkspace(remoteWorkMayContinue.current);
-        }
         serverSession.current = config.sessionId;
         serviceState.current = "online";
         setAppConfig(config);
@@ -436,7 +572,9 @@ export default function App() {
           Date.now() - firstFailureAt >= 6_000 &&
           serviceState.current !== "offline"
         ) {
-          resetWorkspace(remoteWorkMayContinue.current);
+          pendingLocalWorkspaceDiscards.current.add(localWorkspaceToken.current);
+          localWorkspaceToken.current = crypto.randomUUID();
+          resetWorkspace(remoteWork.current.size > 0);
           serverSession.current = null;
           serviceState.current = "offline";
           setAppConfig(null);
@@ -458,80 +596,19 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!job || (job.status !== "queued" && job.status !== "processing")) return;
-
-    const version = workspaceVersion.current;
-    let disposed = false;
-    let timer: ReturnType<typeof setTimeout>;
-    let consecutiveFailures = 0;
-    const controller = new AbortController();
-
-    const poll = async () => {
-      try {
-        const nextJob = await getVideoStatus(
-          job.id,
-          jobApiKey || undefined,
-          controller.signal,
-        );
-        if (disposed || version !== workspaceVersion.current) return;
-
-        consecutiveFailures = 0;
-        setPollWarning(null);
-        setPollingStopped(false);
-        setJob((current) => current?.id === job.id
-          ? {
-              ...nextJob,
-              aspectRatio: job.aspectRatio,
-              temporaryApiKey: nextJob.status === "failed" ? undefined : current.temporaryApiKey,
-            }
-          : current);
-
-        if (nextJob.status === "completed" || nextJob.status === "failed") {
-          remoteWorkMayContinue.current = false;
+    const discardOnPageHide = (event: PageTransitionEvent) => {
+      if (!event.persisted) {
+        for (const token of new Set([
+          ...pendingLocalWorkspaceDiscards.current,
+          localWorkspaceToken.current,
+        ])) {
+          void discardLocalWorkspace(token, true).catch(() => undefined);
         }
-
-        if (nextJob.status === "failed") {
-          setError(nextJob.error || "The video provider could not complete this generation.");
-          return;
-        }
-
-        if (nextJob.status === "queued" || nextJob.status === "processing") {
-          timer = setTimeout(poll, 10_000);
-        }
-      } catch (pollError) {
-        if (disposed || controller.signal.aborted || version !== workspaceVersion.current) return;
-
-        const apiError = pollError instanceof ApiError ? pollError : null;
-        if (job.provider === "local" && apiError?.status === 404) {
-          const message = apiError.message;
-          setJob((current) => current ? { ...current, status: "failed", error: message } : current);
-          setError(message);
-          return;
-        }
-
-        if (apiError && !apiError.retryable) {
-          setPollingStopped(true);
-          setPollWarning(`${apiError.message} Automatic status checks stopped${job.provider === "openrouter" ? "; verify the job in OpenRouter Activity before clearing it" : ""}.`);
-          return;
-        }
-
-        consecutiveFailures += 1;
-        const retryDelay = apiError?.retryAfterSeconds
-          ? apiError.retryAfterSeconds * 1000
-          : Math.min(30_000, 5_000 * 2 ** (consecutiveFailures - 1));
-        setPollWarning(`${messageFrom(pollError)} Generation status is unknown; retrying automatically.`);
-        timer = setTimeout(poll, retryDelay);
       }
     };
-
-    timer = setTimeout(poll, 3_000);
-
-    return () => {
-      disposed = true;
-      controller.abort();
-      clearTimeout(timer);
-    };
-  }, [job?.id, jobApiKey]);
+    window.addEventListener("pagehide", discardOnPageHide);
+    return () => window.removeEventListener("pagehide", discardOnPageHide);
+  }, []);
 
   useEffect(() => {
     setTemporaryVideoUrl(null);
@@ -539,34 +616,52 @@ export default function App() {
     setMediaLoading(false);
 
     if (
+      workflow !== "video" ||
       job?.status !== "completed" ||
-      job.provider === "local" ||
       !job.videoUrl ||
-      !jobApiKey
+      (job.provider === "openrouter" && !jobApiKey)
     ) {
       return;
     }
 
     const key = jobApiKey;
     const version = workspaceVersion.current;
+    const selectedVersion = selectionVersion.current;
     const controller = new AbortController();
     let objectUrl: string | undefined;
     let disposed = false;
     setMediaLoading(true);
 
-    void getVideoContent(job.videoUrl, key, controller.signal)
+    void getVideoContent(
+      job.videoUrl,
+      key,
+      controller.signal,
+      job.provider === "local" ? localWorkspaceToken.current : undefined,
+    )
       .then((blob) => {
-        if (disposed || version !== workspaceVersion.current) return;
+        if (
+          disposed ||
+          version !== workspaceVersion.current ||
+          selectedVersion !== selectionVersion.current
+        ) return;
         objectUrl = URL.createObjectURL(blob);
         setTemporaryVideoUrl(objectUrl);
       })
       .catch((contentError) => {
-        if (!controller.signal.aborted && version === workspaceVersion.current) {
+        if (
+          !controller.signal.aborted &&
+          version === workspaceVersion.current &&
+          selectedVersion === selectionVersion.current
+        ) {
           setMediaError(messageFrom(contentError));
         }
       })
       .finally(() => {
-        if (!controller.signal.aborted && version === workspaceVersion.current) setMediaLoading(false);
+        if (
+          !controller.signal.aborted &&
+          version === workspaceVersion.current &&
+          selectedVersion === selectionVersion.current
+        ) setMediaLoading(false);
       });
 
     return () => {
@@ -574,7 +669,7 @@ export default function App() {
       controller.abort();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [job?.id, job?.status, job?.videoUrl, jobApiKey, mediaRetry]);
+  }, [workflow, job?.id, job?.status, job?.videoUrl, jobApiKey, mediaRetry]);
 
   useEffect(() => {
     return () => {
@@ -583,7 +678,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!submitting && !isActive && !submissionUncertain) return;
+    if (!submitting && !hasActiveJobs && !submissionUncertain) return;
 
     const warnBeforeUnload = (event: BeforeUnloadEvent) => {
       event.preventDefault();
@@ -591,7 +686,7 @@ export default function App() {
     };
     window.addEventListener("beforeunload", warnBeforeUnload);
     return () => window.removeEventListener("beforeunload", warnBeforeUnload);
-  }, [submitting, isActive, submissionUncertain]);
+  }, [submitting, hasActiveJobs, submissionUncertain]);
 
   const releaseChangedReference = (
     position: "first" | "last",
@@ -613,7 +708,7 @@ export default function App() {
       return next;
     });
     if (otherPath !== previousPath) {
-      void deleteLocalReferenceImage(token).catch(() => undefined);
+      void deleteLocalReferenceImage(token, localWorkspaceToken.current).catch(() => undefined);
     }
   };
 
@@ -630,6 +725,7 @@ export default function App() {
       ? form.localFirstFramePath
       : form.localLastFramePath;
     const version = workspaceVersion.current;
+    const workspaceToken = localWorkspaceToken.current;
     setUploadingReference(position);
     setReferenceUploadStatus(`Uploading ${position} frame image.`);
     setError(null);
@@ -641,7 +737,12 @@ export default function App() {
         ? undefined
         : referenceUploadTokens[position];
       const uploadToken = crypto.randomUUID();
-      const upload = () => uploadLocalReferenceImage(file, uploadToken, previousToken);
+      const upload = () => uploadLocalReferenceImage(
+        file,
+        uploadToken,
+        workspaceToken,
+        previousToken,
+      );
       let result: Awaited<ReturnType<typeof upload>>;
       try {
         result = await upload();
@@ -652,7 +753,7 @@ export default function App() {
         result = await upload();
       }
       if (version !== workspaceVersion.current) {
-        void deleteLocalReferenceImage(result.token).catch(() => undefined);
+        void deleteLocalReferenceImage(result.token, workspaceToken).catch(() => undefined);
         return;
       }
       setForm((current) => position === "first"
@@ -737,20 +838,19 @@ export default function App() {
       submissionUncertain ||
       submitting ||
       readingImageReference ||
+      (clearingWorkspace && workflow === "video" && form.provider === "local") ||
+      (localCleanupFailed && workflow === "video" && form.provider === "local") ||
       (workflow === "video" && isActive)
     ) return;
 
     const requestController = new AbortController();
     generationController.current = requestController;
     const isPaidSubmission = workflow === "image" || form.provider === "openrouter";
-    remoteWorkMayContinue.current = isPaidSubmission;
+    if (isPaidSubmission) remoteWork.current.add(pendingRemoteSubmission);
     const version = workspaceVersion.current;
+    if (workflow === "video") leaveJobView();
     setSubmitting(true);
     setError(null);
-    setPollWarning(null);
-    setPollingStopped(false);
-    setCopied(false);
-    setMediaError(null);
 
     try {
       const key = sessionApiKey.trim();
@@ -766,7 +866,7 @@ export default function App() {
           requestController.signal,
         );
         if (version !== workspaceVersion.current) return;
-        remoteWorkMayContinue.current = false;
+        remoteWork.current.delete(pendingRemoteSubmission);
         setImageResult(result);
         return;
       }
@@ -783,9 +883,8 @@ export default function App() {
             firstFramePath: form.localFirstFramePath || undefined,
             lastFramePath: form.localLastFramePath || undefined,
             frameFit: form.localFrameFit,
-            previousJobId: job?.provider === "local" ? job.id : undefined,
             ssdStreaming: form.localSsdStreaming,
-          }, undefined, requestController.signal)
+          }, undefined, requestController.signal, localWorkspaceToken.current)
         : await generateVideo(
             {
               provider: "openrouter",
@@ -802,9 +901,12 @@ export default function App() {
             requestController.signal,
           );
       if (version !== workspaceVersion.current) return;
-      remoteWorkMayContinue.current = nextJob.provider === "openrouter" &&
-        (nextJob.status === "queued" || nextJob.status === "processing");
-      setJob({
+      remoteWork.current.delete(pendingRemoteSubmission);
+      if (
+        nextJob.provider === "openrouter" &&
+        (nextJob.status === "queued" || nextJob.status === "processing")
+      ) remoteWork.current.add(nextJob.id);
+      const trackedJob: DisplayJob = {
         ...nextJob,
         temporaryApiKey:
           nextJob.provider === "openrouter" && nextJob.status !== "failed"
@@ -814,7 +916,12 @@ export default function App() {
           form.provider === "local"
             ? selectedLocalResolution.aspectRatio
             : form.aspectRatio,
-      });
+      };
+      setJobs((current) => [trackedJob, ...current.filter((existing) => existing.id !== trackedJob.id)]);
+      setSelectedJobId(trackedJob.id);
+      if (trackedJob.status === "completed" || trackedJob.status === "failed") {
+        setJobAnnouncement(`${trackedJob.provider === "local" ? "Local h3.c" : "OpenRouter"} job ${trackedJob.id.slice(0, 12)} ${trackedJob.status}.`);
+      }
     } catch (submitError) {
       if (version !== workspaceVersion.current) return;
       const apiError = submitError instanceof ApiError ? submitError : null;
@@ -825,7 +932,7 @@ export default function App() {
         setSubmissionUncertain(true);
         setError(uncertainSubmissionMessage);
       } else {
-        remoteWorkMayContinue.current = false;
+        if (isPaidSubmission) remoteWork.current.delete(pendingRemoteSubmission);
         setError(messageFrom(submitError));
       }
     } finally {
@@ -837,18 +944,14 @@ export default function App() {
   };
 
   const clear = () => {
-    if (submitting || uploadingReference !== null || readingImageReference) return;
+    if (submitting || clearingWorkspace || uploadingReference !== null || readingImageReference) return;
     if (
       submissionUncertain &&
       !window.confirm("OpenRouter may already be processing this request. Check OpenRouter Activity first. Unlock another paid submission anyway?")
     ) return;
     if (
-      isActive &&
-      !window.confirm(
-        job?.provider === "local"
-          ? "Stop watching this local generation? The h3.c process will continue running on this computer."
-          : "Stop watching this generation? OpenRouter does not provide a cancellation endpoint, so this will not stop provider work.",
-      )
+      hasActiveJobs &&
+      !window.confirm(`Clear the workspace and stop watching ${activeJobCount} active ${activeJobCount === 1 ? "job" : "jobs"}? Provider and h3.c work may continue in the background.`)
     ) {
       return;
     }
@@ -857,22 +960,37 @@ export default function App() {
     resetWorkspace(false);
     setWorkflow(selectedWorkflow);
     setForm((current) => ({ ...current, provider: selectedProvider }));
-    void discardLocalWorkspace().catch(() => undefined);
+    const version = workspaceVersion.current;
+    setClearingWorkspace(true);
+    void discardLocalWorkspace(localWorkspaceToken.current)
+      .then(() => {
+        if (version === workspaceVersion.current) localWorkspaceToken.current = crypto.randomUUID();
+      })
+      .catch(() => {
+        if (version === workspaceVersion.current) {
+          setLocalCleanupFailed(true);
+          setError("Local workspace cleanup could not be confirmed. Clear again or restart the service before starting another local job.");
+        }
+      })
+      .finally(() => {
+        if (version === workspaceVersion.current) setClearingWorkspace(false);
+      });
   };
 
   const copyVideoUrl = async () => {
     const source = videoSource;
     const version = workspaceVersion.current;
+    const selectedVersion = selectionVersion.current;
     if (!source) return;
     const videoUrl = new URL(source, window.location.origin).href;
     try {
       await navigator.clipboard.writeText(videoUrl);
     } catch {
-      if (version !== workspaceVersion.current) return;
+      if (version !== workspaceVersion.current || selectedVersion !== selectionVersion.current) return;
       setError("The browser could not copy the video URL to the clipboard.");
       return;
     }
-    if (version !== workspaceVersion.current) return;
+    if (version !== workspaceVersion.current || selectedVersion !== selectionVersion.current) return;
     setError(null);
     setCopied(true);
     if (copyTimer.current) clearTimeout(copyTimer.current);
@@ -881,21 +999,84 @@ export default function App() {
 
   return (
     <main className="min-h-screen bg-[#0c0d0c] text-[#191b18]">
+      {jobs
+        .filter((trackedJob) =>
+          (trackedJob.status === "queued" || trackedJob.status === "processing") &&
+          !trackedJob.pollingStopped)
+        .map((trackedJob) => (
+          <JobPoller
+            job={trackedJob}
+            key={trackedJob.id}
+            localWorkspaceToken={localWorkspaceToken.current}
+            remoteWork={remoteWork}
+            setAnnouncement={setJobAnnouncement}
+            setJobs={setJobs}
+            workspaceVersion={workspaceVersion}
+          />
+        ))}
+      <p aria-live="polite" className="sr-only" role="status">{jobAnnouncement}</p>
       <header className="border-b border-white/10 bg-[#0c0d0c] text-white">
         <div className="mx-auto flex max-w-[1500px] items-center justify-between px-5 py-4 sm:px-8 lg:px-10">
           <div className="flex items-center gap-3">
             <img alt="" className="size-8 object-contain" src="/logo.png" />
             <p className="font-display text-sm uppercase tracking-[-0.02em]">Motio</p>
           </div>
-          <a
-            className="flex items-center gap-2 rounded-full border border-white/10 px-3 py-1.5 text-[9px] uppercase tracking-[0.15em] text-white/55 transition hover:border-[#d9ff72]/50 hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#d9ff72]"
-            href="https://github.com/SimaxLabs/motio"
-            rel="noreferrer"
-            target="_blank"
-          >
-            <Icon name="github" className="size-3 text-[#d9ff72]" />
-            GitHub
-          </a>
+          <div className="flex items-center gap-2">
+            {jobs.length > 0 && (
+              <details className="group relative">
+                <summary className="flex cursor-pointer list-none items-center gap-2 rounded-full border border-white/10 px-3 py-1.5 text-[9px] uppercase tracking-[0.15em] text-white/70 transition hover:border-[#d9ff72]/50 hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#d9ff72] [&::-webkit-details-marker]:hidden">
+                  <Icon name="film" className="size-3 text-[#d9ff72]" />
+                  Jobs
+                  <span aria-label={`${activeJobCount} active, ${jobs.length} total`} className="flex min-w-5 items-center justify-center rounded-full bg-[#d9ff72] px-1.5 py-0.5 text-[8px] font-bold text-black">
+                    {jobs.length}
+                  </span>
+                </summary>
+                <div className="absolute right-0 z-50 mt-2 w-[min(22rem,calc(100vw-2.5rem))] border border-white/15 bg-[#171917] shadow-2xl">
+                  <div className="border-b border-white/10 px-4 py-3">
+                    <p className="text-[10px] font-bold uppercase tracking-[0.15em]">Session jobs</p>
+                    <p className="mt-1 text-[9px] leading-4 text-white/40">Private to this tab and cleared on reload or service restart.</p>
+                  </div>
+                  <div className="max-h-[60vh] overflow-y-auto p-2">
+                    {jobs.map((trackedJob) => {
+                      const active = trackedJob.status === "queued" || trackedJob.status === "processing";
+                      return (
+                        <button
+                          aria-current={selectedJobId === trackedJob.id ? "true" : undefined}
+                          className={`flex w-full items-center justify-between gap-3 border px-3 py-3 text-left transition disabled:cursor-not-allowed disabled:opacity-40 ${selectedJobId === trackedJob.id ? "border-[#d9ff72]/60 bg-[#d9ff72]/5" : "border-transparent hover:border-white/15 hover:bg-white/5"}`}
+                          disabled={submitting || uploadingReference !== null || readingImageReference}
+                          key={trackedJob.id}
+                          onClick={(event) => {
+                            viewJob(trackedJob);
+                            const details = event.currentTarget.closest("details");
+                            details?.removeAttribute("open");
+                            details?.querySelector("summary")?.focus();
+                          }}
+                          type="button"
+                        >
+                          <span className="min-w-0">
+                            <span className="block text-[10px] font-bold uppercase tracking-[0.12em]">{trackedJob.provider === "local" ? "Local h3.c" : "OpenRouter"}</span>
+                            <span className="mt-1 block truncate font-mono text-[9px] text-white/40">{trackedJob.id}</span>
+                          </span>
+                          <span className={`shrink-0 text-[9px] font-bold uppercase tracking-[0.12em] ${trackedJob.status === "failed" ? "text-[#ff826e]" : active ? "text-[#d9ff72]" : "text-white/55"}`}>
+                            {trackedJob.status}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </details>
+            )}
+            <a
+              className="flex items-center gap-2 rounded-full border border-white/10 px-3 py-1.5 text-[9px] uppercase tracking-[0.15em] text-white/55 transition hover:border-[#d9ff72]/50 hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#d9ff72]"
+              href="https://github.com/SimaxLabs/motio"
+              rel="noreferrer"
+              target="_blank"
+            >
+              <Icon name="github" className="size-3 text-[#d9ff72]" />
+              GitHub
+            </a>
+          </div>
         </div>
       </header>
 
@@ -925,9 +1106,10 @@ export default function App() {
               <button
                 aria-pressed={workflow === option}
                 className={`h-12 text-xs font-bold uppercase tracking-[0.12em] transition disabled:cursor-not-allowed disabled:opacity-40 ${workflow === option ? "bg-black text-[#d9ff72]" : "text-stone-500 hover:bg-white/60 hover:text-black"}`}
-                disabled={submitting || isActive || submissionUncertain || uploadingReference !== null || readingImageReference}
+                disabled={submitting || submissionUncertain || uploadingReference !== null || readingImageReference}
                 key={option}
                 onClick={() => {
+                  leaveJobView();
                   setWorkflow(option);
                   setError(null);
                 }}
@@ -945,9 +1127,13 @@ export default function App() {
               <button
                 aria-pressed={form.provider === provider}
                 className={`h-11 text-[10px] font-bold uppercase tracking-[0.12em] transition disabled:cursor-not-allowed disabled:opacity-40 ${form.provider === provider ? "bg-black text-[#d9ff72]" : "text-stone-500 hover:bg-white/60 hover:text-black"}`}
-                disabled={submitting || isActive || uploadingReference !== null || (provider === "local" && appConfig?.localH3.supported === false)}
+                disabled={submitting || uploadingReference !== null || (provider === "local" && appConfig?.localH3.supported !== true)}
                 key={provider}
-                onClick={() => setForm((current) => ({ ...current, provider }))}
+                onClick={() => {
+                  leaveJobView();
+                  setForm((current) => ({ ...current, provider }));
+                  setError(null);
+                }}
                 type="button"
               >
                 {provider === "openrouter" ? "OpenRouter" : "Local h3.c"}
@@ -1071,7 +1257,7 @@ export default function App() {
             </div>
           </fieldset>
           ) : (
-          <fieldset disabled={submitting || isActive || uploadingReference !== null}>
+          <fieldset disabled={submitting || isActive || uploadingReference !== null || ((clearingWorkspace || localCleanupFailed) && form.provider === "local")}>
             {form.provider === "local" && (
               <div className="mb-7 border border-black/12 bg-[#e7e5dc] p-4 sm:p-5">
                 <div className="flex items-start gap-3">
@@ -1556,6 +1742,7 @@ export default function App() {
                 submitting ||
                 readingImageReference ||
                 submissionUncertain ||
+                ((clearingWorkspace || localCleanupFailed) && workflow === "video" && form.provider === "local") ||
                 (workflow === "video" && (isActive || uploadingReference !== null || !form.prompt.trim())) ||
                 (workflow === "image" && !imagePrompt.trim())
               }
@@ -1578,11 +1765,11 @@ export default function App() {
             </button>
             <button
               className="h-14 border border-black/20 px-4 text-[10px] font-bold uppercase tracking-[0.12em] hover:border-black disabled:cursor-not-allowed disabled:opacity-45"
-              disabled={submitting || uploadingReference !== null || readingImageReference}
+              disabled={submitting || clearingWorkspace || uploadingReference !== null || readingImageReference}
               onClick={clear}
               type="button"
             >
-              {submissionUncertain ? "Unlock retry" : workflow === "video" && isActive ? "Stop watching" : "Clear"}
+              {submissionUncertain ? "Unlock retry" : "Clear"}
             </button>
           </div>
         </form>
@@ -1707,7 +1894,9 @@ export default function App() {
               <div className="flex flex-col gap-3 sm:flex-row">
                 <a
                   className="flex h-12 flex-1 items-center justify-center gap-2 bg-[#d9ff72] text-xs font-bold uppercase tracking-[0.12em] text-black transition hover:bg-white"
-                  download={usesSessionMedia ? "openrouter-video.mp4" : undefined}
+                  download={usesSessionMedia
+                    ? job.provider === "local" ? "h3-local-video.mp4" : "openrouter-video.mp4"
+                    : undefined}
                   href={downloadSource}
                 >
                   <Icon name="download" /> Download video

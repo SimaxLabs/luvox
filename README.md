@@ -68,7 +68,17 @@ The h3.c source and MiniMax H3 model weights have their own licenses and usage r
 
 ## Privacy
 
-The environment API key stays on the server. A key entered in the UI remains only in the current browser tab. Prompts, generated images, and jobs are not persisted by Motio.
+Motio uses volatile session state instead of accounts or a generation database. API responses are marked `private, no-store`, and credentials are kept out of payloads and URLs.
+
+### Hosted version
+
+The hosted version is OpenRouter-only; h3.c is unavailable and Motio creates no local generation files. UI-entered keys, prompts, results, and job records stay in tab or transit memory and are not persisted by Motio. Keys travel only in request headers, remain pinned to submitted jobs in tab memory, and disappear on workspace reset, reload, or tab close. Videos are streamed through an authenticated proxy rather than saved to disk; temporary-key media uses revocable browser `blob:` URLs. A server-configured `OPENROUTER_API_KEY` never reaches the browser.
+
+OpenRouter, model providers, and hosting infrastructure have separate data practices. Review OpenRouter's [privacy policy](https://openrouter.ai/privacy) and [provider logging documentation](https://openrouter.ai/docs/features/privacy-and-logging). Closing Motio does not cancel provider work already submitted.
+
+### Self-hosted local h3.c
+
+Local h3.c runs only on a compatible Mac and temporarily stores app-owned jobs, outputs, and uploaded references under `.h3-jobs` or `H3_JOBS_DIR`. Per-tab tokens isolate them. Motio cleans them on Clear, delivered reload/close cleanup, startup, and graceful shutdown; an abrupt close may leave files until restart.
 
 ## License
 

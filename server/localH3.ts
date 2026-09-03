@@ -57,6 +57,7 @@ interface StorageProcessGroup {
 
 interface LocalJob {
   id: string;
+  workspaceToken: string;
   input: LocalGenerateVideoInput;
   runtime: LocalH3Runtime;
   directory: string;
@@ -93,14 +94,14 @@ let activeExecution: Promise<void> | undefined;
 let pendingJobReservations = 0;
 let referenceUploadTail: Promise<void> = Promise.resolve();
 let referenceProcessingTail: Promise<void> = Promise.resolve();
-const referenceUploads = new Map<string, string>();
+const referenceUploads = new Map<string, { path: string; workspaceToken: string }>();
+const discardedWorkspaces = new Set<string>();
 const storageLockToken = randomUUID();
 let storageLockPath: string | undefined;
 let storageServerStartedAt: string | undefined;
 let shuttingDown = false;
 let storageReady = false;
 let inFlightOperations = 0;
-let localWorkspaceVersion = 0;
 const idleResolvers = new Set<() => void>();
 const childProcessGroups = new Set<number>();
 const persistedProcessGroups = new Map<number, StorageProcessGroup>();
@@ -404,6 +405,38 @@ function assertLocalOperationMayContinue(): void {
   }
 }
 
+function assertLocalWorkspaceActive(workspaceToken: string): void {
+  if (!discardedWorkspaces.has(workspaceToken)) return;
+  throw new LocalH3Error(
+    "This local workspace has been cleared.",
+    410,
+    "local_workspace_cleared",
+    false,
+  );
+}
+
+function retireLocalWorkspace(workspaceToken: string): void {
+  discardedWorkspaces.add(workspaceToken);
+}
+
+async function removeOwnedArtifact(
+  target: string,
+  recursive: boolean,
+  onRemoved?: () => void,
+): Promise<void> {
+  if (shuttingDown) return;
+  try {
+    await rm(target, { recursive, force: true });
+    onRemoved?.();
+  } catch {
+    const retry = setTimeout(
+      () => void removeOwnedArtifact(target, recursive, onRemoved),
+      5_000,
+    );
+    retry.unref();
+  }
+}
+
 function waitForLocalOperations(): Promise<void> {
   if (inFlightOperations === 0) return Promise.resolve();
   return new Promise((resolve) => idleResolvers.add(resolve));
@@ -632,6 +665,7 @@ async function cleanOwnedStorage(jobsDirectory: string): Promise<void> {
   jobs.clear();
   queue.length = 0;
   referenceUploads.clear();
+  discardedWorkspaces.clear();
 }
 
 export async function initializeLocalH3Storage(): Promise<void> {
@@ -1104,8 +1138,8 @@ async function prepareReferenceDirectory(directory: string, allowReplacement: bo
   const expired = retained.filter((file) => file.modifiedAt < cutoff);
   await Promise.all(expired.map((file) => rm(file.path, { force: true })));
   const expiredPaths = new Set(expired.map((file) => file.path));
-  for (const [token, filePath] of referenceUploads) {
-    if (expiredPaths.has(filePath)) referenceUploads.delete(token);
+  for (const [token, upload] of referenceUploads) {
+    if (expiredPaths.has(upload.path)) referenceUploads.delete(token);
   }
   if (!allowReplacement && retained.length - expired.length >= MAX_RETAINED_REFERENCE_IMAGES) {
     throw new LocalH3Error(
@@ -1117,11 +1151,17 @@ async function prepareReferenceDirectory(directory: string, allowReplacement: bo
   }
 }
 
-async function ownedReferenceUpload(token: string | undefined, directory: string): Promise<string | undefined> {
+async function ownedReferenceUpload(
+  token: string | undefined,
+  directory: string,
+  workspaceToken: string,
+): Promise<string | undefined> {
   if (!token) return undefined;
-  const candidate = referenceUploads.get(token);
+  const upload = referenceUploads.get(token);
+  const candidate = upload?.path;
   if (
     !candidate ||
+    upload.workspaceToken !== workspaceToken ||
     path.dirname(candidate) !== path.resolve(directory) ||
     !REFERENCE_IMAGE_NAME.test(path.basename(candidate))
   ) {
@@ -1138,6 +1178,7 @@ async function ownedReferenceUpload(token: string | undefined, directory: string
 async function storeLocalReferenceImage(
   data: Buffer,
   uploadToken: string,
+  workspaceToken: string,
   previousToken?: string,
 ): Promise<{ path: string; token: string }> {
   if (data.length < 1) {
@@ -1164,9 +1205,18 @@ async function storeLocalReferenceImage(
 
   const jobsDirectory = await resolveJobsDirectory();
   const directory = path.join(jobsDirectory, "reference-images");
-  const existingPath = await ownedReferenceUpload(uploadToken, directory);
+  const registeredUpload = referenceUploads.get(uploadToken);
+  if (registeredUpload && registeredUpload.workspaceToken !== workspaceToken) {
+    throw new LocalH3Error(
+      "The reference upload token belongs to another local workspace.",
+      409,
+      "local_reference_conflict",
+      false,
+    );
+  }
+  const existingPath = await ownedReferenceUpload(uploadToken, directory, workspaceToken);
   if (existingPath) return { path: existingPath, token: uploadToken };
-  const previousPath = await ownedReferenceUpload(previousToken, directory);
+  const previousPath = await ownedReferenceUpload(previousToken, directory, workspaceToken);
   const output = path.join(directory, `${randomUUID()}${extension}`);
   try {
     await serializeReferenceProcessing(async () => {
@@ -1176,36 +1226,38 @@ async function storeLocalReferenceImage(
       if (previousPath) await rm(previousPath, { force: true });
     });
   } catch (error) {
-    await rm(output, { force: true }).catch(() => undefined);
+    await removeOwnedArtifact(output, false);
     throw error;
   }
 
   if (previousToken && previousPath) referenceUploads.delete(previousToken);
-  referenceUploads.set(uploadToken, output);
+  referenceUploads.set(uploadToken, { path: output, workspaceToken });
   return { path: output, token: uploadToken };
 }
 
 export function uploadLocalReferenceImage(
   data: Buffer,
   uploadToken: string,
+  workspaceToken: string,
   previousToken?: string,
 ): Promise<{ path: string; token: string }> {
   const release = beginLocalOperation();
   const operation = referenceUploadTail.then(() => {
     assertLocalOperationMayContinue();
-    return storeLocalReferenceImage(data, uploadToken, previousToken);
+    assertLocalWorkspaceActive(workspaceToken);
+    return storeLocalReferenceImage(data, uploadToken, workspaceToken, previousToken);
   });
   referenceUploadTail = operation.then(() => undefined, () => undefined);
   return operation.finally(release);
 }
 
-export function deleteLocalReferenceImage(token: string): Promise<{ deleted: boolean }> {
+export function deleteLocalReferenceImage(token: string, workspaceToken: string): Promise<{ deleted: boolean }> {
   const release = beginLocalOperation();
   const operation = referenceUploadTail.then(async () => {
     assertLocalOperationMayContinue();
     const jobsDirectory = await resolveJobsDirectory();
     const directory = path.join(jobsDirectory, "reference-images");
-    const candidate = await ownedReferenceUpload(token, directory);
+    const candidate = await ownedReferenceUpload(token, directory, workspaceToken);
     if (!candidate) return { deleted: false };
     await serializeReferenceProcessing(() => rm(candidate, { force: true }));
     referenceUploads.delete(token);
@@ -1215,25 +1267,47 @@ export function deleteLocalReferenceImage(token: string): Promise<{ deleted: boo
   return operation.finally(release);
 }
 
-export function discardLocalH3Workspace(): Promise<{ cleared: true }> {
+export function discardLocalH3Workspace(workspaceToken: string): Promise<{ cleared: true }> {
+  if (!isLocalH3Supported()) return Promise.resolve({ cleared: true });
   const release = beginLocalOperation();
-  localWorkspaceVersion += 1;
-  for (const job of jobs.values()) job.discardOnCompletion = true;
+  retireLocalWorkspace(workspaceToken);
+  for (const job of jobs.values()) {
+    if (job.workspaceToken === workspaceToken) job.discardOnCompletion = true;
+  }
+  for (let index = queue.length - 1; index >= 0; index -= 1) {
+    const job = jobs.get(queue[index]);
+    if (job?.workspaceToken === workspaceToken) queue.splice(index, 1);
+  }
   const operation = referenceUploadTail.then(async () => {
     assertLocalOperationMayContinue();
-    // ponytail: local mode is one loopback workspace; add per-tab ownership only if concurrent tabs are supported.
-    const jobsDirectory = path.dirname(storageLockPath!);
+    let cleanupError: unknown;
     for (const job of jobs.values()) {
-      if (!job.discardOnCompletion || job.id === activeJobId || queue.includes(job.id)) continue;
+      if (
+        job.workspaceToken !== workspaceToken ||
+        !job.discardOnCompletion ||
+        job.id === activeJobId
+      ) continue;
       try {
         await rm(job.directory, { recursive: true, force: true });
         jobs.delete(job.id);
-      } catch {
-        // Keep the job registered so a later reload or shutdown can retry cleanup.
+      } catch (error) {
+        cleanupError ??= error;
+        void removeOwnedArtifact(job.directory, true, () => jobs.delete(job.id));
       }
     }
-    await serializeReferenceProcessing(() => cleanReferenceStorage(jobsDirectory));
-    referenceUploads.clear();
+    await serializeReferenceProcessing(async () => {
+      for (const [token, upload] of referenceUploads) {
+        if (upload.workspaceToken !== workspaceToken) continue;
+        try {
+          await rm(upload.path, { force: true });
+          referenceUploads.delete(token);
+        } catch (error) {
+          cleanupError ??= error;
+          void removeOwnedArtifact(upload.path, false, () => referenceUploads.delete(token));
+        }
+      }
+    });
+    if (cleanupError) throw cleanupError;
     return { cleared: true } as const;
   });
   referenceUploadTail = operation.then(() => undefined, () => undefined);
@@ -1296,6 +1370,37 @@ function prepareReferenceImage(
     const copied = await copyReferenceImage(source, directory, name);
     return processReferenceImage(copied, directory, name, width, height, fit);
   });
+}
+
+async function assertReferenceSourceOwned(
+  source: string,
+  jobsDirectory: string,
+  workspaceToken: string,
+): Promise<void> {
+  const enteredReferenceDirectory = path.join(jobsDirectory, "reference-images");
+  const referenceDirectory = await realpath(enteredReferenceDirectory).catch(() => enteredReferenceDirectory);
+  const enteredSource = path.resolve(source);
+  const resolvedSource = await realpath(source).catch(() => enteredSource);
+  if (
+    path.dirname(enteredSource) !== enteredReferenceDirectory &&
+    path.dirname(resolvedSource) !== referenceDirectory
+  ) return;
+  let upload: { path: string; workspaceToken: string } | undefined;
+  for (const candidate of referenceUploads.values()) {
+    const enteredCandidate = path.resolve(candidate.path);
+    const resolvedCandidate = await realpath(candidate.path).catch(() => enteredCandidate);
+    if (enteredCandidate === enteredSource || resolvedCandidate === resolvedSource) {
+      upload = candidate;
+      break;
+    }
+  }
+  if (upload?.workspaceToken === workspaceToken) return;
+  throw new LocalH3Error(
+    "The staged reference image belongs to another local workspace.",
+    403,
+    "local_reference_forbidden",
+    false,
+  );
 }
 
 function toResponse(job: LocalJob): VideoStatusResponse {
@@ -1504,12 +1609,7 @@ function startNextJob(): void {
   activeJobId = id;
   const execution = executeJob(job).finally(async () => {
     if (job.discardOnCompletion) {
-      try {
-        await rm(job.directory, { recursive: true, force: true });
-        jobs.delete(id);
-      } catch {
-        // Keep the job registered so a later reload or shutdown can retry cleanup.
-      }
+      await removeOwnedArtifact(job.directory, true, () => jobs.delete(id));
     }
     activeJobId = undefined;
     if (activeExecution === execution) activeExecution = undefined;
@@ -1519,35 +1619,21 @@ function startNextJob(): void {
   void execution;
 }
 
-async function removePreviousGenerationDirectory(jobsDirectory: string, id: string): Promise<void> {
-  if (!LOCAL_JOB_ID.test(id) || id === activeJobId || queue.includes(id)) return;
-
-  const knownJob = jobs.get(id);
-  if (knownJob && knownJob.status !== "completed" && knownJob.status !== "failed") return;
-  if (!knownJob) {
-    const completedOutput = await stat(path.join(jobsDirectory, id, "result.mp4")).catch(() => undefined);
-    const terminalStatus = await readFile(path.join(jobsDirectory, id, TERMINAL_MARKER), "utf8")
-      .catch(() => undefined);
-    if (!completedOutput?.isFile() && terminalStatus !== "completed\n" && terminalStatus !== "failed\n") return;
-  }
-
-  await rm(path.join(jobsDirectory, id), { recursive: true, force: true });
-  jobs.delete(id);
-}
-
 export function isLocalJobId(id: string): boolean {
   return LOCAL_JOB_ID.test(id);
 }
 
 async function generateLocalVideoOperation(
   input: LocalGenerateVideoInput,
-  submissionWorkspaceVersion: number,
+  workspaceToken: string,
 ): Promise<VideoStatusResponse> {
   const runtime = await resolveRuntime();
   // ponytail: the sole caller validates this static preset before dispatch.
   const resolution = getLocalH3Resolution(input.resolution)!;
   const firstFrameSource = input.firstFramePath;
   const lastFrameSource = input.lastFramePath;
+  if (firstFrameSource) await assertReferenceSourceOwned(firstFrameSource, runtime.jobsDirectory, workspaceToken);
+  if (lastFrameSource) await assertReferenceSourceOwned(lastFrameSource, runtime.jobsDirectory, workspaceToken);
   if (queue.length + pendingJobReservations >= MAX_QUEUED_JOBS) {
     throw new LocalH3Error(
       "The local h3.c queue is full. Wait for an existing generation to finish.",
@@ -1587,7 +1673,7 @@ async function generateLocalVideoOperation(
         );
       }
     } catch (error) {
-      await rm(directory, { recursive: true, force: true });
+      await removeOwnedArtifact(directory, true);
       if (error instanceof LocalH3Error) throw error;
       throw new LocalH3Error(
         "The server could not copy a reference image into the local job.",
@@ -1597,8 +1683,16 @@ async function generateLocalVideoOperation(
       );
     }
 
+    try {
+      assertLocalWorkspaceActive(workspaceToken);
+    } catch (error) {
+      await removeOwnedArtifact(directory, true);
+      throw error;
+    }
+
     const job: LocalJob = {
       id,
+      workspaceToken,
       input,
       runtime,
       directory,
@@ -1611,7 +1705,6 @@ async function generateLocalVideoOperation(
       progress: 0,
       diagnostics: "",
       progressCarry: "",
-      discardOnCompletion: submissionWorkspaceVersion !== localWorkspaceVersion || undefined,
     };
 
     if (shuttingDown) {
@@ -1626,23 +1719,22 @@ async function generateLocalVideoOperation(
     jobs.set(id, job);
     queue.push(id);
     startNextJob();
-    if (input.previousJobId) {
-      await removePreviousGenerationDirectory(runtime.jobsDirectory, input.previousJobId).catch(() => undefined);
-    }
     return toResponse(job);
   } finally {
     pendingJobReservations -= 1;
   }
 }
 
-export function generateLocalVideo(input: LocalGenerateVideoInput): Promise<VideoStatusResponse> {
+export function generateLocalVideo(input: LocalGenerateVideoInput, workspaceToken: string): Promise<VideoStatusResponse> {
+  assertLocalWorkspaceActive(workspaceToken);
   const release = beginLocalOperation();
-  return generateLocalVideoOperation(input, localWorkspaceVersion).finally(release);
+  return generateLocalVideoOperation(input, workspaceToken).finally(release);
 }
 
-export function getLocalVideoStatus(id: string): VideoStatusResponse {
+export function getLocalVideoStatus(id: string, workspaceToken: string): VideoStatusResponse {
+  assertLocalWorkspaceActive(workspaceToken);
   const job = jobs.get(id);
-  if (!job) {
+  if (!job || job.workspaceToken !== workspaceToken) {
     throw new LocalH3Error(
       "The local generation job was not found. Local jobs are lost when the server restarts.",
       404,
@@ -1653,8 +1745,17 @@ export function getLocalVideoStatus(id: string): VideoStatusResponse {
   return toResponse(job);
 }
 
-export async function getLocalVideoPath(id: string): Promise<string> {
+export async function getLocalVideoPath(id: string, workspaceToken: string): Promise<string> {
+  assertLocalWorkspaceActive(workspaceToken);
   const job = jobs.get(id);
+  if (!job || job.workspaceToken !== workspaceToken) {
+    throw new LocalH3Error(
+      "The local generation job was not found. Local jobs are lost when the server restarts.",
+      404,
+      "local_job_not_found",
+      false,
+    );
+  }
   if (job && job.status !== "completed") {
     throw new LocalH3Error(
       "The local video is not ready yet.",
@@ -1664,8 +1765,8 @@ export async function getLocalVideoPath(id: string): Promise<string> {
     );
   }
 
-  const jobsDirectory = job?.runtime.jobsDirectory || await resolveJobsDirectory();
-  const expectedOutput = job?.output || path.join(jobsDirectory, id, "result.mp4");
+  const jobsDirectory = job.runtime.jobsDirectory;
+  const expectedOutput = job.output;
   const resolvedJobsDirectory = await realpath(jobsDirectory);
   const resolvedOutput = await realpath(expectedOutput).catch(() => undefined);
   const output = resolvedOutput?.startsWith(`${resolvedJobsDirectory}${path.sep}`)
@@ -1673,11 +1774,9 @@ export async function getLocalVideoPath(id: string): Promise<string> {
     : undefined;
   if (!resolvedOutput || !output?.isFile()) {
     throw new LocalH3Error(
-      job
-        ? "The completed local video file is missing."
-        : "The local generation job was not found. Local jobs without completed output are lost when the server restarts.",
+      "The completed local video file is missing.",
       404,
-      job ? "local_video_missing" : "local_job_not_found",
+      "local_video_missing",
       false,
     );
   }

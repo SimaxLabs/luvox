@@ -28,7 +28,6 @@ export interface LocalGenerateVideoPayload {
   firstFramePath?: string;
   lastFramePath?: string;
   frameFit: LocalH3FrameFitId;
-  previousJobId?: string;
   ssdStreaming: boolean;
 }
 
@@ -64,6 +63,10 @@ export class ApiError extends Error {
 function sessionKeyHeaders(sessionApiKey?: string): Record<string, string> {
   const key = sessionApiKey?.trim();
   return key ? { "X-OpenRouter-Api-Key": key } : {};
+}
+
+function localWorkspaceHeaders(workspaceToken?: string): Record<string, string> {
+  return workspaceToken ? { "X-Motio-Workspace-Token": workspaceToken } : {};
 }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -113,12 +116,14 @@ export function generateVideo(
   payload: OpenRouterGenerateVideoPayload | LocalGenerateVideoPayload,
   sessionApiKey?: string,
   signal?: AbortSignal,
+  workspaceToken?: string,
 ): Promise<VideoJob> {
   return request<VideoJob>("/api/video/generate", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       ...sessionKeyHeaders(sessionApiKey),
+      ...localWorkspaceHeaders(workspaceToken),
     },
     body: JSON.stringify(payload),
     signal,
@@ -148,6 +153,7 @@ export function getAppConfig(signal?: AbortSignal): Promise<AppConfig> {
 export function uploadLocalReferenceImage(
   file: File,
   uploadToken: string,
+  workspaceToken: string,
   previousToken?: string,
 ): Promise<{ path: string; token: string }> {
   return request<{ path: string; token: string }>("/api/local/reference-image", {
@@ -155,39 +161,52 @@ export function uploadLocalReferenceImage(
     headers: {
       "Content-Type": "application/octet-stream",
       "X-Reference-Upload-Token": uploadToken,
+      ...localWorkspaceHeaders(workspaceToken),
       ...(previousToken ? { "X-Previous-Reference-Token": previousToken } : {}),
     },
     body: file,
   });
 }
 
-export function deleteLocalReferenceImage(token: string): Promise<{ deleted: boolean }> {
+export function deleteLocalReferenceImage(token: string, workspaceToken: string): Promise<{ deleted: boolean }> {
   return request<{ deleted: boolean }>("/api/local/reference-image", {
     method: "DELETE",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...localWorkspaceHeaders(workspaceToken) },
     body: JSON.stringify({ token }),
   });
 }
 
-export function discardLocalWorkspace(): Promise<{ cleared: true }> {
-  return request<{ cleared: true }>("/api/local/workspace", { method: "DELETE" });
+export function discardLocalWorkspace(
+  workspaceToken: string,
+  keepalive = false,
+  signal?: AbortSignal,
+): Promise<{ cleared: true }> {
+  return request<{ cleared: true }>("/api/local/workspace", {
+    method: "DELETE",
+    headers: localWorkspaceHeaders(workspaceToken),
+    keepalive,
+    signal,
+  });
 }
 
 export function getVideoStatus(
   id: string,
   sessionApiKey?: string,
   signal?: AbortSignal,
+  workspaceToken?: string,
 ): Promise<VideoJob> {
   return request<VideoJob>(`/api/video/status/${encodeURIComponent(id)}`, {
-    headers: sessionKeyHeaders(sessionApiKey),
+    headers: { ...sessionKeyHeaders(sessionApiKey), ...localWorkspaceHeaders(workspaceToken) },
+    cache: "no-store",
     signal,
   });
 }
 
 export async function getVideoContent(
   url: string,
-  sessionApiKey: string,
+  sessionApiKey?: string,
   signal?: AbortSignal,
+  workspaceToken?: string,
 ): Promise<Blob> {
   const contentUrl = new URL(url, window.location.origin);
   if (
@@ -195,14 +214,14 @@ export async function getVideoContent(
     !contentUrl.pathname.startsWith("/api/video/content/") ||
     contentUrl.search
   ) {
-    throw new ApiError("Refused to send the temporary key outside the local video endpoint.", 400, false);
+    throw new ApiError("Refused to send session credentials outside the local video endpoint.", 400, false);
   }
 
   let response: Response;
 
   try {
     response = await fetch(contentUrl.pathname, {
-      headers: sessionKeyHeaders(sessionApiKey),
+      headers: { ...sessionKeyHeaders(sessionApiKey), ...localWorkspaceHeaders(workspaceToken) },
       signal,
     });
   } catch {
