@@ -288,20 +288,9 @@ function Preview({
   }
 
   return (
-    <div className="relative flex min-h-72 w-full items-center justify-center overflow-hidden bg-[#111310]" style={{ aspectRatio: ratio }}>
-      <div className="absolute inset-0 preview-grid opacity-30" />
-      <div className="absolute left-[9%] top-[14%] h-[72%] w-[82%] border border-white/10" />
-      <div className="absolute left-[13%] top-[19%] h-[62%] w-[74%] border border-white/5" />
-      <div className="relative text-center">
-        <Icon name="film" className="mx-auto size-9 text-[#d9ff72]/80" />
-        <p className="mt-5 font-display text-2xl uppercase tracking-[-0.04em] text-white">Awaiting direction</p>
-        <p className="mt-2 max-w-xs text-xs leading-5 text-white/40">
-          Your generated film will appear here when the render completes.
-        </p>
-      </div>
-      <span className="absolute bottom-4 left-5 font-mono text-[9px] tracking-[0.18em] text-white/20">FRAME 000</span>
-      <span className="absolute right-5 top-4 font-mono text-[9px] tracking-[0.18em] text-white/20">VIDEO / OUT</span>
-    </div>
+    <p className="flex min-h-72 items-center justify-center px-6 text-center font-mono text-[10px] uppercase tracking-[0.15em] text-white/60">
+      Generated video preview will appear here
+    </p>
   );
 }
 
@@ -1249,15 +1238,6 @@ export default function App() {
 
       <div className="mx-auto grid max-w-[1500px] lg:grid-cols-[minmax(0,0.88fr)_minmax(440px,1.12fr)]">
         <form className="bg-[#f0efe8] px-5 py-8 sm:px-8 lg:px-10 lg:py-10" onSubmit={submit}>
-          <div className="mb-8 flex items-center justify-between border-b border-black/10 pb-4">
-            <h2 className="font-display text-xl uppercase tracking-[-0.04em]">
-              {workflow === "video" ? "Scene setup" : "First frame setup"}
-            </h2>
-            <span className="font-mono text-[9px] tracking-[0.15em] text-stone-400">
-              {workflow === "video" ? "01—05" : "01—02"}
-            </span>
-          </div>
-
           <div className="mb-7 grid grid-cols-2 gap-1.5 bg-black/5 p-1.5" aria-label="Generation workflow" role="group">
             {(["video", "image"] as const).map((option) => (
               <button
@@ -1276,7 +1256,7 @@ export default function App() {
                 }}
                 type="button"
               >
-                {option === "video" ? "Text to video" : "Generate first frame"}
+                {option === "video" ? "Text to video" : "Text to image"}
               </button>
             ))}
           </div>
@@ -1366,6 +1346,18 @@ export default function App() {
                 <span className="absolute bottom-3 right-3 font-mono text-[9px] text-stone-400">{imagePrompt.length} / 10K</span>
               </div>
             </div>
+            <div className="mt-6">
+              <p className="mb-2 text-[11px] font-bold uppercase tracking-[0.18em] text-stone-700">Model</p>
+              <p className="flex h-12 items-center border border-black/15 bg-[#faf9f3] px-3 text-sm text-stone-700">
+                {MUSE_IMAGE_MODEL.name}
+              </p>
+              <p className="mt-2 font-mono text-[10px] text-stone-600">
+                OpenRouter price: {MUSE_IMAGE_MODEL.price}
+              </p>
+              <p className="mt-2 text-[11px] leading-4 text-stone-500">
+                The reference is sent through OpenRouter's documented input_references field.
+              </p>
+            </div>
             <div className="mt-6 border border-black/12 bg-[#e7e5dc] p-4 sm:p-5">
               <div className="mb-4 flex items-start gap-3">
                 <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center bg-white/70"><Icon name="image" /></div>
@@ -1403,18 +1395,6 @@ export default function App() {
                   </button>
                 </div>
               )}
-            </div>
-            <div className="mt-6">
-              <p className="mb-2 text-[11px] font-bold uppercase tracking-[0.18em] text-stone-700">Model</p>
-              <p className="flex h-12 items-center border border-black/15 bg-[#faf9f3] px-3 text-sm text-stone-700">
-                {MUSE_IMAGE_MODEL.name}
-              </p>
-              <p className="mt-2 font-mono text-[10px] text-stone-600">
-                OpenRouter price: {MUSE_IMAGE_MODEL.price}
-              </p>
-              <p className="mt-2 text-[11px] leading-4 text-stone-500">
-                The reference is sent through OpenRouter's documented input_references field.
-              </p>
             </div>
           </fieldset>
           ) : (
@@ -1913,7 +1893,7 @@ export default function App() {
                 {currentSubmitting
                   ? "Submitting..."
                   : workflow === "image"
-                    ? "Generate first frame"
+                    ? "Text to image"
                     : currentVideoUnknown
                       ? "Submission status unknown"
                       : currentVideoActive
@@ -1942,9 +1922,9 @@ export default function App() {
           <>
           <div className="flex items-center justify-between px-5 py-5 sm:px-8">
             <div>
-              <p className="font-mono text-[9px] uppercase tracking-[0.2em] text-white/60">First frame monitor</p>
+              <p className="font-mono text-[9px] uppercase tracking-[0.2em] text-white/60">Output monitor</p>
               <h2 className="mt-1 font-display text-lg uppercase">
-                {imageTaskStatus ? MUSE_IMAGE_MODEL.name : "No generated frame"}
+                {imageTaskStatus ? MUSE_IMAGE_MODEL.name : "No active reel"}
               </h2>
             </div>
             {imageTaskStatus && (
@@ -1954,8 +1934,10 @@ export default function App() {
             )}
           </div>
 
+          <StatusRail status={imageTaskStatus === "unknown" ? undefined : imageTaskStatus ?? undefined} />
+
           <div className="flex flex-1 items-center p-5 sm:p-8">
-            <div className="relative flex min-h-72 w-full items-center justify-center overflow-hidden border border-white/10 bg-black shadow-[0_24px_80px_rgba(0,0,0,0.35)]">
+            <div className="relative flex min-h-72 w-full items-center justify-center overflow-hidden bg-[#171917]">
               {imageSubmitting ? (
                 <div className="relative flex min-h-96 w-full items-center justify-center overflow-hidden bg-[#111310]">
                   <div className="absolute inset-0 preview-grid opacity-35" />
@@ -1972,16 +1954,9 @@ export default function App() {
                   src={imageSource}
                 />
               ) : (
-                <div className="relative flex min-h-96 w-full items-center justify-center overflow-hidden bg-[#111310]">
-                  <div className="absolute inset-0 preview-grid opacity-30" />
-                  <div className="relative px-6 text-center">
-                    <Icon name="image" className="mx-auto size-9 text-[#d9ff72]/80" />
-                    <p className="mt-5 font-display text-2xl uppercase tracking-[-0.04em] text-white">Awaiting first frame</p>
-                    <p className="mt-2 max-w-xs text-xs leading-5 text-white/65">
-                      Describe the opening image for your next video.
-                    </p>
-                  </div>
-                </div>
+                <p className="px-6 text-center font-mono text-[10px] uppercase tracking-[0.15em] text-white/60">
+                  Generated image preview will appear here
+                </p>
               )}
             </div>
           </div>
@@ -2013,7 +1988,7 @@ export default function App() {
           <>
           <div className="flex items-center justify-between px-5 py-5 sm:px-8">
             <div>
-              <p className="font-mono text-[9px] uppercase tracking-[0.2em] text-white/35">Output monitor</p>
+              <p className="font-mono text-[9px] uppercase tracking-[0.2em] text-white/60">Output monitor</p>
               <h2 className="mt-1 font-display text-lg uppercase">{job ? `Job ${job.id.slice(0, 12)}` : currentVideoSubmissionStatus ? "Video submission" : "No active reel"}</h2>
             </div>
             {(job || currentVideoSubmissionStatus) && (
@@ -2026,7 +2001,7 @@ export default function App() {
           <StatusRail status={job?.status} />
 
           <div className="flex flex-1 items-center p-5 sm:p-8">
-            <div className="w-full overflow-hidden border border-white/10 bg-black shadow-[0_24px_80px_rgba(0,0,0,0.35)]">
+            <div className="min-h-72 w-full overflow-hidden bg-[#171917]">
               <Preview
                 aspectRatio={job?.aspectRatio || (form.provider === "local" ? selectedLocalResolution.aspectRatio : form.aspectRatio)}
                 job={job}
@@ -2070,7 +2045,7 @@ export default function App() {
                 </button>
               </div>
             ) : (
-              <div className="flex items-center justify-between font-mono text-[9px] uppercase tracking-[0.15em] text-white/28">
+              <div className="flex items-center justify-between font-mono text-[9px] uppercase tracking-[0.15em] text-white/60">
                 <span>{currentVideoSubmissionStatus && !job ? currentSubmitting ? "Waiting for provider job ID" : "Submission did not create a provider job" : pollingStopped ? "Automatic polling stopped" : isActive ? "Polling every 10 seconds" : "Output controls unlock on completion"}</span>
                 {typeof job?.cost === "number" && <span>Cost ${job.cost.toFixed(4)}</span>}
               </div>
