@@ -10,6 +10,7 @@ import { access, chmod, lstat, mkdir, open, readFile, readdir, realpath, rename,
 import path from "node:path";
 import { promisify } from "node:util";
 import {
+  getLocalH3AccelerationPreset,
   getLocalH3QualityPreset,
   getLocalH3Resolution,
   type LocalH3FrameFitId,
@@ -1359,6 +1360,7 @@ async function executeJob(job: LocalJob): Promise<void> {
   // ponytail: queued jobs are created only from route-validated static presets.
   const resolution = getLocalH3Resolution(job.input.resolution)!;
   const quality = getLocalH3QualityPreset(job.input.quality)!;
+  const acceleration = getLocalH3AccelerationPreset(job.input.acceleration)!;
 
   const args = [
     "-d",
@@ -1381,6 +1383,15 @@ async function executeJob(job: LocalJob): Promise<void> {
     String(job.input.seed),
   ];
 
+  if (acceleration.tokenReduction) args.push("--token-reduction");
+  if (acceleration.renderWidth && acceleration.renderHeight) {
+    args.push(
+      "--render-width",
+      String(acceleration.renderWidth),
+      "--render-height",
+      String(acceleration.renderHeight),
+    );
+  }
   if (job.input.ssdStreaming) args.push("--ssd-streaming");
   if (job.firstFrame) args.push("--first-frame", job.firstFrame);
   if (job.lastFrame) args.push("--last-frame", job.lastFrame);

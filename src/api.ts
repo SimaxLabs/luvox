@@ -23,6 +23,7 @@ export interface LocalGenerateVideoPayload {
   resolution: string;
   frames: number;
   quality: string;
+  acceleration: string;
   seed: number;
   firstFramePath?: string;
   lastFramePath?: string;

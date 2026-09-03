@@ -62,6 +62,8 @@ H3_MODEL_DIR=/absolute/path/to/MiniMax-H3
 
 Run `npm run dev` and select **Local** in Motio. Local mode does not need an OpenRouter API key.
 
+The Advanced section includes allowlisted h3.c acceleration presets, seed control, and SSD streaming. Reduced tokens and the fast internal canvas are limited to the officially validated 512p / 1:1 / Balanced path.
+
 The h3.c source and MiniMax H3 model weights have their own licenses and usage restrictions. Review them before downloading, running, or distributing the engine, weights, or outputs.
 
 ## Privacy

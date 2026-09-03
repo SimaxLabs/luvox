@@ -2,8 +2,10 @@ import { z } from "zod";
 import { isIP } from "node:net";
 import path from "node:path";
 import {
+  getLocalH3AccelerationPreset,
   getLocalH3QualityPreset,
   getLocalH3Resolution,
+  isLocalH3AccelerationAvailable,
   LOCAL_H3_DURATIONS,
   LOCAL_H3_FRAME_FIT_IDS,
 } from "../shared/localH3.js";
@@ -153,6 +155,7 @@ const localGenerateVideoSchema = z
     resolution: z.string().trim().min(1, "Resolution is required."),
     frames: z.number().int("Frame count must be a whole number."),
     quality: z.string().trim().min(1, "Quality preset is required."),
+    acceleration: z.string().trim().min(1, "Acceleration preset is required."),
     seed: z
       .number()
       .int("Seed must be a whole number.")
@@ -192,6 +195,12 @@ export function validateGenerateVideoInput(value: unknown): VideoGenerateInput {
 
     if (!getLocalH3QualityPreset(input.quality)) {
       issues.push(customIssue("quality", "Unsupported local quality preset."));
+    }
+
+    if (!getLocalH3AccelerationPreset(input.acceleration)) {
+      issues.push(customIssue("acceleration", "Unsupported local acceleration preset."));
+    } else if (!isLocalH3AccelerationAvailable(input.acceleration, input.resolution, input.quality)) {
+      issues.push(customIssue("acceleration", "This acceleration preset requires 512p / 1:1 / Balanced mode."));
     }
 
     if (issues.length > 0) throw new z.ZodError(issues);

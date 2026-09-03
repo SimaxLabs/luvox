@@ -3,9 +3,12 @@ import { getVideoModel, VIDEO_MODELS } from "../shared/videoModels";
 import { MUSE_IMAGE_MODEL } from "../shared/imageModels";
 import {
   getLocalH3QualityPreset,
+  isLocalH3AccelerationAvailable,
+  LOCAL_H3_ACCELERATION_PRESETS,
   LOCAL_H3_DURATIONS,
   LOCAL_H3_FRAME_FITS,
   LOCAL_H3_QUALITY_PRESETS,
+  LOCAL_H3_RECOMMENDED_SETUPS,
   LOCAL_H3_RESOLUTIONS,
   type LocalH3FrameFitId,
 } from "../shared/localH3";
@@ -40,6 +43,7 @@ interface FormState {
   localResolution: string;
   localFrames: number;
   localQuality: string;
+  localAcceleration: string;
   localSeed: number;
   localFirstFramePath: string;
   localLastFramePath: string;
@@ -90,6 +94,7 @@ function initialForm(): FormState {
     localResolution: "512x512",
     localFrames: 22,
     localQuality: "balanced",
+    localAcceleration: "standard",
     localSeed: 42,
     localFirstFramePath: "",
     localLastFramePath: "",
@@ -320,6 +325,7 @@ export default function App() {
   const [appConfig, setAppConfig] = useState<AppConfig | null>(null);
   const [uploadingReference, setUploadingReference] = useState<"first" | "last" | null>(null);
   const [referenceUploadStatus, setReferenceUploadStatus] = useState("");
+  const [localAdvancedStatus, setLocalAdvancedStatus] = useState("");
   const [referenceUploadTokens, setReferenceUploadTokens] = useState<Partial<Record<"first" | "last", string>>>({});
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const generationController = useRef<AbortController | null>(null);
@@ -332,6 +338,11 @@ export default function App() {
 
   const selectedModel = getVideoModel(form.model) ?? VIDEO_MODELS[0];
   const selectedLocalQuality = getLocalH3QualityPreset(form.localQuality);
+  const selectedLocalResolution = LOCAL_H3_RESOLUTIONS.find((resolution) => resolution.id === form.localResolution) ?? LOCAL_H3_RESOLUTIONS[0];
+  const localResolutionOptions = LOCAL_H3_RESOLUTIONS.filter((resolution, index, resolutions) =>
+    resolutions.findIndex((candidate) => candidate.label === resolution.label) === index);
+  const localAspectRatioOptions = LOCAL_H3_RESOLUTIONS.filter((resolution, index, resolutions) =>
+    resolutions.findIndex((candidate) => candidate.aspectRatio === resolution.aspectRatio) === index);
   const isActive = job?.status === "queued" || job?.status === "processing";
   const jobApiKey = job?.provider === "openrouter" ? job.temporaryApiKey : undefined;
   const usesSessionMedia = Boolean(jobApiKey);
@@ -343,6 +354,16 @@ export default function App() {
   const imageExtension = imageResult?.mediaType === "image/jpeg"
     ? "jpg"
     : imageResult?.mediaType.split("/")[1] || "png";
+
+  const selectLocalResolution = (localResolution: string) => {
+    const resetAcceleration = !isLocalH3AccelerationAvailable(form.localAcceleration, localResolution, form.localQuality);
+    setForm((current) => ({
+      ...current,
+      localResolution,
+      localAcceleration: resetAcceleration ? "standard" : current.localAcceleration,
+    }));
+    setLocalAdvancedStatus(resetAcceleration ? "Acceleration reset to Standard for the selected resolution." : "");
+  };
 
   const resetWorkspace = (preserveSubmissionLock: boolean) => {
     workspaceVersion.current += 1;
@@ -372,6 +393,7 @@ export default function App() {
     setTemporaryVideoUrl(null);
     setUploadingReference(null);
     setReferenceUploadStatus("");
+    setLocalAdvancedStatus("");
     setReferenceUploadTokens({});
     firstFramePathOnFocus.current = "";
     lastFramePathOnFocus.current = "";
@@ -756,6 +778,7 @@ export default function App() {
             resolution: form.localResolution,
             frames: form.localFrames,
             quality: form.localQuality,
+            acceleration: form.localAcceleration,
             seed: form.localSeed,
             firstFramePath: form.localFirstFramePath || undefined,
             lastFramePath: form.localLastFramePath || undefined,
@@ -789,7 +812,7 @@ export default function App() {
             : undefined,
         aspectRatio:
           form.provider === "local"
-            ? form.localResolution.replace("x", ":")
+            ? selectedLocalResolution.aspectRatio
             : form.aspectRatio,
       });
     } catch (submitError) {
@@ -1049,6 +1072,21 @@ export default function App() {
           </fieldset>
           ) : (
           <fieldset disabled={submitting || isActive || uploadingReference !== null}>
+            {form.provider === "local" && (
+              <div className="mb-7 border border-black/12 bg-[#e7e5dc] p-4 sm:p-5">
+                <div className="flex items-start gap-3">
+                  <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center bg-[#d9ff72] text-black"><Icon name="spark" /></div>
+                  <div>
+                    <h3 className="text-xs font-bold uppercase tracking-[0.12em]">Local engine</h3>
+                    <p className="mt-1 text-[11px] leading-4 text-stone-500">
+                      {appConfig?.localH3.configured
+                        ? "h3.c is configured. Local jobs run one at a time and include native audio."
+                        : "Set H3_BINARY and H3_MODEL_DIR on the backend. The h3.c binary, model snapshot, and FFmpeg are required."}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
             <div>
               <FieldLabel htmlFor="prompt">Prompt</FieldLabel>
               <div className="relative">
@@ -1065,6 +1103,46 @@ export default function App() {
               <span className="absolute bottom-3 right-3 font-mono text-[9px] text-stone-400">{form.prompt.length} / 10K</span>
               </div>
             </div>
+
+          {form.provider === "local" && (
+            <div className="mt-5">
+              <p className="mb-2 text-[11px] font-bold uppercase tracking-[0.18em] text-stone-700">Recommended setup</p>
+              <div className="grid grid-cols-2 gap-1.5">
+                {LOCAL_H3_RECOMMENDED_SETUPS.map((setup) => {
+                  const selected =
+                    form.localResolution === setup.resolution &&
+                    form.localFrames === setup.frames &&
+                    form.localQuality === setup.quality &&
+                    form.localAcceleration === setup.acceleration &&
+                    form.localSeed === setup.seed &&
+                    form.localSsdStreaming === setup.ssdStreaming;
+                  return (
+                    <button
+                      aria-pressed={selected}
+                      className={`min-h-14 border px-3 py-2 text-left transition ${selected ? "border-black bg-black text-[#d9ff72]" : "border-black/15 bg-[#faf9f3] hover:border-black/50"}`}
+                      key={setup.id}
+                      onClick={() => {
+                        setForm((current) => ({
+                          ...current,
+                          localResolution: setup.resolution,
+                          localFrames: setup.frames,
+                          localQuality: setup.quality,
+                          localAcceleration: setup.acceleration,
+                          localSeed: setup.seed,
+                          localSsdStreaming: setup.ssdStreaming,
+                        }));
+                        setLocalAdvancedStatus(`${setup.label} setup applied.`);
+                      }}
+                      type="button"
+                    >
+                      <span className="block text-[10px] font-bold uppercase tracking-[0.12em]">{setup.label}</span>
+                      <span className={`mt-1 block text-[10px] ${selected ? "text-white/65" : "text-stone-500"}`}>{setup.note}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
           {form.provider === "openrouter" ? (
           <>
@@ -1195,18 +1273,21 @@ export default function App() {
               <div className="mt-6 grid gap-5 sm:grid-cols-2">
                 <div>
                   <p className="mb-2 text-[11px] font-bold uppercase tracking-[0.18em] text-stone-700">Model</p>
-                  <p className="flex h-12 items-center border border-black/15 bg-[#faf9f3] px-3 text-sm text-stone-700">MiniMax H3 / h3.c</p>
+                  <p className="flex h-12 items-center border border-black/15 bg-[#faf9f3] px-3 text-sm text-stone-700">MiniMax H3</p>
                 </div>
                 <div>
                   <FieldLabel htmlFor="local-resolution">Resolution</FieldLabel>
                   <select
                     className="h-12 w-full border border-black/15 bg-[#faf9f3] px-3 text-sm outline-none transition focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
                     id="local-resolution"
-                    onChange={(event) => setForm((current) => ({ ...current, localResolution: event.target.value }))}
-                    value={form.localResolution}
+                    onChange={(event) => {
+                      const resolution = localResolutionOptions.find((option) => option.label === event.target.value);
+                      if (resolution) selectLocalResolution(resolution.id);
+                    }}
+                    value={selectedLocalResolution.label}
                   >
-                    {LOCAL_H3_RESOLUTIONS.map((resolution) => (
-                      <option key={resolution.id} value={resolution.id}>{resolution.label} - {resolution.note}</option>
+                    {localResolutionOptions.map((resolution) => (
+                      <option key={resolution.label} value={resolution.label}>{resolution.label}</option>
                     ))}
                   </select>
                 </div>
@@ -1227,21 +1308,37 @@ export default function App() {
                   </select>
                 </div>
                 <fieldset>
-                  <legend className="mb-2 text-[11px] font-bold uppercase tracking-[0.18em] text-stone-700">Quality</legend>
+                  <legend className="mb-2 text-[11px] font-bold uppercase tracking-[0.18em] text-stone-700">Aspect ratio</legend>
                   <div className="grid grid-cols-3 gap-1.5">
-                    {LOCAL_H3_QUALITY_PRESETS.map((quality) => (
-                      <button
-                        aria-pressed={form.localQuality === quality.id}
-                        className={`h-12 border text-xs font-bold transition ${form.localQuality === quality.id ? "border-black bg-black text-[#d9ff72]" : "border-black/15 bg-[#faf9f3] hover:border-black/50"}`}
-                        key={quality.id}
-                        onClick={() => setForm((current) => ({ ...current, localQuality: quality.id }))}
-                        type="button"
-                      >
-                        {quality.label}
-                      </button>
-                    ))}
+                    {localAspectRatioOptions.map((option) => {
+                      const resolution = LOCAL_H3_RESOLUTIONS.find((candidate) =>
+                        candidate.label === selectedLocalResolution.label && candidate.aspectRatio === option.aspectRatio);
+                      const tooltipId = `local-${selectedLocalResolution.label}-${option.aspectRatio.replace(":", "-")}-unsupported`;
+                      return (
+                        <div className="group relative" key={option.aspectRatio}>
+                          <button
+                            aria-describedby={resolution ? undefined : tooltipId}
+                            aria-disabled={!resolution}
+                            aria-pressed={form.localResolution === resolution?.id}
+                            className={`h-12 w-full border text-xs font-bold transition ${form.localResolution === resolution?.id ? "border-black bg-black text-[#d9ff72]" : resolution ? "border-black/15 bg-[#faf9f3] hover:border-black/50" : "cursor-not-allowed border-black/10 bg-black/5 text-stone-400"}`}
+                            onClick={() => { if (resolution) selectLocalResolution(resolution.id); }}
+                            type="button"
+                          >
+                            {option.aspectRatio}
+                          </button>
+                          {!resolution && (
+                            <span
+                              className="pointer-events-none absolute bottom-full left-1/2 z-20 mb-2 hidden w-max max-w-44 -translate-x-1/2 bg-black px-2 py-1.5 text-center text-[9px] leading-3 text-white group-focus-within:block group-hover:block"
+                              id={tooltipId}
+                              role="tooltip"
+                            >
+                              {option.aspectRatio} is unavailable at {selectedLocalResolution.label}
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
-                  <p className="mt-1.5 text-[10px] leading-4 text-stone-500">{selectedLocalQuality?.note}</p>
                 </fieldset>
               </div>
 
@@ -1337,52 +1434,110 @@ export default function App() {
                 )}
               </div>
 
-              <div className="mt-6 sm:max-w-[calc(50%-0.625rem)]">
-                  <FieldLabel htmlFor="local-seed">Seed / variation</FieldLabel>
-                  <input
-                    className="h-12 w-full border border-black/15 bg-[#faf9f3] px-3 font-mono text-sm outline-none transition focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
-                    id="local-seed"
-                    max={Number.MAX_SAFE_INTEGER}
-                    min={0}
-                    onChange={(event) => setForm((current) => ({ ...current, localSeed: Number(event.target.value) }))}
-                    required
-                    type="number"
-                    value={form.localSeed}
-                  />
-                  <p className="mt-1.5 text-[10px] leading-4 text-stone-500">
-                    Keep the same seed and settings to reproduce a variation; change it for a different result.
-                  </p>
-              </div>
+              <p aria-live="polite" className="sr-only" role="status">{localAdvancedStatus}</p>
+              <details className="group mt-6 border border-black/12 bg-[#e7e5dc]">
+                <summary className="flex cursor-pointer list-none items-center justify-between px-4 py-4 text-xs font-bold uppercase tracking-[0.12em] hover:bg-white/30 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-black [&::-webkit-details-marker]:hidden">
+                  Advanced
+                  <span className="flex items-center gap-2 font-mono text-[9px] font-normal text-stone-500">
+                    Quality, acceleration, seed, memory
+                    <Icon name="arrow" className="size-3 transition group-open:rotate-90" />
+                  </span>
+                </summary>
+                <div className="border-t border-black/10 p-4 sm:p-5">
+                  <fieldset>
+                    <legend className="mb-2 text-[11px] font-bold uppercase tracking-[0.18em] text-stone-700">Quality</legend>
+                    <div className="grid grid-cols-3 gap-1.5">
+                      {LOCAL_H3_QUALITY_PRESETS.map((quality) => (
+                        <button
+                          aria-pressed={form.localQuality === quality.id}
+                          className={`h-12 border text-xs font-bold transition ${form.localQuality === quality.id ? "border-black bg-black text-[#d9ff72]" : "border-black/15 bg-[#faf9f3] hover:border-black/50"}`}
+                          key={quality.id}
+                          onClick={() => {
+                            const resetAcceleration = !isLocalH3AccelerationAvailable(form.localAcceleration, form.localResolution, quality.id);
+                            setForm((current) => ({
+                              ...current,
+                              localQuality: quality.id,
+                              localAcceleration: resetAcceleration ? "standard" : current.localAcceleration,
+                            }));
+                            setLocalAdvancedStatus(resetAcceleration ? "Acceleration reset to Standard for the selected quality." : "");
+                          }}
+                          type="button"
+                        >
+                          {quality.label}
+                        </button>
+                      ))}
+                    </div>
+                    <p className="mt-1.5 text-[10px] leading-4 text-stone-500">{selectedLocalQuality?.note}</p>
+                  </fieldset>
 
-              <label className="mt-5 flex cursor-pointer items-center justify-between border-y border-black/10 py-4">
-                <span>
-                  <span className="block text-xs font-bold uppercase tracking-[0.12em]">SSD streaming</span>
-                  <span className="mt-1 block text-[11px] text-stone-500">Use much less unified memory at the cost of slower generation.</span>
-                </span>
-                <span className={`relative h-7 w-12 rounded-full transition has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-black has-[:focus-visible]:ring-offset-2 ${form.localSsdStreaming ? "bg-black" : "bg-stone-300"}`}>
-                  <input
-                    checked={form.localSsdStreaming}
-                    className="sr-only"
-                    onChange={(event) => setForm((current) => ({ ...current, localSsdStreaming: event.target.checked }))}
-                    type="checkbox"
-                  />
-                  <span className={`absolute top-1 size-5 rounded-full transition ${form.localSsdStreaming ? "left-6 bg-[#d9ff72]" : "left-1 bg-white"}`} />
-                </span>
-              </label>
+                  <fieldset className="mt-6">
+                    <legend className="mb-2 text-[11px] font-bold uppercase tracking-[0.18em] text-stone-700">Acceleration</legend>
+                    <div className="grid grid-cols-3 gap-1.5">
+                      {LOCAL_H3_ACCELERATION_PRESETS.map((preset) => {
+                        const available = isLocalH3AccelerationAvailable(preset.id, form.localResolution, form.localQuality);
+                        return (
+                          <button
+                            aria-pressed={form.localAcceleration === preset.id}
+                            aria-describedby={`local-acceleration-${preset.id}-description`}
+                            className={`min-h-12 border px-2 text-[10px] font-bold transition disabled:cursor-not-allowed disabled:opacity-35 ${form.localAcceleration === preset.id ? "border-black bg-black text-[#d9ff72]" : "border-black/15 bg-[#faf9f3] hover:border-black/50"}`}
+                            disabled={!available}
+                            key={preset.id}
+                            onClick={() => {
+                              setForm((current) => ({ ...current, localAcceleration: preset.id }));
+                              setLocalAdvancedStatus("");
+                            }}
+                            title={available ? preset.note : "Requires 512p / 1:1 / Balanced mode"}
+                            type="button"
+                          >
+                            {preset.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <div className="mt-3 space-y-1 text-[10px] leading-4 text-stone-600">
+                      {LOCAL_H3_ACCELERATION_PRESETS.map((preset) => (
+                        <p id={`local-acceleration-${preset.id}-description`} key={preset.id}>
+                          <strong>{preset.label}:</strong> {preset.note}{preset.id === "standard" ? "" : " Requires 512p / 1:1 / Balanced mode."}
+                        </p>
+                      ))}
+                    </div>
+                  </fieldset>
 
-              <div className="mt-7 border border-black/12 bg-[#e7e5dc] p-4 sm:p-5">
-                <div className="flex items-start gap-3">
-                  <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center bg-[#d9ff72] text-black"><Icon name="spark" /></div>
-                  <div>
-                    <h3 className="text-xs font-bold uppercase tracking-[0.12em]">Local engine</h3>
-                    <p className="mt-1 text-[11px] leading-4 text-stone-500">
-                      {appConfig?.localH3.configured
-                        ? "h3.c is configured. Local jobs run one at a time and include native audio."
-                        : "Set H3_BINARY and H3_MODEL_DIR on the backend. The h3.c binary, model snapshot, and FFmpeg are required."}
-                    </p>
+                  <div className="mt-6 grid gap-5 sm:grid-cols-2">
+                    <div>
+                      <FieldLabel htmlFor="local-seed">Seed / variation</FieldLabel>
+                      <input
+                        className="h-12 w-full border border-black/15 bg-[#faf9f3] px-3 font-mono text-sm outline-none transition focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
+                        id="local-seed"
+                        max={Number.MAX_SAFE_INTEGER}
+                        min={0}
+                        onChange={(event) => setForm((current) => ({ ...current, localSeed: Number(event.target.value) }))}
+                        required
+                        type="number"
+                        value={form.localSeed}
+                      />
+                      <p className="mt-1.5 text-[10px] leading-4 text-stone-500">Change the seed for another variation.</p>
+                    </div>
+
+                    <label className="flex cursor-pointer items-center justify-between border-y border-black/10 py-4 sm:border-t-0 sm:pt-0">
+                      <span>
+                        <span className="block text-xs font-bold uppercase tracking-[0.12em]">SSD streaming</span>
+                        <span className="mt-1 block text-[11px] leading-4 text-stone-500">Lower memory use with slower generation.</span>
+                      </span>
+                      <span className={`relative h-7 w-12 shrink-0 rounded-full transition has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-black has-[:focus-visible]:ring-offset-2 ${form.localSsdStreaming ? "bg-black" : "bg-stone-300"}`}>
+                        <input
+                          checked={form.localSsdStreaming}
+                          className="sr-only"
+                          onChange={(event) => setForm((current) => ({ ...current, localSsdStreaming: event.target.checked }))}
+                          type="checkbox"
+                        />
+                        <span className={`absolute top-1 size-5 rounded-full transition ${form.localSsdStreaming ? "left-6 bg-[#d9ff72]" : "left-1 bg-white"}`} />
+                      </span>
+                    </label>
                   </div>
                 </div>
-              </div>
+              </details>
+
             </>
           )}
           </fieldset>
@@ -1526,7 +1681,7 @@ export default function App() {
           <div className="flex flex-1 items-center p-5 sm:p-8">
             <div className="w-full overflow-hidden border border-white/10 bg-black shadow-[0_24px_80px_rgba(0,0,0,0.35)]">
               <Preview
-                aspectRatio={job?.aspectRatio || (form.provider === "local" ? form.localResolution.replace("x", ":") : form.aspectRatio)}
+                aspectRatio={job?.aspectRatio || (form.provider === "local" ? selectedLocalResolution.aspectRatio : form.aspectRatio)}
                 job={job}
                 mediaLoading={mediaLoading}
                 mediaError={mediaError}
