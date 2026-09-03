@@ -29,9 +29,11 @@ import {
 } from "./api";
 
 type Workflow = "video" | "image";
+type VideoProvider = "openrouter" | "local";
+type SubmissionKind = "image" | VideoProvider;
 
 interface FormState {
-  provider: "openrouter" | "local";
+  provider: VideoProvider;
   prompt: string;
   model: string;
   duration: number;
@@ -72,7 +74,7 @@ type IconName =
 const statusOrder: GenerationStatus[] = ["queued", "processing", "completed", "failed"];
 const imageReferenceMaxBytes = 10 * 1024 * 1024;
 const uncertainSubmissionMessage = "OpenRouter may already be processing a paid request that Motio cannot track. Check OpenRouter Activity before unlocking another submission.";
-const pendingRemoteSubmission = "__motio_pending_submission__";
+const uncertainLocalSubmissionMessage = "The local h3.c submission may have been accepted but Motio did not receive its job ID. Clear the workspace before submitting another local job.";
 const untrackedRemoteWork = "__motio_untracked_remote_work__";
 const uncertainSubmissionErrors = new Set([
   "invalid_local_response",
@@ -411,9 +413,14 @@ export default function App() {
   const [imageReference, setImageReference] = useState<{ name: string; dataUrl: string } | null>(null);
   const [readingImageReference, setReadingImageReference] = useState(false);
   const [imageResult, setImageResult] = useState<ImageGenerationResponse | null>(null);
+  const [imageFailure, setImageFailure] = useState<string | null>(null);
+  const [openRouterSubmissionFailure, setOpenRouterSubmissionFailure] = useState<string | null>(null);
+  const [localSubmissionFailure, setLocalSubmissionFailure] = useState<string | null>(null);
   const [jobs, setJobs] = useState<DisplayJob[]>([]);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
+  const [imageSubmitting, setImageSubmitting] = useState(false);
+  const [openRouterSubmitting, setOpenRouterSubmitting] = useState(false);
+  const [localSubmitting, setLocalSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submissionUncertain, setSubmissionUncertain] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -431,7 +438,7 @@ export default function App() {
   const [jobAnnouncement, setJobAnnouncement] = useState("");
   const [referenceUploadTokens, setReferenceUploadTokens] = useState<Partial<Record<"first" | "last", string>>>({});
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const generationController = useRef<AbortController | null>(null);
+  const generationControllers = useRef(new Map<SubmissionKind, AbortController>());
   const localWorkspaceToken = useRef(crypto.randomUUID());
   const pendingLocalWorkspaceDiscards = useRef(new Set<string>());
   const remoteWork = useRef(new Set<string>());
@@ -451,7 +458,54 @@ export default function App() {
     resolutions.findIndex((candidate) => candidate.aspectRatio === resolution.aspectRatio) === index);
   const job = jobs.find((candidate) => candidate.id === selectedJobId) ?? null;
   const isActive = job?.status === "queued" || job?.status === "processing";
-  const activeJobCount = jobs.filter((candidate) => candidate.status === "queued" || candidate.status === "processing").length;
+  const hasActiveOpenRouterJob = jobs.some((candidate) => candidate.provider === "openrouter" && (candidate.status === "queued" || candidate.status === "processing"));
+  const hasActiveLocalJob = jobs.some((candidate) => candidate.provider === "local" && (candidate.status === "queued" || candidate.status === "processing"));
+  const currentSubmissionKind: SubmissionKind = workflow === "image" ? "image" : form.provider;
+  const currentSubmissionKindRef = useRef(currentSubmissionKind);
+  currentSubmissionKindRef.current = currentSubmissionKind;
+  const submitting = imageSubmitting || openRouterSubmitting || localSubmitting;
+  const currentSubmitting = currentSubmissionKind === "image"
+    ? imageSubmitting
+    : currentSubmissionKind === "openrouter"
+      ? openRouterSubmitting
+      : localSubmitting;
+  const currentVideoActive = form.provider === "openrouter" ? hasActiveOpenRouterJob : hasActiveLocalJob;
+  const currentVideoUnknown = form.provider === "local" && localSubmissionFailure === uncertainLocalSubmissionMessage;
+  const currentVideoLocked = currentVideoActive || currentVideoUnknown;
+  const imageTaskStatus = imageSubmitting
+    ? "processing"
+    : imageResult
+      ? "completed"
+      : imageFailure === uncertainSubmissionMessage
+        ? "unknown"
+        : imageFailure
+          ? "failed"
+          : null;
+  const openRouterSubmissionStatus = openRouterSubmitting
+    ? "submitting"
+    : openRouterSubmissionFailure === uncertainSubmissionMessage
+      ? "unknown"
+      : openRouterSubmissionFailure
+        ? "failed"
+        : null;
+  const localSubmissionStatus = localSubmitting
+    ? "submitting"
+    : localSubmissionFailure === uncertainLocalSubmissionMessage
+      ? "unknown"
+      : localSubmissionFailure
+        ? "failed"
+        : null;
+  const currentVideoSubmissionStatus = form.provider === "openrouter"
+    ? openRouterSubmissionStatus
+    : localSubmissionStatus;
+  const sessionItemCount = jobs.length
+    + Number(Boolean(imageTaskStatus))
+    + Number(Boolean(openRouterSubmissionStatus))
+    + Number(Boolean(localSubmissionStatus));
+  const activeJobCount = jobs.filter((candidate) => candidate.status === "queued" || candidate.status === "processing").length
+    + Number(imageSubmitting)
+    + Number(openRouterSubmitting)
+    + Number(localSubmitting);
   const hasActiveJobs = activeJobCount > 0;
   const jobApiKey = job?.provider === "openrouter" ? job.temporaryApiKey : undefined;
   const pollWarning = job?.pollWarning;
@@ -498,10 +552,23 @@ export default function App() {
     setError(null);
   };
 
+  const viewImageTask = () => {
+    leaveJobView();
+    setWorkflow("image");
+    setError(imageFailure);
+  };
+
+  const viewVideoSubmission = (provider: VideoProvider) => {
+    leaveJobView();
+    setWorkflow("video");
+    setForm((current) => ({ ...current, provider }));
+    setError(provider === "openrouter" ? openRouterSubmissionFailure : localSubmissionFailure);
+  };
+
   const resetWorkspace = (preserveSubmissionLock: boolean) => {
     workspaceVersion.current += 1;
-    generationController.current?.abort();
-    generationController.current = null;
+    for (const controller of generationControllers.current.values()) controller.abort();
+    generationControllers.current.clear();
     leaveJobView();
     setWorkflow("video");
     setForm(initialForm());
@@ -509,8 +576,13 @@ export default function App() {
     setImageReference(null);
     setReadingImageReference(false);
     setImageResult(null);
+    setImageFailure(null);
+    setOpenRouterSubmissionFailure(null);
+    setLocalSubmissionFailure(null);
     setJobs([]);
-    setSubmitting(false);
+    setImageSubmitting(false);
+    setOpenRouterSubmitting(false);
+    setLocalSubmitting(false);
     setError(preserveSubmissionLock ? uncertainSubmissionMessage : null);
     setSubmissionUncertain(preserveSubmissionLock);
     remoteWork.current.clear();
@@ -589,7 +661,8 @@ export default function App() {
     return () => {
       disposed = true;
       workspaceVersion.current += 1;
-      generationController.current?.abort();
+      for (const generationController of generationControllers.current.values()) generationController.abort();
+      generationControllers.current.clear();
       controller?.abort();
       clearTimeout(timer);
     };
@@ -833,28 +906,44 @@ export default function App() {
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
+    const submissionKind = currentSubmissionKind;
     if (
-      generationController.current ||
+      generationControllers.current.has(submissionKind) ||
       submissionUncertain ||
-      submitting ||
       readingImageReference ||
       (clearingWorkspace && workflow === "video" && form.provider === "local") ||
       (localCleanupFailed && workflow === "video" && form.provider === "local") ||
-      (workflow === "video" && isActive)
+      (workflow === "video" && currentVideoLocked)
     ) return;
 
     const requestController = new AbortController();
-    generationController.current = requestController;
-    const isPaidSubmission = workflow === "image" || form.provider === "openrouter";
+    generationControllers.current.set(submissionKind, requestController);
+    const isPaidSubmission = submissionKind !== "local";
+    const pendingRemoteSubmission = `__motio_pending_submission_${crypto.randomUUID()}__`;
     if (isPaidSubmission) remoteWork.current.add(pendingRemoteSubmission);
     const version = workspaceVersion.current;
-    if (workflow === "video") leaveJobView();
-    setSubmitting(true);
+    let submittedSelectionVersion = selectionVersion.current;
+    if (submissionKind !== "image") {
+      leaveJobView();
+      submittedSelectionVersion = selectionVersion.current;
+      if (submissionKind === "openrouter") {
+        setOpenRouterSubmitting(true);
+        setOpenRouterSubmissionFailure(null);
+      } else {
+        setLocalSubmitting(true);
+        setLocalSubmissionFailure(null);
+      }
+      setJobAnnouncement(`${submissionKind === "openrouter" ? "OpenRouter" : "Local h3.c"} video submission started.`);
+    } else {
+      setImageSubmitting(true);
+      setImageFailure(null);
+      setJobAnnouncement("Meta Muse image started.");
+    }
     setError(null);
 
     try {
       const key = sessionApiKey.trim();
-      if (workflow === "image") {
+      if (submissionKind === "image") {
         setImageResult(null);
         const result = await generateImage(
           {
@@ -868,6 +957,7 @@ export default function App() {
         if (version !== workspaceVersion.current) return;
         remoteWork.current.delete(pendingRemoteSubmission);
         setImageResult(result);
+        setJobAnnouncement("Meta Muse image completed.");
         return;
       }
 
@@ -918,28 +1008,51 @@ export default function App() {
             : form.aspectRatio,
       };
       setJobs((current) => [trackedJob, ...current.filter((existing) => existing.id !== trackedJob.id)]);
-      setSelectedJobId(trackedJob.id);
-      if (trackedJob.status === "completed" || trackedJob.status === "failed") {
-        setJobAnnouncement(`${trackedJob.provider === "local" ? "Local h3.c" : "OpenRouter"} job ${trackedJob.id.slice(0, 12)} ${trackedJob.status}.`);
-      }
+      if (
+        submittedSelectionVersion === selectionVersion.current &&
+        currentSubmissionKindRef.current === submissionKind
+      ) setSelectedJobId(trackedJob.id);
+      setJobAnnouncement(`${trackedJob.provider === "local" ? "Local h3.c" : "OpenRouter"} job ${trackedJob.id.slice(0, 12)} ${trackedJob.status}.`);
     } catch (submitError) {
       if (version !== workspaceVersion.current) return;
       const apiError = submitError instanceof ApiError ? submitError : null;
-      if (
-        isPaidSubmission &&
-        (apiError?.status === 0 || (apiError?.type && uncertainSubmissionErrors.has(apiError.type)))
-      ) {
+      const outcomeIsUnknown = (
+        apiError?.status === 0 ||
+        Boolean(apiError?.type && uncertainSubmissionErrors.has(apiError.type))
+      );
+      const submissionIsUncertain = isPaidSubmission && outcomeIsUnknown;
+      const localSubmissionIsUncertain = submissionKind === "local" && outcomeIsUnknown;
+      if (submissionIsUncertain) {
         setSubmissionUncertain(true);
-        setError(uncertainSubmissionMessage);
+        if (submissionKind === "image") setImageFailure(uncertainSubmissionMessage);
+        else setOpenRouterSubmissionFailure(uncertainSubmissionMessage);
+        if (currentSubmissionKindRef.current === submissionKind) setError(uncertainSubmissionMessage);
+      } else if (localSubmissionIsUncertain) {
+        setLocalSubmissionFailure(uncertainLocalSubmissionMessage);
+        if (currentSubmissionKindRef.current === submissionKind) setError(uncertainLocalSubmissionMessage);
       } else {
         if (isPaidSubmission) remoteWork.current.delete(pendingRemoteSubmission);
-        setError(messageFrom(submitError));
+        const message = messageFrom(submitError);
+        if (submissionKind === "image") setImageFailure(message);
+        else if (submissionKind === "openrouter") setOpenRouterSubmissionFailure(message);
+        else setLocalSubmissionFailure(message);
+        if (currentSubmissionKindRef.current === submissionKind) setError(message);
       }
+      const submissionLabel = submissionKind === "image"
+        ? "Meta Muse image"
+        : submissionKind === "openrouter"
+          ? "OpenRouter video submission"
+          : "Local h3.c submission";
+      setJobAnnouncement(`${submissionLabel} ${submissionIsUncertain || localSubmissionIsUncertain ? "status unknown" : "failed"}.`);
     } finally {
-      if (generationController.current === requestController) {
-        generationController.current = null;
+      if (generationControllers.current.get(submissionKind) === requestController) {
+        generationControllers.current.delete(submissionKind);
+        if (version === workspaceVersion.current) {
+          if (submissionKind === "image") setImageSubmitting(false);
+          else if (submissionKind === "openrouter") setOpenRouterSubmitting(false);
+          else setLocalSubmitting(false);
+        }
       }
-      if (version === workspaceVersion.current) setSubmitting(false);
     }
   };
 
@@ -1022,13 +1135,13 @@ export default function App() {
             <p className="font-display text-sm uppercase tracking-[-0.02em]">Motio</p>
           </div>
           <div className="flex items-center gap-2">
-            {jobs.length > 0 && (
+            {sessionItemCount > 0 && (
               <details className="group relative">
                 <summary className="flex cursor-pointer list-none items-center gap-2 rounded-full border border-white/10 px-3 py-1.5 text-[9px] uppercase tracking-[0.15em] text-white/70 transition hover:border-[#d9ff72]/50 hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#d9ff72] [&::-webkit-details-marker]:hidden">
                   <Icon name="film" className="size-3 text-[#d9ff72]" />
                   Jobs
-                  <span aria-label={`${activeJobCount} active, ${jobs.length} total`} className="flex min-w-5 items-center justify-center rounded-full bg-[#d9ff72] px-1.5 py-0.5 text-[8px] font-bold text-black">
-                    {jobs.length}
+                  <span aria-label={`${activeJobCount} active, ${sessionItemCount} total`} className="flex min-w-5 items-center justify-center rounded-full bg-[#d9ff72] px-1.5 py-0.5 text-[8px] font-bold text-black">
+                    {sessionItemCount}
                   </span>
                 </summary>
                 <div className="absolute right-0 z-50 mt-2 w-[min(22rem,calc(100vw-2.5rem))] border border-white/15 bg-[#171917] shadow-2xl">
@@ -1037,13 +1150,57 @@ export default function App() {
                     <p className="mt-1 text-[9px] leading-4 text-white/40">Private to this tab and cleared on reload or service restart.</p>
                   </div>
                   <div className="max-h-[60vh] overflow-y-auto p-2">
+                    {imageTaskStatus && (
+                      <button
+                        aria-current={workflow === "image" ? "true" : undefined}
+                        className={`flex w-full items-center justify-between gap-3 border px-3 py-3 text-left transition ${workflow === "image" ? "border-[#d9ff72]/60 bg-[#d9ff72]/5" : "border-transparent hover:border-white/15 hover:bg-white/5"}`}
+                        onClick={(event) => {
+                          viewImageTask();
+                          const details = event.currentTarget.closest("details");
+                          details?.removeAttribute("open");
+                          details?.querySelector("summary")?.focus();
+                        }}
+                        type="button"
+                      >
+                        <span className="min-w-0">
+                          <span className="block text-[10px] font-bold uppercase tracking-[0.12em]">Meta Muse Image</span>
+                          <span className="mt-1 block font-mono text-[9px] text-white/40">First frame request</span>
+                        </span>
+                        <span className={`shrink-0 text-[9px] font-bold uppercase tracking-[0.12em] ${imageTaskStatus === "failed" ? "text-[#ff826e]" : imageTaskStatus === "completed" ? "text-white/55" : "text-[#d9ff72]"}`}>
+                          {imageTaskStatus}
+                        </span>
+                      </button>
+                    )}
+                    {([
+                      ["openrouter", openRouterSubmissionStatus, openRouterSubmitting],
+                      ["local", localSubmissionStatus, localSubmitting],
+                    ] as const).map(([provider, status, providerSubmitting]) => status && (
+                      <button
+                        aria-current={workflow === "video" && form.provider === provider && !selectedJobId ? "true" : undefined}
+                        className={`flex w-full items-center justify-between gap-3 border px-3 py-3 text-left transition ${workflow === "video" && form.provider === provider && !selectedJobId ? "border-[#d9ff72]/60 bg-[#d9ff72]/5" : "border-transparent hover:border-white/15 hover:bg-white/5"}`}
+                        key={provider}
+                        onClick={(event) => {
+                          viewVideoSubmission(provider);
+                          const details = event.currentTarget.closest("details");
+                          details?.removeAttribute("open");
+                          details?.querySelector("summary")?.focus();
+                        }}
+                        type="button"
+                      >
+                        <span className="min-w-0">
+                          <span className="block text-[10px] font-bold uppercase tracking-[0.12em]">{provider === "openrouter" ? "OpenRouter video" : "Local h3.c"}</span>
+                          <span className="mt-1 block font-mono text-[9px] text-white/40">{providerSubmitting ? "Waiting for job ID" : "No job was returned"}</span>
+                        </span>
+                        <span className={`shrink-0 text-[9px] font-bold uppercase tracking-[0.12em] ${status === "failed" ? "text-[#ff826e]" : "text-[#d9ff72]"}`}>{status}</span>
+                      </button>
+                    ))}
                     {jobs.map((trackedJob) => {
                       const active = trackedJob.status === "queued" || trackedJob.status === "processing";
                       return (
                         <button
                           aria-current={selectedJobId === trackedJob.id ? "true" : undefined}
                           className={`flex w-full items-center justify-between gap-3 border px-3 py-3 text-left transition disabled:cursor-not-allowed disabled:opacity-40 ${selectedJobId === trackedJob.id ? "border-[#d9ff72]/60 bg-[#d9ff72]/5" : "border-transparent hover:border-white/15 hover:bg-white/5"}`}
-                          disabled={submitting || uploadingReference !== null || readingImageReference}
+                          disabled={uploadingReference !== null || readingImageReference}
                           key={trackedJob.id}
                           onClick={(event) => {
                             viewJob(trackedJob);
@@ -1106,12 +1263,16 @@ export default function App() {
               <button
                 aria-pressed={workflow === option}
                 className={`h-12 text-xs font-bold uppercase tracking-[0.12em] transition disabled:cursor-not-allowed disabled:opacity-40 ${workflow === option ? "bg-black text-[#d9ff72]" : "text-stone-500 hover:bg-white/60 hover:text-black"}`}
-                disabled={submitting || submissionUncertain || uploadingReference !== null || readingImageReference}
+                disabled={submissionUncertain || uploadingReference !== null || readingImageReference}
                 key={option}
                 onClick={() => {
                   leaveJobView();
                   setWorkflow(option);
-                  setError(null);
+                  setError(option === "image"
+                    ? imageFailure
+                    : form.provider === "openrouter"
+                      ? openRouterSubmissionFailure
+                      : localSubmissionFailure);
                 }}
                 type="button"
               >
@@ -1127,12 +1288,12 @@ export default function App() {
               <button
                 aria-pressed={form.provider === provider}
                 className={`h-11 text-[10px] font-bold uppercase tracking-[0.12em] transition disabled:cursor-not-allowed disabled:opacity-40 ${form.provider === provider ? "bg-black text-[#d9ff72]" : "text-stone-500 hover:bg-white/60 hover:text-black"}`}
-                disabled={submitting || uploadingReference !== null || (provider === "local" && appConfig?.localH3.supported !== true)}
+                disabled={uploadingReference !== null || (provider === "local" && appConfig?.localH3.supported !== true)}
                 key={provider}
                 onClick={() => {
                   leaveJobView();
                   setForm((current) => ({ ...current, provider }));
-                  setError(null);
+                  setError(provider === "openrouter" ? openRouterSubmissionFailure : localSubmissionFailure);
                 }}
                 type="button"
               >
@@ -1159,7 +1320,7 @@ export default function App() {
                     aria-describedby="session-key-help"
                     autoComplete="off"
                     className="h-11 min-w-0 flex-1 border border-black/15 bg-[#faf9f3] px-3 font-mono text-xs outline-none transition placeholder:text-stone-400 focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
-                    disabled={submitting}
+                    disabled={currentSubmitting}
                     id="session-api-key"
                     maxLength={1_024}
                     onChange={(event) => setSessionApiKey(event.target.value)}
@@ -1171,7 +1332,7 @@ export default function App() {
                   {sessionApiKey && (
                     <button
                       className="border border-black/15 px-3 text-[10px] font-bold uppercase tracking-[0.12em] hover:border-black"
-                      disabled={submitting}
+                      disabled={currentSubmitting}
                       onClick={() => setSessionApiKey("")}
                       type="button"
                     >
@@ -1188,7 +1349,7 @@ export default function App() {
           )}
 
           {workflow === "image" ? (
-          <fieldset disabled={submitting || readingImageReference}>
+          <fieldset disabled={imageSubmitting || readingImageReference}>
             <div>
               <FieldLabel htmlFor="image-prompt">Image prompt</FieldLabel>
               <div className="relative">
@@ -1257,7 +1418,7 @@ export default function App() {
             </div>
           </fieldset>
           ) : (
-          <fieldset disabled={submitting || isActive || uploadingReference !== null || ((clearingWorkspace || localCleanupFailed) && form.provider === "local")}>
+          <fieldset disabled={currentSubmitting || currentVideoLocked || uploadingReference !== null || ((clearingWorkspace || localCleanupFailed) && form.provider === "local")}>
             {form.provider === "local" && (
               <div className="mb-7 border border-black/12 bg-[#e7e5dc] p-4 sm:p-5">
                 <div className="flex items-start gap-3">
@@ -1729,9 +1890,9 @@ export default function App() {
           </fieldset>
           )}
 
-          {error && (
+          {(submissionUncertain || error) && (
             <div className="mt-5 border-l-4 border-[#e44d38] bg-[#f9dfd9] px-4 py-3 text-sm leading-5 text-[#712519]" role="alert">
-              {error}
+              {submissionUncertain ? uncertainSubmissionMessage : error}
             </div>
           )}
 
@@ -1739,21 +1900,23 @@ export default function App() {
             <button
               className="group flex h-14 flex-1 items-center justify-between bg-black px-5 font-display text-sm uppercase tracking-[0.02em] text-white transition hover:bg-[#242722] disabled:cursor-not-allowed disabled:opacity-45"
               disabled={
-                submitting ||
+                currentSubmitting ||
                 readingImageReference ||
                 submissionUncertain ||
                 ((clearingWorkspace || localCleanupFailed) && workflow === "video" && form.provider === "local") ||
-                (workflow === "video" && (isActive || uploadingReference !== null || !form.prompt.trim())) ||
+                (workflow === "video" && (currentVideoLocked || uploadingReference !== null || !form.prompt.trim())) ||
                 (workflow === "image" && !imagePrompt.trim())
               }
               type="submit"
             >
               <span>
-                {submitting
+                {currentSubmitting
                   ? "Submitting..."
                   : workflow === "image"
                     ? "Generate first frame"
-                    : isActive
+                    : currentVideoUnknown
+                      ? "Submission status unknown"
+                      : currentVideoActive
                       ? "Generation active"
                       : form.provider === "local"
                         ? "Generate locally"
@@ -1781,22 +1944,19 @@ export default function App() {
             <div>
               <p className="font-mono text-[9px] uppercase tracking-[0.2em] text-white/60">First frame monitor</p>
               <h2 className="mt-1 font-display text-lg uppercase">
-                {imageResult ? MUSE_IMAGE_MODEL.name : "No generated frame"}
+                {imageTaskStatus ? MUSE_IMAGE_MODEL.name : "No generated frame"}
               </h2>
-              <p aria-live="polite" className="sr-only" role="status">
-                {submitting ? "Generating first frame." : imageResult ? "First frame generation completed." : ""}
-              </p>
             </div>
-            {imageResult && (
-              <span className="rounded-full border border-[#d9ff72]/30 px-3 py-1.5 text-[9px] font-bold uppercase tracking-[0.14em] text-[#d9ff72]">
-                Completed
+            {imageTaskStatus && (
+              <span className={`rounded-full border px-3 py-1.5 text-[9px] font-bold uppercase tracking-[0.14em] ${imageTaskStatus === "failed" ? "border-[#ff826e]/30 text-[#ff826e]" : "border-[#d9ff72]/30 text-[#d9ff72]"}`}>
+                {imageTaskStatus}
               </span>
             )}
           </div>
 
           <div className="flex flex-1 items-center p-5 sm:p-8">
             <div className="relative flex min-h-72 w-full items-center justify-center overflow-hidden border border-white/10 bg-black shadow-[0_24px_80px_rgba(0,0,0,0.35)]">
-              {submitting ? (
+              {imageSubmitting ? (
                 <div className="relative flex min-h-96 w-full items-center justify-center overflow-hidden bg-[#111310]">
                   <div className="absolute inset-0 preview-grid opacity-35" />
                   <div className="relative text-center">
@@ -1854,11 +2014,11 @@ export default function App() {
           <div className="flex items-center justify-between px-5 py-5 sm:px-8">
             <div>
               <p className="font-mono text-[9px] uppercase tracking-[0.2em] text-white/35">Output monitor</p>
-              <h2 className="mt-1 font-display text-lg uppercase">{job ? `Job ${job.id.slice(0, 12)}` : "No active reel"}</h2>
+              <h2 className="mt-1 font-display text-lg uppercase">{job ? `Job ${job.id.slice(0, 12)}` : currentVideoSubmissionStatus ? "Video submission" : "No active reel"}</h2>
             </div>
-            {job && (
-              <span className={`rounded-full border px-3 py-1.5 text-[9px] font-bold uppercase tracking-[0.14em] ${job.status === "failed" ? "border-[#ff826e]/30 text-[#ff826e]" : "border-[#d9ff72]/30 text-[#d9ff72]"}`}>
-                {job.status}
+            {(job || currentVideoSubmissionStatus) && (
+              <span className={`rounded-full border px-3 py-1.5 text-[9px] font-bold uppercase tracking-[0.14em] ${job?.status === "failed" || currentVideoSubmissionStatus === "failed" ? "border-[#ff826e]/30 text-[#ff826e]" : "border-[#d9ff72]/30 text-[#d9ff72]"}`}>
+                {job?.status || currentVideoSubmissionStatus}
               </span>
             )}
           </div>
@@ -1911,7 +2071,7 @@ export default function App() {
               </div>
             ) : (
               <div className="flex items-center justify-between font-mono text-[9px] uppercase tracking-[0.15em] text-white/28">
-                <span>{pollingStopped ? "Automatic polling stopped" : isActive ? "Polling every 10 seconds" : "Output controls unlock on completion"}</span>
+                <span>{currentVideoSubmissionStatus && !job ? currentSubmitting ? "Waiting for provider job ID" : "Submission did not create a provider job" : pollingStopped ? "Automatic polling stopped" : isActive ? "Polling every 10 seconds" : "Output controls unlock on completion"}</span>
                 {typeof job?.cost === "number" && <span>Cost ${job.cost.toFixed(4)}</span>}
               </div>
             )}

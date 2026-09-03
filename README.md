@@ -66,6 +66,10 @@ The Advanced section includes allowlisted h3.c acceleration presets, seed contro
 
 The h3.c source and MiniMax H3 model weights have their own licenses and usage restrictions. Review them before downloading, running, or distributing the engine, weights, or outputs.
 
+## Session jobs
+
+Each generation type has one slot: different types can run together, but the same type must finish or fail before another starts. Unknown submissions stay locked until Unlock (OpenRouter) or Clear (local). Session jobs remain until Clear, reload, or server restart.
+
 ## Privacy
 
 Motio uses volatile session state instead of accounts or a generation database. API responses are marked `private, no-store`, and credentials are kept out of payloads and URLs.

@@ -15,6 +15,12 @@
 - Client TypeScript uses bundler resolution, while server TypeScript uses NodeNext. Relative imports in `server/` must use emitted `.js` suffixes even though the sources are `.ts`.
 - Tailwind is v4 through `@tailwindcss/vite` and `src/styles.css`; there is intentionally no `tailwind.config.*` or PostCSS config.
 
+## Session Job Concurrency
+
+- Give every generation type its own independent per-tab slot. Different types may overlap, but never allow a second pending, queued, or processing job of the same type; OpenRouter video and local h3.c video count as separate types.
+- A slot unlocks only on completion or failure. A stopped poll is not terminal; an unknown paid submission keeps the existing ambiguity lock, and an unknown local submission keeps the local slot locked until Clear.
+- Apply the same slot lifecycle when adding a generation option. Keep each pending request's controller, form values, credentials, and remote-work marker independent. Workflows without a resumable provider job ID, such as Muse image generation, use only a volatile client task in Session jobs.
+
 ## OpenRouter Constraints
 
 - The environment `OPENROUTER_API_KEY` is server-only via Node's `--env-file-if-exists` and must never be returned to the client. A user-entered override may exist only in volatile React state and the local `X-OpenRouter-Api-Key` request header; pin that override to its submitted job in volatile state so later edits cannot change job authentication. Never put either key in payloads, URLs, logs, browser storage, or server storage.
