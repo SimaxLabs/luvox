@@ -344,26 +344,37 @@ export default function App() {
     ? "jpg"
     : imageResult?.mediaType.split("/")[1] || "png";
 
-  const clearOutput = () => {
+  const resetWorkspace = (preserveSubmissionLock: boolean) => {
     workspaceVersion.current += 1;
+    generationController.current?.abort();
+    generationController.current = null;
     if (copyTimer.current) {
       clearTimeout(copyTimer.current);
       copyTimer.current = null;
     }
+    setWorkflow("video");
+    setForm(initialForm());
+    setImagePrompt("");
+    setImageReference(null);
+    setReadingImageReference(false);
+    setImageResult(null);
     setJob(null);
-    setError(null);
+    setSubmitting(false);
+    setError(preserveSubmissionLock ? uncertainSubmissionMessage : null);
     setPollWarning(null);
     setPollingStopped(false);
-    setSubmissionUncertain(false);
-    remoteWorkMayContinue.current = false;
+    setSubmissionUncertain(preserveSubmissionLock);
+    remoteWorkMayContinue.current = preserveSubmissionLock;
     setCopied(false);
     setMediaError(null);
     setMediaLoading(false);
-  };
-
-  const clearImageOutput = () => {
-    setImageResult(null);
-    setError(null);
+    setMediaRetry(0);
+    setTemporaryVideoUrl(null);
+    setUploadingReference(null);
+    setReferenceUploadStatus("");
+    setReferenceUploadTokens({});
+    firstFramePathOnFocus.current = "";
+    lastFramePathOnFocus.current = "";
   };
 
   useEffect(() => {
@@ -379,32 +390,6 @@ export default function App() {
     let consecutiveFailures = 0;
     let firstFailureAt = 0;
 
-    const resetWorkspace = () => {
-      const preserveSubmissionLock = remoteWorkMayContinue.current;
-      generationController.current?.abort();
-      generationController.current = null;
-      clearOutput();
-      clearImageOutput();
-      setWorkflow("video");
-      setForm(initialForm());
-      setImagePrompt("");
-      setImageReference(null);
-      setReadingImageReference(false);
-      setSubmitting(false);
-      setMediaRetry(0);
-      setTemporaryVideoUrl(null);
-      setUploadingReference(null);
-      setReferenceUploadStatus("");
-      setReferenceUploadTokens({});
-      firstFramePathOnFocus.current = "";
-      lastFramePathOnFocus.current = "";
-      if (preserveSubmissionLock) {
-        remoteWorkMayContinue.current = true;
-        setSubmissionUncertain(true);
-        setError(uncertainSubmissionMessage);
-      }
-    };
-
     const refreshConfig = async () => {
       const requestController = new AbortController();
       controller = requestController;
@@ -415,7 +400,7 @@ export default function App() {
         consecutiveFailures = 0;
         firstFailureAt = 0;
         if (serverSession.current && serverSession.current !== config.sessionId) {
-          resetWorkspace();
+          resetWorkspace(remoteWorkMayContinue.current);
         }
         serverSession.current = config.sessionId;
         serviceState.current = "online";
@@ -429,7 +414,7 @@ export default function App() {
           Date.now() - firstFailureAt >= 6_000 &&
           serviceState.current !== "offline"
         ) {
-          resetWorkspace();
+          resetWorkspace(remoteWorkMayContinue.current);
           serverSession.current = null;
           serviceState.current = "offline";
           setAppConfig(null);
@@ -829,17 +814,11 @@ export default function App() {
   };
 
   const clear = () => {
-    if (submitting || uploadingReference !== null) return;
+    if (submitting || uploadingReference !== null || readingImageReference) return;
     if (
       submissionUncertain &&
       !window.confirm("OpenRouter may already be processing this request. Check OpenRouter Activity first. Unlock another paid submission anyway?")
     ) return;
-    if (workflow === "image") {
-      remoteWorkMayContinue.current = false;
-      setSubmissionUncertain(false);
-      clearImageOutput();
-      return;
-    }
     if (
       isActive &&
       !window.confirm(
@@ -850,7 +829,12 @@ export default function App() {
     ) {
       return;
     }
-    clearOutput();
+    const selectedWorkflow = workflow;
+    const selectedProvider = form.provider;
+    resetWorkspace(false);
+    setWorkflow(selectedWorkflow);
+    setForm((current) => ({ ...current, provider: selectedProvider }));
+    void discardLocalWorkspace().catch(() => undefined);
   };
 
   const copyVideoUrl = async () => {
@@ -987,7 +971,7 @@ export default function App() {
                   )}
                 </div>
                 <p className="mt-2 text-[11px] leading-4 text-stone-500" id="session-key-help">
-                  Temporary for this browser tab only. The key is never stored server-side; video jobs pin it in tab memory for authenticated status and content requests until the workspace is cleared or the tab closes.
+                  Temporary for this browser tab only. The key is never stored server-side and remains here until you remove it or close the tab.
                 </p>
               </div>
             </div>
@@ -1429,16 +1413,14 @@ export default function App() {
               </span>
               <span className="flex size-8 items-center justify-center rounded-full bg-[#d9ff72] text-black transition group-hover:translate-x-1"><Icon name="arrow" /></span>
             </button>
-            {((workflow === "video" && job) || (workflow === "image" && imageResult) || error || submissionUncertain) && (
-              <button
-                className="h-14 border border-black/20 px-4 text-[10px] font-bold uppercase tracking-[0.12em] hover:border-black disabled:cursor-not-allowed disabled:opacity-45"
-                disabled={submitting || uploadingReference !== null || readingImageReference}
-                onClick={clear}
-                type="button"
-              >
-                {submissionUncertain ? "Unlock retry" : workflow === "video" && isActive ? "Stop watching" : "Clear"}
-              </button>
-            )}
+            <button
+              className="h-14 border border-black/20 px-4 text-[10px] font-bold uppercase tracking-[0.12em] hover:border-black disabled:cursor-not-allowed disabled:opacity-45"
+              disabled={submitting || uploadingReference !== null || readingImageReference}
+              onClick={clear}
+              type="button"
+            >
+              {submissionUncertain ? "Unlock retry" : workflow === "video" && isActive ? "Stop watching" : "Clear"}
+            </button>
           </div>
         </form>
 
