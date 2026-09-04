@@ -10,7 +10,7 @@ import {
   LOCAL_H3_FRAME_FIT_IDS,
 } from "../shared/localH3.js";
 import { getVideoModel } from "../shared/videoModels.js";
-import { MUSE_IMAGE_MODEL } from "../shared/imageModels.js";
+import { getMfluxImageModel, getMfluxImageResolution, MFLUX_IMAGE_STEPS, MFLUX_VAE_TILE_SIZES, MUSE_IMAGE_MODEL } from "../shared/imageModels.js";
 import type { ImageMediaType } from "../shared/imageTypes.js";
 
 const IMAGE_REFERENCE_MAX_BYTES = 10 * 1024 * 1024;
@@ -114,18 +114,56 @@ const imageReferenceDataUrl = z
   }, "The reference image content does not match its image type.")
   .optional();
 
-const generateImageSchema = z
+const openRouterGenerateImageSchema = z
   .object({
+    provider: z.literal("openrouter"),
     prompt: promptSchema,
     model: z.literal(MUSE_IMAGE_MODEL.id),
     inputReference: imageReferenceDataUrl,
   })
   .strict();
 
-export type GenerateImageInput = z.infer<typeof generateImageSchema>;
+const localMfluxGenerateImageSchema = z
+  .object({
+    provider: z.literal("mflux"),
+    prompt: promptSchema,
+    model: z.string().trim().min(1, "Model is required."),
+    resolution: z.string().trim().min(1, "Resolution is required."),
+    steps: z.number().int().refine((value) => (MFLUX_IMAGE_STEPS as readonly number[]).includes(value), "Unsupported MFLUX step count."),
+    quantization: z.union([z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(8)]).nullable(),
+    seed: z.number().int().min(0).max(4_294_967_295).optional(),
+    lowRam: z.boolean(),
+    vaeTiling: z.boolean(),
+    vaeTileSize: z.number().int().refine((value) => (MFLUX_VAE_TILE_SIZES as readonly number[]).includes(value), "Unsupported MFLUX VAE tile size."),
+    guidance: z.number().finite().min(0).max(20).optional(),
+    imageStrength: z.number().finite().min(0).max(1),
+    inputReference: imageReferenceDataUrl,
+  })
+  .strict();
 
-export function validateGenerateImageInput(value: unknown): GenerateImageInput {
-  return generateImageSchema.parse(value);
+const generateImageSchema = z.discriminatedUnion("provider", [
+  openRouterGenerateImageSchema,
+  localMfluxGenerateImageSchema,
+]);
+
+export type OpenRouterGenerateImageInput = z.infer<typeof openRouterGenerateImageSchema>;
+export type LocalMfluxGenerateImageInput = z.infer<typeof localMfluxGenerateImageSchema>;
+export type ImageGenerateInput = z.infer<typeof generateImageSchema>;
+
+export function validateGenerateImageInput(value: unknown): ImageGenerateInput {
+  const input = generateImageSchema.parse(value);
+  if (input.provider === "mflux") {
+    const issues: z.ZodIssue[] = [];
+    const model = getMfluxImageModel(input.model);
+    if (!model) issues.push(customIssue("model", "Unsupported MFLUX model."));
+    else {
+      if (!(model.steps as readonly number[]).includes(input.steps)) issues.push(customIssue("steps", "Unsupported step count for this MFLUX model."));
+      if (model.requiresReference && !input.inputReference) issues.push(customIssue("inputReference", "Qwen Image Edit requires a reference image."));
+    }
+    if (!getMfluxImageResolution(input.resolution)) issues.push(customIssue("resolution", "Unsupported MFLUX resolution preset."));
+    if (issues.length > 0) throw new z.ZodError(issues);
+  }
+  return input;
 }
 
 function customIssue(path: string, message: string): z.ZodIssue {

@@ -1,6 +1,6 @@
 import { type ChangeEvent, type Dispatch, type FormEvent, type ReactNode, type SetStateAction, useEffect, useRef, useState } from "react";
 import { getVideoModel, VIDEO_MODELS } from "../shared/videoModels";
-import { MUSE_IMAGE_MODEL } from "../shared/imageModels";
+import { getMfluxImageModel, getMfluxImageResolution, MFLUX_IMAGE_MODEL, MFLUX_IMAGE_MODELS, MFLUX_IMAGE_QUANTIZATIONS, MFLUX_IMAGE_RECOMMENDED_SETUPS, MFLUX_IMAGE_RESOLUTIONS, MFLUX_VAE_TILE_SIZES, MUSE_IMAGE_MODEL } from "../shared/imageModels";
 import {
   getLocalH3QualityPreset,
   isLocalH3AccelerationAvailable,
@@ -25,12 +25,14 @@ import {
   type GenerationStatus,
   type AppConfig,
   type ImageGenerationResponse,
+  type LocalMfluxProgress,
   type VideoJob,
 } from "./api";
 
 type Workflow = "video" | "image";
 type VideoProvider = "openrouter" | "local";
-type SubmissionKind = "image" | VideoProvider;
+type ImageProvider = "openrouter" | "mflux";
+type SubmissionKind = "image" | "mflux" | VideoProvider;
 
 interface FormState {
   provider: VideoProvider;
@@ -72,9 +74,11 @@ type IconName =
   | "spark";
 
 const statusOrder: GenerationStatus[] = ["queued", "processing", "completed", "failed"];
+const defaultMfluxSetup = MFLUX_IMAGE_RECOMMENDED_SETUPS[0];
 const imageReferenceMaxBytes = 10 * 1024 * 1024;
 const uncertainSubmissionMessage = "OpenRouter may already be processing a paid request that Motio cannot track. Check OpenRouter Activity before unlocking another submission.";
 const uncertainLocalSubmissionMessage = "The local h3.c submission may have been accepted but Motio did not receive its job ID. Clear the workspace before submitting another local job.";
+const uncertainMfluxSubmissionMessage = "The local MFLUX request status is unknown. Clear the workspace before submitting another local MFLUX image.";
 const untrackedRemoteWork = "__motio_untracked_remote_work__";
 const uncertainSubmissionErrors = new Set([
   "invalid_local_response",
@@ -298,6 +302,24 @@ function messageFrom(error: unknown): string {
   return error instanceof Error ? error.message : "An unexpected error occurred.";
 }
 
+function formatSeconds(value?: number): string {
+  if (value === undefined) return "Estimating";
+  const seconds = Math.max(0, Math.round(value));
+  const minutes = Math.floor(seconds / 60);
+  return minutes ? `${minutes}m ${String(seconds % 60).padStart(2, "0")}s` : `${seconds}s`;
+}
+
+function getImageTaskStatus(
+  submitting: boolean,
+  result: ImageGenerationResponse | null,
+  failure: string | null,
+): GenerationStatus | "unknown" | null {
+  if (submitting) return "processing";
+  if (result) return "completed";
+  if (failure === uncertainSubmissionMessage || failure === uncertainMfluxSubmissionMessage) return "unknown";
+  return failure ? "failed" : null;
+}
+
 function JobPoller({
   job,
   localWorkspaceToken,
@@ -398,20 +420,37 @@ function JobPoller({
 export default function App() {
   const [workflow, setWorkflow] = useState<Workflow>("video");
   const [form, setForm] = useState<FormState>(initialForm);
+  const [imageProvider, setImageProvider] = useState<ImageProvider>("openrouter");
+  const [mfluxModel, setMfluxModel] = useState<string>(MFLUX_IMAGE_MODEL.id);
+  const [mfluxResolution, setMfluxResolution] = useState<string>(defaultMfluxSetup.resolution);
+  const [mfluxSteps, setMfluxSteps] = useState<number>(defaultMfluxSetup.steps);
+  const [mfluxQuantization, setMfluxQuantization] = useState<number | null>(defaultMfluxSetup.quantization);
+  const [mfluxSeed, setMfluxSeed] = useState("");
+  const [mfluxLowRam, setMfluxLowRam] = useState<boolean>(defaultMfluxSetup.lowRam);
+  const [mfluxVaeTiling, setMfluxVaeTiling] = useState<boolean>(defaultMfluxSetup.vaeTiling);
+  const [mfluxVaeTileSize, setMfluxVaeTileSize] = useState<number>(defaultMfluxSetup.vaeTileSize);
+  const [mfluxGuidance, setMfluxGuidance] = useState<number>(defaultMfluxSetup.guidance);
+  const [mfluxImageStrength, setMfluxImageStrength] = useState<number>(defaultMfluxSetup.imageStrength);
   const [imagePrompt, setImagePrompt] = useState("");
   const [imageReference, setImageReference] = useState<{ name: string; dataUrl: string } | null>(null);
   const [readingImageReference, setReadingImageReference] = useState(false);
   const [imageResult, setImageResult] = useState<ImageGenerationResponse | null>(null);
   const [imageFailure, setImageFailure] = useState<string | null>(null);
+  const [mfluxImageResult, setMfluxImageResult] = useState<ImageGenerationResponse | null>(null);
+  const [mfluxImageFailure, setMfluxImageFailure] = useState<string | null>(null);
   const [openRouterSubmissionFailure, setOpenRouterSubmissionFailure] = useState<string | null>(null);
   const [localSubmissionFailure, setLocalSubmissionFailure] = useState<string | null>(null);
   const [jobs, setJobs] = useState<DisplayJob[]>([]);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [imageSubmitting, setImageSubmitting] = useState(false);
+  const [mfluxImageSubmitting, setMfluxImageSubmitting] = useState(false);
+  const [mfluxProgress, setMfluxProgress] = useState<LocalMfluxProgress | null>(null);
+  const [mfluxElapsedSeconds, setMfluxElapsedSeconds] = useState(0);
   const [openRouterSubmitting, setOpenRouterSubmitting] = useState(false);
   const [localSubmitting, setLocalSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [submissionUncertain, setSubmissionUncertain] = useState(false);
+  const [openRouterImageUncertain, setOpenRouterImageUncertain] = useState(false);
+  const [openRouterVideoUncertain, setOpenRouterVideoUncertain] = useState(false);
   const [copied, setCopied] = useState(false);
   const [mediaError, setMediaError] = useState<string | null>(null);
   const [mediaLoading, setMediaLoading] = useState(false);
@@ -422,6 +461,7 @@ export default function App() {
   const [uploadingReference, setUploadingReference] = useState<"first" | "last" | null>(null);
   const [referenceUploadStatus, setReferenceUploadStatus] = useState("");
   const [localAdvancedStatus, setLocalAdvancedStatus] = useState("");
+  const [mfluxAdvancedStatus, setMfluxAdvancedStatus] = useState("");
   const [clearingWorkspace, setClearingWorkspace] = useState(false);
   const [localCleanupFailed, setLocalCleanupFailed] = useState(false);
   const [jobAnnouncement, setJobAnnouncement] = useState("");
@@ -430,15 +470,26 @@ export default function App() {
   const generationControllers = useRef(new Map<SubmissionKind, AbortController>());
   const localWorkspaceToken = useRef(crypto.randomUUID());
   const pendingLocalWorkspaceDiscards = useRef(new Set<string>());
-  const remoteWork = useRef(new Set<string>());
+  const remoteImageWork = useRef(new Set<string>());
+  const remoteVideoWork = useRef(new Set<string>());
   const selectionVersion = useRef(0);
   const firstFramePathOnFocus = useRef("");
   const lastFramePathOnFocus = useRef("");
+  const mfluxStartedAt = useRef(0);
   const serverSession = useRef<string | null>(null);
   const serviceState = useRef<"unknown" | "online" | "offline">("unknown");
   const workspaceVersion = useRef(0);
 
   const selectedModel = getVideoModel(form.model) ?? VIDEO_MODELS[0];
+  const selectedMfluxModel = getMfluxImageModel(mfluxModel) ?? MFLUX_IMAGE_MODEL;
+  const selectedMfluxResolution = getMfluxImageResolution(mfluxResolution) ?? MFLUX_IMAGE_RESOLUTIONS[0];
+  const mfluxVaeTilingEnabled = mfluxLowRam || mfluxVaeTiling;
+  const mfluxResolutionOptions = MFLUX_IMAGE_RESOLUTIONS.filter((resolution, index, resolutions) =>
+    resolutions.findIndex((candidate) => candidate.label === resolution.label) === index);
+  const mfluxAspectRatioOptions = MFLUX_IMAGE_RESOLUTIONS.filter((resolution, index, resolutions) =>
+    resolutions.findIndex((candidate) => candidate.aspectRatio === resolution.aspectRatio) === index);
+  const mfluxRecommendedSetups = MFLUX_IMAGE_RECOMMENDED_SETUPS.filter((setup) =>
+    (setup.models as readonly string[]).includes(selectedMfluxModel.id));
   const selectedLocalQuality = getLocalH3QualityPreset(form.localQuality);
   const selectedLocalResolution = LOCAL_H3_RESOLUTIONS.find((resolution) => resolution.id === form.localResolution) ?? LOCAL_H3_RESOLUTIONS[0];
   const localResolutionOptions = LOCAL_H3_RESOLUTIONS.filter((resolution, index, resolutions) =>
@@ -449,27 +500,38 @@ export default function App() {
   const isActive = job?.status === "queued" || job?.status === "processing";
   const hasActiveOpenRouterJob = jobs.some((candidate) => candidate.provider === "openrouter" && (candidate.status === "queued" || candidate.status === "processing"));
   const hasActiveLocalJob = jobs.some((candidate) => candidate.provider === "local" && (candidate.status === "queued" || candidate.status === "processing"));
-  const currentSubmissionKind: SubmissionKind = workflow === "image" ? "image" : form.provider;
+  const currentSubmissionKind: SubmissionKind = workflow === "image"
+    ? imageProvider === "openrouter" ? "image" : "mflux"
+    : form.provider;
+  const mfluxSubmissionUncertain = mfluxImageFailure === uncertainMfluxSubmissionMessage;
+  const currentSubmissionUncertain = currentSubmissionKind === "image"
+    ? openRouterImageUncertain
+    : currentSubmissionKind === "openrouter"
+      ? openRouterVideoUncertain
+      : currentSubmissionKind === "mflux"
+        ? mfluxSubmissionUncertain
+        : false;
   const currentSubmissionKindRef = useRef(currentSubmissionKind);
   currentSubmissionKindRef.current = currentSubmissionKind;
-  const submitting = imageSubmitting || openRouterSubmitting || localSubmitting;
+  const submitting = imageSubmitting || mfluxImageSubmitting || openRouterSubmitting || localSubmitting;
   const currentSubmitting = currentSubmissionKind === "image"
     ? imageSubmitting
+    : currentSubmissionKind === "mflux"
+      ? mfluxImageSubmitting
     : currentSubmissionKind === "openrouter"
       ? openRouterSubmitting
       : localSubmitting;
   const currentVideoActive = form.provider === "openrouter" ? hasActiveOpenRouterJob : hasActiveLocalJob;
   const currentVideoUnknown = form.provider === "local" && localSubmissionFailure === uncertainLocalSubmissionMessage;
   const currentVideoLocked = currentVideoActive || currentVideoUnknown;
-  const imageTaskStatus = imageSubmitting
-    ? "processing"
-    : imageResult
-      ? "completed"
-      : imageFailure === uncertainSubmissionMessage
-        ? "unknown"
-        : imageFailure
-          ? "failed"
-          : null;
+  const hasUnknownSubmission = openRouterImageUncertain || openRouterVideoUncertain || mfluxSubmissionUncertain || localSubmissionFailure === uncertainLocalSubmissionMessage;
+  const openRouterImageTaskStatus = getImageTaskStatus(imageSubmitting, imageResult, imageFailure);
+  const mfluxImageTaskStatus = getImageTaskStatus(mfluxImageSubmitting, mfluxImageResult, mfluxImageFailure);
+  const imageTaskStatus = imageProvider === "openrouter" ? openRouterImageTaskStatus : mfluxImageTaskStatus;
+  const currentImageResult = imageProvider === "openrouter" ? imageResult : mfluxImageResult;
+  const currentImageFailure = imageProvider === "openrouter" ? imageFailure : mfluxImageFailure;
+  const currentImageModel = imageProvider === "openrouter" ? MUSE_IMAGE_MODEL : selectedMfluxModel;
+  const selectedMfluxModelAvailable = appConfig?.localMflux.models.includes(selectedMfluxModel.id) === true;
   const openRouterSubmissionStatus = openRouterSubmitting
     ? "submitting"
     : openRouterSubmissionFailure === uncertainSubmissionMessage
@@ -488,11 +550,13 @@ export default function App() {
     ? openRouterSubmissionStatus
     : localSubmissionStatus;
   const sessionItemCount = jobs.length
-    + Number(Boolean(imageTaskStatus))
+    + Number(Boolean(openRouterImageTaskStatus))
+    + Number(Boolean(mfluxImageTaskStatus))
     + Number(Boolean(openRouterSubmissionStatus))
     + Number(Boolean(localSubmissionStatus));
   const activeJobCount = jobs.filter((candidate) => candidate.status === "queued" || candidate.status === "processing").length
     + Number(imageSubmitting)
+    + Number(mfluxImageSubmitting)
     + Number(openRouterSubmitting)
     + Number(localSubmitting);
   const hasActiveJobs = activeJobCount > 0;
@@ -502,12 +566,12 @@ export default function App() {
   const usesSessionMedia = Boolean(job && (job.provider === "local" || jobApiKey));
   const videoSource = usesSessionMedia ? temporaryVideoUrl || undefined : job?.videoUrl;
   const downloadSource = usesSessionMedia ? temporaryVideoUrl || undefined : job?.downloadUrl;
-  const imageSource = imageResult
-    ? `data:${imageResult.mediaType};base64,${imageResult.b64Json}`
+  const imageSource = currentImageResult
+    ? `data:${currentImageResult.mediaType};base64,${currentImageResult.b64Json}`
     : undefined;
-  const imageExtension = imageResult?.mediaType === "image/jpeg"
+  const imageExtension = currentImageResult?.mediaType === "image/jpeg"
     ? "jpg"
-    : imageResult?.mediaType.split("/")[1] || "png";
+    : currentImageResult?.mediaType.split("/")[1] || "png";
 
   const selectLocalResolution = (localResolution: string) => {
     const resetAcceleration = !isLocalH3AccelerationAvailable(form.localAcceleration, localResolution, form.localQuality);
@@ -517,6 +581,19 @@ export default function App() {
       localAcceleration: resetAcceleration ? "standard" : current.localAcceleration,
     }));
     setLocalAdvancedStatus(resetAcceleration ? "Acceleration reset to Standard for the selected resolution." : "");
+  };
+
+  const applyMfluxSetup = (setup: (typeof MFLUX_IMAGE_RECOMMENDED_SETUPS)[number]) => {
+    setMfluxResolution(setup.resolution);
+    setMfluxSteps(setup.steps);
+    setMfluxQuantization(setup.quantization);
+    setMfluxSeed("");
+    setMfluxLowRam(setup.lowRam);
+    setMfluxVaeTiling(setup.vaeTiling);
+    setMfluxVaeTileSize(setup.vaeTileSize);
+    setMfluxGuidance(setup.guidance);
+    setMfluxImageStrength(setup.imageStrength);
+    setMfluxAdvancedStatus(`${setup.label} setup applied.`);
   };
 
   const leaveJobView = () => {
@@ -541,10 +618,11 @@ export default function App() {
     setError(null);
   };
 
-  const viewImageTask = () => {
+  const viewImageTask = (provider: ImageProvider) => {
     leaveJobView();
     setWorkflow("image");
-    setError(imageFailure);
+    setImageProvider(provider);
+    setError(provider === "openrouter" ? imageFailure : mfluxImageFailure);
   };
 
   const viewVideoSubmission = (provider: VideoProvider) => {
@@ -554,31 +632,51 @@ export default function App() {
     setError(provider === "openrouter" ? openRouterSubmissionFailure : localSubmissionFailure);
   };
 
-  const resetWorkspace = (preserveSubmissionLock: boolean) => {
+  const resetWorkspace = (preserveImageSubmissionLock: boolean, preserveVideoSubmissionLock: boolean) => {
     workspaceVersion.current += 1;
     for (const controller of generationControllers.current.values()) controller.abort();
     generationControllers.current.clear();
     leaveJobView();
     setWorkflow("video");
     setForm(initialForm());
+    setImageProvider("openrouter");
+    setMfluxModel(MFLUX_IMAGE_MODEL.id);
+    setMfluxResolution(defaultMfluxSetup.resolution);
+    setMfluxSteps(defaultMfluxSetup.steps);
+    setMfluxQuantization(defaultMfluxSetup.quantization);
+    setMfluxSeed("");
+    setMfluxLowRam(defaultMfluxSetup.lowRam);
+    setMfluxVaeTiling(defaultMfluxSetup.vaeTiling);
+    setMfluxVaeTileSize(defaultMfluxSetup.vaeTileSize);
+    setMfluxGuidance(defaultMfluxSetup.guidance);
+    setMfluxImageStrength(defaultMfluxSetup.imageStrength);
     setImagePrompt("");
     setImageReference(null);
     setReadingImageReference(false);
     setImageResult(null);
-    setImageFailure(null);
-    setOpenRouterSubmissionFailure(null);
+    setImageFailure(preserveImageSubmissionLock ? uncertainSubmissionMessage : null);
+    setMfluxImageResult(null);
+    setMfluxImageFailure(null);
+    setOpenRouterSubmissionFailure(preserveVideoSubmissionLock ? uncertainSubmissionMessage : null);
     setLocalSubmissionFailure(null);
     setJobs([]);
     setImageSubmitting(false);
+    setMfluxImageSubmitting(false);
+    setMfluxProgress(null);
+    setMfluxElapsedSeconds(0);
     setOpenRouterSubmitting(false);
     setLocalSubmitting(false);
-    setError(preserveSubmissionLock ? uncertainSubmissionMessage : null);
-    setSubmissionUncertain(preserveSubmissionLock);
-    remoteWork.current.clear();
-    if (preserveSubmissionLock) remoteWork.current.add(untrackedRemoteWork);
+    setError(preserveVideoSubmissionLock ? uncertainSubmissionMessage : null);
+    setOpenRouterImageUncertain(preserveImageSubmissionLock);
+    setOpenRouterVideoUncertain(preserveVideoSubmissionLock);
+    remoteImageWork.current.clear();
+    remoteVideoWork.current.clear();
+    if (preserveImageSubmissionLock) remoteImageWork.current.add(untrackedRemoteWork);
+    if (preserveVideoSubmissionLock) remoteVideoWork.current.add(untrackedRemoteWork);
     setUploadingReference(null);
     setReferenceUploadStatus("");
     setLocalAdvancedStatus("");
+    setMfluxAdvancedStatus("");
     setReferenceUploadTokens({});
     setClearingWorkspace(false);
     setLocalCleanupFailed(false);
@@ -586,6 +684,14 @@ export default function App() {
     firstFramePathOnFocus.current = "";
     lastFramePathOnFocus.current = "";
   };
+
+  useEffect(() => {
+    if (!mfluxImageSubmitting) return;
+    const update = () => setMfluxElapsedSeconds(Math.floor((Date.now() - mfluxStartedAt.current) / 1_000));
+    update();
+    const timer = setInterval(update, 1_000);
+    return () => clearInterval(timer);
+  }, [mfluxImageSubmitting]);
 
   useEffect(() => {
     let disposed = false;
@@ -604,7 +710,7 @@ export default function App() {
         if (serverSession.current && serverSession.current !== config.sessionId) {
           pendingLocalWorkspaceDiscards.current.add(localWorkspaceToken.current);
           localWorkspaceToken.current = crypto.randomUUID();
-          resetWorkspace(remoteWork.current.size > 0);
+          resetWorkspace(remoteImageWork.current.size > 0, remoteVideoWork.current.size > 0);
           serverSession.current = config.sessionId;
           setAppConfig(null);
         }
@@ -635,7 +741,7 @@ export default function App() {
         ) {
           pendingLocalWorkspaceDiscards.current.add(localWorkspaceToken.current);
           localWorkspaceToken.current = crypto.randomUUID();
-          resetWorkspace(remoteWork.current.size > 0);
+          resetWorkspace(remoteImageWork.current.size > 0, remoteVideoWork.current.size > 0);
           serverSession.current = null;
           serviceState.current = "offline";
           setAppConfig(null);
@@ -740,7 +846,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!submitting && !hasActiveJobs && !submissionUncertain) return;
+    if (!submitting && !hasActiveJobs && !hasUnknownSubmission) return;
 
     const warnBeforeUnload = (event: BeforeUnloadEvent) => {
       event.preventDefault();
@@ -748,7 +854,7 @@ export default function App() {
     };
     window.addEventListener("beforeunload", warnBeforeUnload);
     return () => window.removeEventListener("beforeunload", warnBeforeUnload);
-  }, [submitting, hasActiveJobs, submissionUncertain]);
+  }, [submitting, hasActiveJobs, hasUnknownSubmission]);
 
   const releaseChangedReference = (
     position: "first" | "last",
@@ -896,10 +1002,13 @@ export default function App() {
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     const submissionKind = currentSubmissionKind;
+    const isImageSubmission = submissionKind === "image" || submissionKind === "mflux";
+    const isPaidSubmission = submissionKind === "image" || submissionKind === "openrouter";
     if (
       generationControllers.current.has(submissionKind) ||
-      submissionUncertain ||
+      currentSubmissionUncertain ||
       readingImageReference ||
+      (workflow === "image" && imageProvider === "mflux" && selectedMfluxModel.requiresReference && !imageReference) ||
       (clearingWorkspace && workflow === "video" && form.provider === "local") ||
       (localCleanupFailed && workflow === "video" && form.provider === "local") ||
       (workflow === "video" && currentVideoLocked)
@@ -907,12 +1016,12 @@ export default function App() {
 
     const requestController = new AbortController();
     generationControllers.current.set(submissionKind, requestController);
-    const isPaidSubmission = submissionKind !== "local";
     const pendingRemoteSubmission = `__motio_pending_submission_${crypto.randomUUID()}__`;
-    if (isPaidSubmission) remoteWork.current.add(pendingRemoteSubmission);
+    const paidRemoteWork = submissionKind === "image" ? remoteImageWork.current : remoteVideoWork.current;
+    if (isPaidSubmission) paidRemoteWork.add(pendingRemoteSubmission);
     const version = workspaceVersion.current;
     let submittedSelectionVersion = selectionVersion.current;
-    if (submissionKind !== "image") {
+    if (!isImageSubmission) {
       leaveJobView();
       submittedSelectionVersion = selectionVersion.current;
       if (submissionKind === "openrouter") {
@@ -923,30 +1032,55 @@ export default function App() {
         setLocalSubmissionFailure(null);
       }
       setJobAnnouncement(`${submissionKind === "openrouter" ? "OpenRouter" : "Local h3.c"} video submission started.`);
-    } else {
+    } else if (submissionKind === "image") {
       setImageSubmitting(true);
       setImageFailure(null);
       setJobAnnouncement("Meta Muse image started.");
+    } else {
+      mfluxStartedAt.current = Date.now();
+      setMfluxElapsedSeconds(0);
+      setMfluxProgress({ phase: "loading", step: 0, total: mfluxSteps, percent: 0 });
+      setMfluxImageSubmitting(true);
+      setMfluxImageFailure(null);
+      setJobAnnouncement("Local MFLUX image started.");
     }
     setError(null);
 
     try {
       const key = sessionApiKey.trim();
-      if (submissionKind === "image") {
-        setImageResult(null);
-        const result = await generateImage(
-          {
-            prompt: imagePrompt,
-            model: MUSE_IMAGE_MODEL.id,
-            inputReference: imageReference?.dataUrl,
-          },
-          key || undefined,
-          requestController.signal,
-        );
+      if (isImageSubmission) {
+        const isMflux = submissionKind === "mflux";
+        if (isMflux) setMfluxImageResult(null);
+        else setImageResult(null);
+        const result = isMflux
+          ? await generateImage({
+              provider: "mflux",
+              prompt: imagePrompt,
+              model: selectedMfluxModel.id,
+              resolution: mfluxResolution,
+              steps: mfluxSteps,
+              quantization: mfluxQuantization,
+              seed: mfluxSeed ? Number(mfluxSeed) : undefined,
+              lowRam: mfluxLowRam,
+              vaeTiling: mfluxVaeTiling,
+              vaeTileSize: mfluxVaeTileSize,
+              guidance: selectedMfluxModel.id === "qwen-image-edit" ? mfluxGuidance : undefined,
+              imageStrength: mfluxImageStrength,
+              inputReference: imageReference?.dataUrl,
+            }, undefined, requestController.signal, (progress) => {
+              if (version === workspaceVersion.current) setMfluxProgress(progress);
+            })
+          : await generateImage({
+              provider: "openrouter",
+              prompt: imagePrompt,
+              model: MUSE_IMAGE_MODEL.id,
+              inputReference: imageReference?.dataUrl,
+            }, key || undefined, requestController.signal);
         if (version !== workspaceVersion.current) return;
-        remoteWork.current.delete(pendingRemoteSubmission);
-        setImageResult(result);
-        setJobAnnouncement("Meta Muse image completed.");
+        if (isPaidSubmission) paidRemoteWork.delete(pendingRemoteSubmission);
+        if (isMflux) setMfluxImageResult(result);
+        else setImageResult(result);
+        setJobAnnouncement(`${isMflux ? "Local MFLUX" : "Meta Muse"} image completed.`);
         return;
       }
 
@@ -980,11 +1114,11 @@ export default function App() {
             requestController.signal,
           );
       if (version !== workspaceVersion.current) return;
-      remoteWork.current.delete(pendingRemoteSubmission);
+      paidRemoteWork.delete(pendingRemoteSubmission);
       if (
         nextJob.provider === "openrouter" &&
         (nextJob.status === "queued" || nextJob.status === "processing")
-      ) remoteWork.current.add(nextJob.id);
+      ) remoteVideoWork.current.add(nextJob.id);
       const trackedJob: DisplayJob = {
         ...nextJob,
         temporaryApiKey:
@@ -1010,34 +1144,46 @@ export default function App() {
         Boolean(apiError?.type && uncertainSubmissionErrors.has(apiError.type))
       );
       const submissionIsUncertain = isPaidSubmission && outcomeIsUnknown;
+      const mfluxSubmissionIsUncertain = submissionKind === "mflux" && outcomeIsUnknown;
       const localSubmissionIsUncertain = submissionKind === "local" && outcomeIsUnknown;
       if (submissionIsUncertain) {
-        setSubmissionUncertain(true);
-        if (submissionKind === "image") setImageFailure(uncertainSubmissionMessage);
-        else setOpenRouterSubmissionFailure(uncertainSubmissionMessage);
+        if (submissionKind === "image") {
+          setOpenRouterImageUncertain(true);
+          setImageFailure(uncertainSubmissionMessage);
+        } else {
+          setOpenRouterVideoUncertain(true);
+          setOpenRouterSubmissionFailure(uncertainSubmissionMessage);
+        }
         if (currentSubmissionKindRef.current === submissionKind) setError(uncertainSubmissionMessage);
+      } else if (mfluxSubmissionIsUncertain) {
+        setMfluxImageFailure(uncertainMfluxSubmissionMessage);
+        if (currentSubmissionKindRef.current === submissionKind) setError(uncertainMfluxSubmissionMessage);
       } else if (localSubmissionIsUncertain) {
         setLocalSubmissionFailure(uncertainLocalSubmissionMessage);
         if (currentSubmissionKindRef.current === submissionKind) setError(uncertainLocalSubmissionMessage);
       } else {
-        if (isPaidSubmission) remoteWork.current.delete(pendingRemoteSubmission);
+        if (isPaidSubmission) paidRemoteWork.delete(pendingRemoteSubmission);
         const message = messageFrom(submitError);
         if (submissionKind === "image") setImageFailure(message);
+        else if (submissionKind === "mflux") setMfluxImageFailure(message);
         else if (submissionKind === "openrouter") setOpenRouterSubmissionFailure(message);
         else setLocalSubmissionFailure(message);
         if (currentSubmissionKindRef.current === submissionKind) setError(message);
       }
       const submissionLabel = submissionKind === "image"
         ? "Meta Muse image"
+        : submissionKind === "mflux"
+          ? "Local MFLUX image"
         : submissionKind === "openrouter"
           ? "OpenRouter video submission"
           : "Local h3.c submission";
-      setJobAnnouncement(`${submissionLabel} ${submissionIsUncertain || localSubmissionIsUncertain ? "status unknown" : "failed"}.`);
+      setJobAnnouncement(`${submissionLabel} ${submissionIsUncertain || mfluxSubmissionIsUncertain || localSubmissionIsUncertain ? "status unknown" : "failed"}.`);
     } finally {
       if (generationControllers.current.get(submissionKind) === requestController) {
         generationControllers.current.delete(submissionKind);
         if (version === workspaceVersion.current) {
           if (submissionKind === "image") setImageSubmitting(false);
+          else if (submissionKind === "mflux") setMfluxImageSubmitting(false);
           else if (submissionKind === "openrouter") setOpenRouterSubmitting(false);
           else setLocalSubmitting(false);
         }
@@ -1048,7 +1194,7 @@ export default function App() {
   const clear = () => {
     if (submitting || clearingWorkspace || uploadingReference !== null || readingImageReference) return;
     if (
-      submissionUncertain &&
+      (openRouterImageUncertain || openRouterVideoUncertain) &&
       !window.confirm("OpenRouter may already be processing this request. Check OpenRouter Activity first. Unlock another paid submission anyway?")
     ) return;
     if (
@@ -1059,9 +1205,11 @@ export default function App() {
     }
     const selectedWorkflow = workflow;
     const selectedProvider = form.provider;
-    resetWorkspace(false);
+    const selectedImageProvider = imageProvider;
+    resetWorkspace(false, false);
     setWorkflow(selectedWorkflow);
     setForm((current) => ({ ...current, provider: selectedProvider }));
+    setImageProvider(selectedImageProvider);
     const version = workspaceVersion.current;
     setClearingWorkspace(true);
     void discardLocalWorkspace(localWorkspaceToken.current)
@@ -1110,7 +1258,7 @@ export default function App() {
             job={trackedJob}
             key={trackedJob.id}
             localWorkspaceToken={localWorkspaceToken.current}
-            remoteWork={remoteWork}
+            remoteWork={remoteVideoWork}
             setAnnouncement={setJobAnnouncement}
             setJobs={setJobs}
             workspaceVersion={workspaceVersion}
@@ -1139,12 +1287,16 @@ export default function App() {
                     <p className="mt-1 text-[9px] leading-4 text-white/40">Private to this tab and cleared on reload or service restart.</p>
                   </div>
                   <div className="max-h-[60vh] overflow-y-auto p-2">
-                    {imageTaskStatus && (
+                    {([
+                      ["openrouter", openRouterImageTaskStatus, "Meta Muse Image"],
+                      ["mflux", mfluxImageTaskStatus, "Local MFLUX"],
+                    ] as const).map(([provider, status, label]) => status && (
                       <button
-                        aria-current={workflow === "image" ? "true" : undefined}
-                        className={`flex w-full items-center justify-between gap-3 border px-3 py-3 text-left transition ${workflow === "image" ? "border-[#d9ff72]/60 bg-[#d9ff72]/5" : "border-transparent hover:border-white/15 hover:bg-white/5"}`}
+                        aria-current={workflow === "image" && imageProvider === provider ? "true" : undefined}
+                        className={`flex w-full items-center justify-between gap-3 border px-3 py-3 text-left transition ${workflow === "image" && imageProvider === provider ? "border-[#d9ff72]/60 bg-[#d9ff72]/5" : "border-transparent hover:border-white/15 hover:bg-white/5"}`}
+                        key={provider}
                         onClick={(event) => {
-                          viewImageTask();
+                          viewImageTask(provider);
                           const details = event.currentTarget.closest("details");
                           details?.removeAttribute("open");
                           details?.querySelector("summary")?.focus();
@@ -1152,14 +1304,14 @@ export default function App() {
                         type="button"
                       >
                         <span className="min-w-0">
-                          <span className="block text-[10px] font-bold uppercase tracking-[0.12em]">Meta Muse Image</span>
-                          <span className="mt-1 block font-mono text-[9px] text-white/40">First frame request</span>
+                          <span className="block text-[10px] font-bold uppercase tracking-[0.12em]">{label}</span>
+                          <span className="mt-1 block font-mono text-[9px] text-white/40">Text to image request</span>
                         </span>
-                        <span className={`shrink-0 text-[9px] font-bold uppercase tracking-[0.12em] ${imageTaskStatus === "failed" ? "text-[#ff826e]" : imageTaskStatus === "completed" ? "text-white/55" : "text-[#d9ff72]"}`}>
-                          {imageTaskStatus}
+                        <span className={`shrink-0 text-[9px] font-bold uppercase tracking-[0.12em] ${status === "failed" ? "text-[#ff826e]" : status === "completed" ? "text-white/55" : "text-[#d9ff72]"}`}>
+                          {status}
                         </span>
                       </button>
-                    )}
+                    ))}
                     {([
                       ["openrouter", openRouterSubmissionStatus, openRouterSubmitting],
                       ["local", localSubmissionStatus, localSubmitting],
@@ -1243,13 +1395,13 @@ export default function App() {
               <button
                 aria-pressed={workflow === option}
                 className={`h-12 text-xs font-bold uppercase tracking-[0.12em] transition disabled:cursor-not-allowed disabled:opacity-40 ${workflow === option ? "bg-black text-[#d9ff72]" : "text-stone-500 hover:bg-white/60 hover:text-black"}`}
-                disabled={submissionUncertain || uploadingReference !== null || readingImageReference}
+                disabled={uploadingReference !== null || readingImageReference}
                 key={option}
                 onClick={() => {
                   leaveJobView();
                   setWorkflow(option);
                   setError(option === "image"
-                    ? imageFailure
+                    ? currentImageFailure
                     : form.provider === "openrouter"
                       ? openRouterSubmissionFailure
                       : localSubmissionFailure);
@@ -1260,6 +1412,34 @@ export default function App() {
               </button>
             ))}
           </div>
+
+          {workflow === "image" && (
+          <>
+          <div className="mb-7 grid grid-cols-2 gap-1.5 border border-black/10 p-1.5" aria-label="Image generation provider">
+            {(["openrouter", "mflux"] as const).map((provider) => (
+              <button
+                aria-pressed={imageProvider === provider}
+                className={`h-11 text-[10px] font-bold uppercase tracking-[0.12em] transition disabled:cursor-not-allowed disabled:opacity-40 ${imageProvider === provider ? "bg-black text-[#d9ff72]" : "text-stone-500 hover:bg-white/60 hover:text-black"}`}
+                disabled={provider === "mflux" && appConfig?.localMflux.supported !== true}
+                key={provider}
+                onClick={() => {
+                  leaveJobView();
+                  setImageProvider(provider);
+                  setError(provider === "openrouter" ? imageFailure : mfluxImageFailure);
+                }}
+                type="button"
+              >
+                {provider === "openrouter" ? "OpenRouter" : "MFLUX"}
+              </button>
+            ))}
+          </div>
+          {appConfig?.localMflux.supported === false && (
+            <p className="-mt-5 mb-7 text-[11px] leading-4 text-stone-500">
+              Local MFLUX requires macOS on Apple Silicon and is unavailable in Docker.
+            </p>
+          )}
+          </>
+          )}
 
           {workflow === "video" && (
           <>
@@ -1277,7 +1457,7 @@ export default function App() {
                 }}
                 type="button"
               >
-                {provider === "openrouter" ? "OpenRouter" : "Local h3.c"}
+                {provider === "openrouter" ? "OpenRouter" : "h3.c"}
               </button>
             ))}
           </div>
@@ -1289,7 +1469,7 @@ export default function App() {
           </>
           )}
 
-          {(workflow === "image" || form.provider === "openrouter") && (
+          {((workflow === "image" && imageProvider === "openrouter") || (workflow === "video" && form.provider === "openrouter")) && (
           <div className="mb-7 border border-black/12 bg-[#e7e5dc] p-4 sm:p-5">
             <div className="flex items-start gap-3">
               <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center bg-white/70"><Icon name="lock" /></div>
@@ -1329,9 +1509,30 @@ export default function App() {
           )}
 
           {workflow === "image" ? (
-          <fieldset disabled={imageSubmitting || readingImageReference}>
+          <fieldset disabled={currentSubmitting || readingImageReference}>
+            {imageProvider === "mflux" && (
+              <div className="mb-5 border border-black/12 bg-[#e7e5dc] px-3 py-2.5 sm:px-4">
+                <div className="flex items-center gap-3">
+                  <div className="flex size-7 shrink-0 items-center justify-center bg-[#d9ff72] text-black"><Icon name="spark" /></div>
+                  <h3 className="flex-1 text-xs font-bold uppercase tracking-[0.12em]">Local engine</h3>
+                  <a
+                    className="border border-black/20 px-2.5 py-1 text-[9px] font-bold uppercase tracking-[0.12em] transition hover:border-black hover:bg-black hover:text-[#d9ff72]"
+                    href="https://github.com/SimaxLabs/motio#local-image-generation-with-mflux"
+                    rel="noreferrer"
+                    target="_blank"
+                  >
+                    Info
+                  </a>
+                </div>
+                {!selectedMfluxModelAvailable && (
+                  <p className="mt-2 border-t border-black/10 pt-2 text-[11px] leading-4 text-stone-500">
+                    Install {selectedMfluxModel.executable} or set {selectedMfluxModel.environmentVariable} to its absolute path on the backend.
+                  </p>
+                )}
+              </div>
+            )}
             <div>
-              <FieldLabel htmlFor="image-prompt">Image prompt</FieldLabel>
+              <FieldLabel htmlFor="image-prompt">{imageProvider === "mflux" && selectedMfluxModel.requiresReference ? "Edit instruction" : "Image prompt"}</FieldLabel>
               <div className="relative">
                 <textarea
                   autoFocus
@@ -1339,41 +1540,154 @@ export default function App() {
                   id="image-prompt"
                   maxLength={10_000}
                   onChange={(event) => setImagePrompt(event.target.value)}
-                  placeholder="The opening frame of a rain-soaked night market, cinematic lighting, reflections rippling across the pavement..."
+                  placeholder={imageProvider === "mflux" && selectedMfluxModel.requiresReference
+                    ? "Replace the background with a rain-soaked night market while preserving the subject..."
+                    : "The opening frame of a rain-soaked night market, cinematic lighting, reflections rippling across the pavement..."}
                   required
                   value={imagePrompt}
                 />
                 <span className="absolute bottom-3 right-3 font-mono text-[9px] text-stone-400">{imagePrompt.length} / 10K</span>
               </div>
             </div>
+            {imageProvider === "mflux" && (
+              <div className="mt-5">
+                <p className="mb-2 text-[11px] font-bold uppercase tracking-[0.18em] text-stone-700">Recommended setup</p>
+                <div className="grid grid-cols-2 gap-1.5">
+                  {mfluxRecommendedSetups.map((setup) => {
+                    const selected =
+                      mfluxResolution === setup.resolution &&
+                      mfluxSteps === setup.steps &&
+                      mfluxQuantization === setup.quantization &&
+                      mfluxSeed === "" &&
+                      mfluxLowRam === setup.lowRam &&
+                      mfluxVaeTiling === setup.vaeTiling &&
+                      mfluxVaeTileSize === setup.vaeTileSize &&
+                      mfluxGuidance === setup.guidance &&
+                      mfluxImageStrength === setup.imageStrength;
+                    return (
+                      <button
+                        aria-pressed={selected}
+                        className={`min-h-14 border px-3 py-2 text-left transition ${selected ? "border-black bg-black text-[#d9ff72]" : "border-black/15 bg-[#faf9f3] hover:border-black/50"}`}
+                        key={setup.id}
+                        onClick={() => applyMfluxSetup(setup)}
+                        type="button"
+                      >
+                        <span className="block text-[10px] font-bold uppercase tracking-[0.12em]">{setup.label}</span>
+                        <span className={`mt-1 block text-[10px] ${selected ? "text-white/65" : "text-stone-500"}`}>{setup.note}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
             <div className="mt-6">
-              <p className="mb-2 text-[11px] font-bold uppercase tracking-[0.18em] text-stone-700">Model</p>
-              <p className="flex h-12 items-center border border-black/15 bg-[#faf9f3] px-3 text-sm text-stone-700">
-                {MUSE_IMAGE_MODEL.name}
-              </p>
-              <p className="mt-2 font-mono text-[10px] text-stone-600">
-                OpenRouter price: {MUSE_IMAGE_MODEL.price}
-              </p>
+              {imageProvider === "mflux" ? (
+                <>
+                  <FieldLabel htmlFor="mflux-model">Model</FieldLabel>
+                  <select
+                    className="h-12 w-full border border-black/15 bg-[#faf9f3] px-3 text-sm outline-none transition focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
+                    id="mflux-model"
+                    onChange={(event) => {
+                      const model = getMfluxImageModel(event.target.value);
+                      const setup = MFLUX_IMAGE_RECOMMENDED_SETUPS.find((candidate) => (candidate.models as readonly string[]).includes(event.target.value));
+                      if (!model || !setup) return;
+                      setMfluxModel(model.id);
+                      applyMfluxSetup(setup);
+                    }}
+                    value={selectedMfluxModel.id}
+                  >
+                    {MFLUX_IMAGE_MODELS.map((model) => (
+                      <option disabled={!appConfig?.localMflux.models.includes(model.id)} key={model.id} value={model.id}>{model.name}</option>
+                    ))}
+                  </select>
+                </>
+              ) : (
+                <>
+                  <p className="mb-2 text-[11px] font-bold uppercase tracking-[0.18em] text-stone-700">Model</p>
+                  <p className="flex h-12 items-center border border-black/15 bg-[#faf9f3] px-3 text-sm text-stone-700">{currentImageModel.name}</p>
+                </>
+              )}
+              {imageProvider === "openrouter" && (
+                <p className="mt-2 font-mono text-[10px] text-stone-600">OpenRouter price: {MUSE_IMAGE_MODEL.price}</p>
+              )}
               <p className="mt-2 text-[11px] leading-4 text-stone-500">
-                The reference is sent through OpenRouter's documented input_references field.
+                {imageProvider === "openrouter"
+                  ? "The reference is sent through OpenRouter's documented input_references field."
+                  : `MFLUX uses ${mfluxSteps} steps and ${mfluxQuantization === null ? "no on-load quantization" : `${mfluxQuantization}-bit quantization`}.`}
               </p>
             </div>
+            {imageProvider === "mflux" && (
+              <div className="mt-6 grid gap-5 sm:grid-cols-[0.8fr_1.2fr]">
+                <div>
+                  <FieldLabel htmlFor="mflux-resolution">Resolution</FieldLabel>
+                  <select
+                    className="h-12 w-full border border-black/15 bg-[#faf9f3] px-3 text-sm outline-none transition focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
+                    id="mflux-resolution"
+                    onChange={(event) => {
+                      const resolution = mfluxResolutionOptions.find((option) => option.label === event.target.value);
+                      if (resolution) setMfluxResolution(resolution.id);
+                    }}
+                    value={selectedMfluxResolution.label}
+                  >
+                    {mfluxResolutionOptions.map((resolution) => (
+                      <option key={resolution.label} value={resolution.label}>{resolution.label}</option>
+                    ))}
+                  </select>
+                </div>
+                <fieldset>
+                  <legend className="mb-2 text-[11px] font-bold uppercase tracking-[0.18em] text-stone-700">Aspect ratio</legend>
+                  <div className="grid grid-cols-4 gap-1.5">
+                    {mfluxAspectRatioOptions.map((option) => {
+                      const resolution = MFLUX_IMAGE_RESOLUTIONS.find((candidate) =>
+                        candidate.label === selectedMfluxResolution.label && candidate.aspectRatio === option.aspectRatio);
+                      const tooltipId = `mflux-${selectedMfluxResolution.label}-${option.aspectRatio.replace(":", "-")}-unsupported`;
+                      return (
+                        <div className="group relative" key={option.aspectRatio}>
+                          <button
+                            aria-describedby={resolution ? undefined : tooltipId}
+                            aria-disabled={!resolution}
+                            aria-pressed={selectedMfluxResolution.id === resolution?.id}
+                            className={`h-12 w-full border text-xs font-bold transition ${selectedMfluxResolution.id === resolution?.id ? "border-black bg-black text-[#d9ff72]" : resolution ? "border-black/15 bg-[#faf9f3] hover:border-black/50" : "cursor-not-allowed border-black/10 bg-black/5 text-stone-400"}`}
+                            onClick={() => { if (resolution) setMfluxResolution(resolution.id); }}
+                            type="button"
+                          >
+                            {option.aspectRatio}
+                          </button>
+                          {!resolution && (
+                            <span
+                              className="pointer-events-none absolute bottom-full left-1/2 z-20 mb-2 hidden w-max max-w-44 -translate-x-1/2 bg-black px-2 py-1.5 text-center text-[9px] leading-3 text-white group-focus-within:block group-hover:block"
+                              id={tooltipId}
+                              role="tooltip"
+                            >
+                              {option.aspectRatio} is unavailable at {selectedMfluxResolution.label}
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </fieldset>
+              </div>
+            )}
             <div className="mt-6 border border-black/12 bg-[#e7e5dc] p-4 sm:p-5">
               <div className="mb-4 flex items-start gap-3">
                 <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center bg-white/70"><Icon name="image" /></div>
                 <div>
                   <h3 className="text-xs font-bold uppercase tracking-[0.12em]">Reference image</h3>
                   <p className="mt-1 text-[11px] leading-4 text-stone-500">
-                    Add one optional PNG, JPEG, or WebP image up to 10 MB.
+                    {imageProvider === "mflux" && selectedMfluxModel.requiresReference
+                      ? "Qwen Image Edit requires one PNG, JPEG, or WebP image up to 10 MB."
+                      : "Add one optional PNG, JPEG, or WebP image up to 10 MB."}
                   </p>
                 </div>
               </div>
-              <FieldLabel htmlFor="image-reference" optional>Image file</FieldLabel>
+              <FieldLabel htmlFor="image-reference" optional={!(imageProvider === "mflux" && selectedMfluxModel.requiresReference)}>Image file</FieldLabel>
               <input
                 accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp"
                 className="h-11 w-full cursor-pointer text-[0] outline-none file:h-11 file:w-full file:cursor-pointer file:border file:border-black/15 file:bg-[#faf9f3] file:px-3 file:text-[10px] file:font-bold file:uppercase file:tracking-[0.12em] hover:file:border-black focus-visible:ring-2 focus-visible:ring-black"
                 id="image-reference"
                 onChange={(event) => void selectImageReference(event)}
+                aria-required={imageProvider === "mflux" && selectedMfluxModel.requiresReference}
                 type="file"
               />
               <p aria-live="polite" className="sr-only" role="status">
@@ -1396,22 +1710,176 @@ export default function App() {
                 </div>
               )}
             </div>
+            {imageProvider === "mflux" && (
+              <>
+                <p aria-live="polite" className="sr-only" role="status">{mfluxAdvancedStatus}</p>
+                <details className="group mt-6 border border-black/12 bg-[#e7e5dc]">
+                  <summary className="flex cursor-pointer list-none items-center justify-between px-4 py-4 text-xs font-bold uppercase tracking-[0.12em] hover:bg-white/30 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-black [&::-webkit-details-marker]:hidden">
+                    Advanced
+                    <span className="flex items-center gap-2 font-mono text-[9px] font-normal text-stone-500">
+                      Steps, quantization, VAE, memory
+                      <Icon name="arrow" className="size-3 transition group-open:rotate-90" />
+                    </span>
+                  </summary>
+                  <div className="border-t border-black/10 p-4 sm:p-5">
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <FieldLabel htmlFor="mflux-steps">Steps</FieldLabel>
+                        <select
+                          className="h-12 w-full border border-black/15 bg-[#faf9f3] px-3 text-sm outline-none transition focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
+                          id="mflux-steps"
+                          onChange={(event) => setMfluxSteps(Number(event.target.value))}
+                          value={mfluxSteps}
+                        >
+                          {selectedMfluxModel.steps.map((steps) => <option key={steps} value={steps}>{steps}</option>)}
+                        </select>
+                        <p className="mt-1.5 text-[10px] leading-4 text-stone-500">{selectedMfluxModel.id === "qwen-image-edit" ? "Twenty is the MFLUX default." : "Four is recommended."}</p>
+                      </div>
+                      <div>
+                        <FieldLabel htmlFor="mflux-quantization">Quantization</FieldLabel>
+                        <select
+                          className="h-12 w-full border border-black/15 bg-[#faf9f3] px-3 text-sm outline-none transition focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
+                          id="mflux-quantization"
+                          onChange={(event) => setMfluxQuantization(event.target.value === "off" ? null : Number(event.target.value))}
+                          value={mfluxQuantization ?? "off"}
+                        >
+                          {MFLUX_IMAGE_QUANTIZATIONS.map((quantization) => <option key={quantization ?? "off"} value={quantization ?? "off"}>{quantization === null ? "Off" : `${quantization}-bit`}</option>)}
+                        </select>
+                        <p className="mt-1.5 text-[10px] leading-4 text-stone-500">{selectedMfluxModel.id === "qwen-image-edit" ? "Six-bit or lower can noticeably degrade edits." : "Lower bits use less memory."}</p>
+                      </div>
+                    </div>
+
+                    {selectedMfluxModel.id === "qwen-image-edit" && (
+                      <div className="mt-6">
+                        <FieldLabel htmlFor="mflux-guidance">Guidance</FieldLabel>
+                        <input
+                          className="h-12 w-full border border-black/15 bg-[#faf9f3] px-3 font-mono text-sm outline-none transition focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
+                          id="mflux-guidance"
+                          max={20}
+                          min={0}
+                          onChange={(event) => setMfluxGuidance(Number(event.target.value))}
+                          step={0.1}
+                          type="number"
+                          value={mfluxGuidance}
+                        />
+                        <p className="mt-1.5 text-[10px] leading-4 text-stone-500">Controls how strongly the result follows the edit instruction; higher values push harder toward the prompt. 2.5 is the MFLUX default.</p>
+                      </div>
+                    )}
+
+                    <div className="mt-6 grid gap-5 sm:grid-cols-2">
+                      <label className={`flex items-center justify-between border-y border-black/10 py-4 sm:border-t-0 sm:pt-0 ${mfluxLowRam ? "cursor-not-allowed" : "cursor-pointer"}`}>
+                        <span>
+                          <span className="block text-xs font-bold uppercase tracking-[0.12em]">VAE tiling</span>
+                          <span className="mt-1 block text-[11px] text-stone-500">Use smaller tiles to reduce peak memory.</span>
+                        </span>
+                        <span className={`relative h-7 w-12 shrink-0 rounded-full transition has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-black has-[:focus-visible]:ring-offset-2 ${mfluxVaeTilingEnabled ? "bg-black" : "bg-stone-300"}`}>
+                          <input
+                            checked={mfluxVaeTilingEnabled}
+                            className="sr-only"
+                            disabled={mfluxLowRam}
+                            onChange={(event) => setMfluxVaeTiling(event.target.checked)}
+                            type="checkbox"
+                          />
+                          <span className={`absolute top-1 size-5 rounded-full transition ${mfluxVaeTilingEnabled ? "left-6 bg-[#d9ff72]" : "left-1 bg-white"}`} />
+                        </span>
+                      </label>
+                      <div>
+                        <FieldLabel htmlFor="mflux-vae-tile-size">VAE tile size</FieldLabel>
+                        <select
+                          className="h-12 w-full border border-black/15 bg-[#faf9f3] px-3 text-sm outline-none transition focus:border-black focus:ring-2 focus:ring-[#d9ff72] disabled:cursor-not-allowed disabled:opacity-40"
+                          disabled={!mfluxVaeTilingEnabled}
+                          id="mflux-vae-tile-size"
+                          onChange={(event) => setMfluxVaeTileSize(Number(event.target.value))}
+                          value={mfluxVaeTileSize}
+                        >
+                          {MFLUX_VAE_TILE_SIZES.map((size) => <option key={size} value={size}>{size}px</option>)}
+                        </select>
+                      </div>
+                      <p className="text-[10px] leading-4 text-stone-500 sm:col-span-2">
+                        {selectedMfluxModel.id === "qwen-image-edit"
+                          ? "VAE tiling reduces peak memory during final decoding."
+                          : "MFLUX 0.19.1 applies VAE tiling to reference encoding, not final decoding."}
+                      </p>
+                    </div>
+
+                    <div className="mt-6 grid gap-5 sm:grid-cols-2">
+                      <div>
+                        <FieldLabel htmlFor="mflux-seed" optional>Seed / variation</FieldLabel>
+                        <input
+                          className="h-12 w-full border border-black/15 bg-[#faf9f3] px-3 font-mono text-sm outline-none transition focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
+                          id="mflux-seed"
+                          max={4_294_967_295}
+                          min={0}
+                          onChange={(event) => setMfluxSeed(event.target.value)}
+                          placeholder="Random"
+                          type="number"
+                          value={mfluxSeed}
+                        />
+                        <p className="mt-1.5 text-[10px] leading-4 text-stone-500">Leave empty for a time-based seed.</p>
+                      </div>
+
+                      <label className="flex cursor-pointer items-center justify-between border-y border-black/10 py-4 sm:border-t-0 sm:pt-0">
+                        <span>
+                          <span className="block text-xs font-bold uppercase tracking-[0.12em]">Low RAM</span>
+                          <span className="mt-1 block text-[11px] text-stone-500">Reduce peak memory use and enable VAE tiling.</span>
+                        </span>
+                        <span className={`relative h-7 w-12 shrink-0 rounded-full transition has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-black has-[:focus-visible]:ring-offset-2 ${mfluxLowRam ? "bg-black" : "bg-stone-300"}`}>
+                          <input
+                            checked={mfluxLowRam}
+                            className="sr-only"
+                            onChange={(event) => setMfluxLowRam(event.target.checked)}
+                            type="checkbox"
+                          />
+                          <span className={`absolute top-1 size-5 rounded-full transition ${mfluxLowRam ? "left-6 bg-[#d9ff72]" : "left-1 bg-white"}`} />
+                        </span>
+                      </label>
+                    </div>
+
+                    {imageReference && selectedMfluxModel.supportsImageStrength && (
+                      <div className="mt-6">
+                        <div className="mb-2 flex items-center justify-between gap-3">
+                          <label className="text-[11px] font-bold uppercase tracking-[0.18em] text-stone-700" htmlFor="mflux-image-strength">Reference strength</label>
+                          <output className="font-mono text-xs text-stone-600" htmlFor="mflux-image-strength">{mfluxImageStrength.toFixed(1)}</output>
+                        </div>
+                        <input
+                          className="w-full accent-black"
+                          id="mflux-image-strength"
+                          max={1}
+                          min={0}
+                          onChange={(event) => setMfluxImageStrength(Number(event.target.value))}
+                          step={0.1}
+                          type="range"
+                          value={mfluxImageStrength}
+                        />
+                        <p className="mt-1.5 text-[10px] leading-4 text-stone-500">Higher values preserve more of the reference image.</p>
+                      </div>
+                    )}
+                  </div>
+                </details>
+              </>
+            )}
           </fieldset>
           ) : (
           <fieldset disabled={currentSubmitting || currentVideoLocked || uploadingReference !== null || ((clearingWorkspace || localCleanupFailed) && form.provider === "local")}>
             {form.provider === "local" && (
-              <div className="mb-7 border border-black/12 bg-[#e7e5dc] p-4 sm:p-5">
-                <div className="flex items-start gap-3">
-                  <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center bg-[#d9ff72] text-black"><Icon name="spark" /></div>
-                  <div>
-                    <h3 className="text-xs font-bold uppercase tracking-[0.12em]">Local engine</h3>
-                    <p className="mt-1 text-[11px] leading-4 text-stone-500">
-                      {appConfig?.localH3.configured
-                        ? "h3.c is configured. Local jobs run one at a time and include native audio."
-                        : "Set H3_BINARY and H3_MODEL_DIR on the backend. The h3.c binary, model snapshot, and FFmpeg are required."}
-                    </p>
-                  </div>
+              <div className="mb-5 border border-black/12 bg-[#e7e5dc] px-3 py-2.5 sm:px-4">
+                <div className="flex items-center gap-3">
+                  <div className="flex size-7 shrink-0 items-center justify-center bg-[#d9ff72] text-black"><Icon name="spark" /></div>
+                  <h3 className="flex-1 text-xs font-bold uppercase tracking-[0.12em]">Local engine</h3>
+                  <a
+                    className="border border-black/20 px-2.5 py-1 text-[9px] font-bold uppercase tracking-[0.12em] transition hover:border-black hover:bg-black hover:text-[#d9ff72]"
+                    href="https://github.com/SimaxLabs/motio#local-generation-with-h3c"
+                    rel="noreferrer"
+                    target="_blank"
+                  >
+                    Info
+                  </a>
                 </div>
+                {!appConfig?.localH3.configured && (
+                  <p className="mt-2 border-t border-black/10 pt-2 text-[11px] leading-4 text-stone-500">
+                    Set H3_BINARY and H3_MODEL_DIR on the backend. The h3.c binary, model snapshot, and FFmpeg are required.
+                  </p>
+                )}
               </div>
             )}
             <div>
@@ -1500,20 +1968,6 @@ export default function App() {
               </p>
             </div>
             <div>
-              <FieldLabel htmlFor="resolution">Resolution</FieldLabel>
-              <select
-                className="h-12 w-full border border-black/15 bg-[#faf9f3] px-3 text-sm outline-none transition focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
-                id="resolution"
-                onChange={(event) => setForm((current) => ({ ...current, resolution: event.target.value }))}
-                value={form.resolution}
-              >
-                {selectedModel.resolutions.map((resolution) => <option key={resolution} value={resolution}>{resolution}</option>)}
-              </select>
-            </div>
-          </div>
-
-          <div className="mt-6 grid gap-5 sm:grid-cols-[0.7fr_1.3fr]">
-            <div>
               <FieldLabel htmlFor="duration">Duration</FieldLabel>
               <select
                 className="h-12 w-full border border-black/15 bg-[#faf9f3] px-3 text-sm outline-none transition focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
@@ -1522,6 +1976,20 @@ export default function App() {
                 value={form.duration}
               >
                 {selectedModel.durations.map((duration) => <option key={duration} value={duration}>{duration} seconds</option>)}
+              </select>
+            </div>
+          </div>
+
+          <div className="mt-6 grid gap-5 sm:grid-cols-[0.7fr_1.3fr]">
+            <div>
+              <FieldLabel htmlFor="resolution">Resolution</FieldLabel>
+              <select
+                className="h-12 w-full border border-black/15 bg-[#faf9f3] px-3 text-sm outline-none transition focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
+                id="resolution"
+                onChange={(event) => setForm((current) => ({ ...current, resolution: event.target.value }))}
+                value={form.resolution}
+              >
+                {selectedModel.resolutions.map((resolution) => <option key={resolution} value={resolution}>{resolution}</option>)}
               </select>
             </div>
             <fieldset>
@@ -1603,6 +2071,22 @@ export default function App() {
                   <p className="flex h-12 items-center border border-black/15 bg-[#faf9f3] px-3 text-sm text-stone-700">MiniMax H3</p>
                 </div>
                 <div>
+                  <FieldLabel htmlFor="local-duration">Duration</FieldLabel>
+                  <select
+                    className="h-12 w-full border border-black/15 bg-[#faf9f3] px-3 text-sm outline-none transition focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
+                    id="local-duration"
+                    onChange={(event) => setForm((current) => ({ ...current, localFrames: Number(event.target.value) }))}
+                    value={form.localFrames}
+                  >
+                    {LOCAL_H3_DURATIONS.map((duration) => (
+                      <option key={duration.frames} value={duration.frames}>{duration.label} / {duration.frames} frames</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="mt-6 grid gap-5 sm:grid-cols-[0.7fr_1.3fr]">
+                <div>
                   <FieldLabel htmlFor="local-resolution">Resolution</FieldLabel>
                   <select
                     className="h-12 w-full border border-black/15 bg-[#faf9f3] px-3 text-sm outline-none transition focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
@@ -1615,22 +2099,6 @@ export default function App() {
                   >
                     {localResolutionOptions.map((resolution) => (
                       <option key={resolution.label} value={resolution.label}>{resolution.label}</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <div className="mt-6 grid gap-5 sm:grid-cols-[0.7fr_1.3fr]">
-                <div>
-                  <FieldLabel htmlFor="local-duration">Duration</FieldLabel>
-                  <select
-                    className="h-12 w-full border border-black/15 bg-[#faf9f3] px-3 text-sm outline-none transition focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
-                    id="local-duration"
-                    onChange={(event) => setForm((current) => ({ ...current, localFrames: Number(event.target.value) }))}
-                    value={form.localFrames}
-                  >
-                    {LOCAL_H3_DURATIONS.map((duration) => (
-                      <option key={duration.frames} value={duration.frames}>{duration.label} / {duration.frames} frames</option>
                     ))}
                   </select>
                 </div>
@@ -1870,9 +2338,9 @@ export default function App() {
           </fieldset>
           )}
 
-          {(submissionUncertain || error) && (
+          {(currentSubmissionUncertain || error) && (
             <div className="mt-5 border-l-4 border-[#e44d38] bg-[#f9dfd9] px-4 py-3 text-sm leading-5 text-[#712519]" role="alert">
-              {submissionUncertain ? uncertainSubmissionMessage : error}
+              {currentSubmissionUncertain ? uncertainSubmissionMessage : error}
             </div>
           )}
 
@@ -1882,10 +2350,10 @@ export default function App() {
               disabled={
                 currentSubmitting ||
                 readingImageReference ||
-                submissionUncertain ||
+                currentSubmissionUncertain ||
                 ((clearingWorkspace || localCleanupFailed) && workflow === "video" && form.provider === "local") ||
                 (workflow === "video" && (currentVideoLocked || uploadingReference !== null || !form.prompt.trim())) ||
-                (workflow === "image" && !imagePrompt.trim())
+                (workflow === "image" && (!imagePrompt.trim() || (imageProvider === "mflux" && (!selectedMfluxModelAvailable || (selectedMfluxModel.requiresReference && !imageReference)))))
               }
               type="submit"
             >
@@ -1893,14 +2361,14 @@ export default function App() {
                 {currentSubmitting
                   ? "Submitting..."
                   : workflow === "image"
-                    ? "Text to image"
+                    ? imageProvider === "mflux" ? "Generate locally" : "Text to image"
                     : currentVideoUnknown
                       ? "Submission status unknown"
                       : currentVideoActive
                       ? "Generation active"
                       : form.provider === "local"
                         ? "Generate locally"
-                        : submissionUncertain
+                        : currentSubmissionUncertain
                           ? "Submission status unknown"
                           : "Generate video"}
               </span>
@@ -1912,7 +2380,7 @@ export default function App() {
               onClick={clear}
               type="button"
             >
-              {submissionUncertain ? "Unlock retry" : "Clear"}
+              {hasUnknownSubmission ? "Unlock retry" : "Clear"}
             </button>
           </div>
         </form>
@@ -1924,7 +2392,7 @@ export default function App() {
             <div>
               <p className="font-mono text-[9px] uppercase tracking-[0.2em] text-white/60">Output monitor</p>
               <h2 className="mt-1 font-display text-lg uppercase">
-                {imageTaskStatus ? MUSE_IMAGE_MODEL.name : "No active reel"}
+                {imageTaskStatus ? currentImageModel.name : "No active reel"}
               </h2>
             </div>
             {imageTaskStatus && (
@@ -1938,13 +2406,56 @@ export default function App() {
 
           <div className="flex flex-1 items-center p-5 sm:p-8">
             <div className="relative flex min-h-72 w-full items-center justify-center overflow-hidden bg-[#171917]">
-              {imageSubmitting ? (
+              {currentSubmitting ? (
                 <div className="relative flex min-h-96 w-full items-center justify-center overflow-hidden bg-[#111310]">
                   <div className="absolute inset-0 preview-grid opacity-35" />
-                  <div className="relative text-center">
+                  <div className="relative w-full max-w-lg px-6 text-center">
                     <div className="mx-auto mb-5 size-12 animate-spin rounded-full border border-white/15 border-t-[#d9ff72]" />
-                    <p className="font-display text-2xl uppercase text-white">Rendering first frame</p>
-                    <p className="mt-2 font-mono text-[10px] uppercase tracking-[0.2em] text-white/60">Muse is composing the image</p>
+                    <p className="font-display text-2xl uppercase text-white" aria-live="polite">
+                      {imageProvider === "mflux"
+                        ? mfluxProgress?.phase === "decoding"
+                          ? "Decoding image"
+                          : mfluxProgress?.phase === "generating"
+                            ? "Generating image"
+                            : "Loading model"
+                        : "Rendering first frame"}
+                    </p>
+                    <p className="mt-2 font-mono text-[10px] uppercase tracking-[0.2em] text-white/60">
+                      {imageProvider === "mflux" ? "MFLUX is composing the image" : "Muse is composing the image"}
+                    </p>
+                    {imageProvider === "mflux" && (
+                      <div className="mt-8 border border-white/10 bg-black/20 p-4 text-left">
+                        <div
+                          aria-label="MFLUX generation progress"
+                          aria-valuemax={100}
+                          aria-valuemin={0}
+                          aria-valuenow={mfluxProgress?.percent ?? 0}
+                          className="h-1.5 overflow-hidden bg-white/10"
+                          role="progressbar"
+                        >
+                          <div className="h-full bg-[#d9ff72] transition-[width]" style={{ width: `${mfluxProgress?.percent ?? 0}%` }} />
+                        </div>
+                        <div className="mt-4 grid grid-cols-3 gap-3">
+                          <div>
+                            <p className="font-mono text-[8px] uppercase tracking-[0.16em] text-white/45">Progress</p>
+                            <p className="mt-1 font-mono text-xs text-white">{mfluxProgress?.step ?? 0} / {mfluxProgress?.total ?? mfluxSteps}</p>
+                          </div>
+                          <div>
+                            <p className="font-mono text-[8px] uppercase tracking-[0.16em] text-white/45">Elapsed</p>
+                            <p className="mt-1 font-mono text-xs text-white">{formatSeconds(mfluxElapsedSeconds)}</p>
+                          </div>
+                          <div>
+                            <p className="font-mono text-[8px] uppercase tracking-[0.16em] text-white/45">Step ETA</p>
+                            <p className="mt-1 font-mono text-xs text-white">{formatSeconds(mfluxProgress?.etaSeconds)}</p>
+                          </div>
+                        </div>
+                        <p className="mt-4 font-mono text-[9px] leading-4 text-white/50">
+                          {mfluxProgress?.secondsPerStep
+                            ? `${mfluxProgress.secondsPerStep.toFixed(1)} seconds per step. ETA covers inference; final decoding may add time.`
+                            : "Timing appears after the first inference step."}
+                        </p>
+                      </div>
+                    )}
                   </div>
                 </div>
               ) : imageSource ? (
@@ -1962,18 +2473,18 @@ export default function App() {
           </div>
 
           <div className="border-t border-white/10 px-5 py-5 sm:px-8">
-            {imageResult && imageSource ? (
+            {currentImageResult && imageSource ? (
               <>
                 <a
                   className="flex h-12 w-full items-center justify-center gap-2 bg-[#d9ff72] text-xs font-bold uppercase tracking-[0.12em] text-black transition hover:bg-white"
-                  download={`muse-first-frame.${imageExtension}`}
+                  download={`${imageProvider === "mflux" ? "mflux" : "muse"}-image.${imageExtension}`}
                   href={imageSource}
                 >
                   <Icon name="download" /> Download first frame
                 </a>
-                {typeof imageResult.cost === "number" && (
+                {typeof currentImageResult.cost === "number" && (
                   <p className="mt-3 text-right font-mono text-[9px] uppercase tracking-[0.15em] text-white/60">
-                    OpenRouter cost ${imageResult.cost.toFixed(4)}
+                    OpenRouter cost ${currentImageResult.cost.toFixed(4)}
                   </p>
                 )}
               </>

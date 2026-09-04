@@ -5,3 +5,13 @@ export interface ImageGenerationResponse {
   mediaType: ImageMediaType;
   cost?: number;
 }
+
+export interface LocalMfluxProgress {
+  phase: "loading" | "generating" | "decoding";
+  step: number;
+  total: number;
+  percent: number;
+  stepElapsedSeconds?: number;
+  etaSeconds?: number;
+  secondsPerStep?: number;
+}

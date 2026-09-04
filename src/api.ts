@@ -1,9 +1,9 @@
 import type { LocalH3FrameFitId } from "../shared/localH3";
 import type { VideoStatusResponse as VideoJob } from "../shared/videoTypes";
-import type { ImageGenerationResponse } from "../shared/imageTypes";
+import type { ImageGenerationResponse, LocalMfluxProgress } from "../shared/imageTypes";
 
 export type { GenerationStatus, VideoStatusResponse as VideoJob } from "../shared/videoTypes";
-export type { ImageGenerationResponse } from "../shared/imageTypes";
+export type { ImageGenerationResponse, LocalMfluxProgress } from "../shared/imageTypes";
 
 export interface OpenRouterGenerateVideoPayload {
   provider: "openrouter";
@@ -44,6 +44,11 @@ export interface AppConfig {
   localH3: {
     supported: boolean;
     configured: boolean;
+  };
+  localMflux: {
+    supported: boolean;
+    configured: boolean;
+    models: string[];
   };
 }
 
@@ -131,10 +136,30 @@ export function generateVideo(
 }
 
 export function generateImage(
-  payload: { prompt: string; model: string; inputReference?: string },
+  payload:
+    | { provider: "openrouter"; prompt: string; model: string; inputReference?: string }
+    | {
+        provider: "mflux";
+        prompt: string;
+        model: string;
+        resolution: string;
+        steps: number;
+        quantization: number | null;
+        seed?: number;
+        lowRam: boolean;
+        vaeTiling: boolean;
+        vaeTileSize: number;
+        guidance?: number;
+        imageStrength: number;
+        inputReference?: string;
+      },
   sessionApiKey?: string,
   signal?: AbortSignal,
+  onMfluxProgress?: (progress: LocalMfluxProgress) => void,
 ): Promise<ImageGenerationResponse> {
+  if (payload.provider === "mflux") {
+    return streamMfluxImage(payload, signal, onMfluxProgress);
+  }
   return request<ImageGenerationResponse>("/api/image/generate", {
     method: "POST",
     headers: {
@@ -144,6 +169,75 @@ export function generateImage(
     body: JSON.stringify(payload),
     signal,
   });
+}
+
+async function streamMfluxImage(
+  payload: Extract<Parameters<typeof generateImage>[0], { provider: "mflux" }>,
+  signal?: AbortSignal,
+  onProgress?: (progress: LocalMfluxProgress) => void,
+): Promise<ImageGenerationResponse> {
+  let response: Response;
+  try {
+    response = await fetch("/api/image/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal,
+    });
+  } catch {
+    throw new ApiError("Could not reach the local API. Make sure the backend is running.", 0, true, undefined, "local_network_error");
+  }
+
+  if (!response.ok) {
+    let body: ApiErrorBody;
+    try {
+      body = await response.json() as ApiErrorBody;
+    } catch {
+      throw new ApiError("The local API returned an unreadable response.", response.status, true, undefined, "invalid_local_response");
+    }
+    throw new ApiError(
+      body.error?.message || `The request failed with status ${response.status}.`,
+      response.status,
+      body.error?.retryable ?? response.status >= 500,
+      undefined,
+      body.error?.type,
+    );
+  }
+  if (!response.body) throw new ApiError("The local API returned an unreadable response.", response.status, true, undefined, "invalid_local_response");
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let result: ImageGenerationResponse | undefined;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      buffer += decoder.decode(value, { stream: !done });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      if (done && buffer) lines.push(buffer);
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        let event: { type?: string; progress?: LocalMfluxProgress; result?: ImageGenerationResponse; error?: { status: number; type: string; message: string; retryable: boolean } };
+        try {
+          event = JSON.parse(line);
+        } catch {
+          throw new ApiError("The local API returned an unreadable response.", response.status, true, undefined, "invalid_local_response");
+        }
+        if (event.type === "progress" && event.progress) onProgress?.(event.progress);
+        else if (event.type === "result" && event.result) result = event.result;
+        else if (event.type === "error" && event.error) {
+          throw new ApiError(event.error.message, event.error.status, event.error.retryable, undefined, event.error.type);
+        }
+      }
+      if (done) break;
+    }
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
+    throw new ApiError("The connection to the local API was interrupted.", 0, true, undefined, "local_network_error");
+  }
+  if (!result) throw new ApiError("The local API returned an unreadable response.", response.status, true, undefined, "invalid_local_response");
+  return result;
 }
 
 export function getAppConfig(signal?: AbortSignal): Promise<AppConfig> {

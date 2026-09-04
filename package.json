@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "concurrently -k -n web,api -c cyan,magenta \"vite --host 127.0.0.1\" \"tsx watch --env-file-if-exists=.env server/index.ts\"",
+    "test": "tsx --test tests/*.test.ts",
     "typecheck": "tsc -p tsconfig.app.json && tsc -p tsconfig.server.json --noEmit",
     "build": "tsc -p tsconfig.app.json && tsc -p tsconfig.server.json && vite build",
     "start": "node --env-file-if-exists=.env dist-server/server/index.js"

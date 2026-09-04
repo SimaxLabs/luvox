@@ -1,6 +1,6 @@
 import {
   rasterMediaType,
-  type GenerateImageInput,
+  type OpenRouterGenerateImageInput,
   type GenerateVideoInput,
 } from "./validation.js";
 import type {
@@ -384,7 +384,7 @@ export async function generateVideo(
 }
 
 export async function generateImage(
-  input: GenerateImageInput,
+  input: OpenRouterGenerateImageInput,
   overrideApiKey?: string,
   signal?: AbortSignal,
 ): Promise<ImageGenerationResponse> {

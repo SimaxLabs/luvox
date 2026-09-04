@@ -4,13 +4,13 @@
 
 - Use Node.js `>=22.12.0` and the npm lockfile. Use `npm ci` for a clean install; use `npm install` when intentionally changing dependencies.
 - `npm run dev` starts Vite on `127.0.0.1:3000` and Express via `tsx watch` on `127.0.0.1:3001`; Vite proxies `/api` to Express.
-- Run `npm run typecheck` for focused verification. Run `npm run build` before finishing; it repeats both TypeScript checks, builds the Vite client to `dist/`, and compiles the server to `dist-server/`.
-- There are currently no test, lint, formatter, codegen, or CI commands. Do not claim those checks ran.
+- Run `npm test` for the small local-engine contract checks and `npm run typecheck` for focused verification. Run `npm run build` before finishing; it repeats both TypeScript checks, builds the Vite client to `dist/`, and compiles the server to `dist-server/`.
+- There are currently no lint, formatter, codegen, or CI commands. Do not claim those checks ran.
 - `npm start` alone does not serve the production UI. Run `npm run build`, then `NODE_ENV=production npm start` so Express serves `dist/` on port 3000.
 
 ## Architecture
 
-- `src/` is the React client; it must call only the local `/api` routes. `server/index.ts` dispatches provider-neutral routes. Keep OpenRouter HTTP/auth logic in `server/openrouter.ts` and h3.c process/queue logic in `server/localH3.ts`.
+- `src/` is the React client; it must call only the local `/api` routes. `server/index.ts` dispatches provider-neutral routes. Keep OpenRouter HTTP/auth logic in `server/openrouter.ts`, MFLUX process logic in `server/localMflux.ts`, and h3.c process/queue logic in `server/localH3.ts`.
 - `shared/videoModels.ts` is the single capability registry used by both UI controls and server validation. Add or change model options there rather than duplicating capability checks.
 - Client TypeScript uses bundler resolution, while server TypeScript uses NodeNext. Relative imports in `server/` must use emitted `.js` suffixes even though the sources are `.ts`.
 - Tailwind is v4 through `@tailwindcss/vite` and `src/styles.css`; there is intentionally no `tailwind.config.*` or PostCSS config.
@@ -43,3 +43,13 @@
 - Keep local controls preset-based through `shared/localH3.ts`; do not expose h3.c diagnostic flags directly in the UI. Local first/last-frame paths must be absolute and readable; browsed PNG, JPEG, and WebP files are copied into `H3_JOBS_DIR` and framed to the selected canvas with server-controlled FFmpeg filters, never passed to h3.c from browser-controlled paths. Reference cleanup requires a volatile server-registered ownership token and may delete only UUID-named files in the server-owned staging directory; never delete a manually entered source path.
 - Never run h3.c generation as a smoke test: it can consume substantial unified memory and time. Safe checks should use missing/invalid local configuration paths.
 - h3.c engine code is MIT, but model weights have separate territorial and hosting restrictions. Do not download, redistribute, or bundle weights with this repository.
+
+## Local MFLUX Constraints
+
+- Local MFLUX is a macOS/Apple-Silicon host feature and is unavailable in Docker. Use `MFLUX_FLUX2_BINARY` and `MFLUX_QWEN_EDIT_BINARY` only as absolute paths; otherwise Motio may discover the corresponding executables on the server process's `PATH`.
+- `server/localMflux.ts` must spawn with an argument array and `shell: false`, use server-owned temporary paths, cap output and diagnostics, and avoid passing the full server environment. Prompts use `--prompt-file` so they do not appear in process listings.
+- Keep OpenRouter image and local MFLUX image slots independent. MFLUX permits only one server-wide process, aborts it when the request closes, validates the output raster, and removes prompt, reference, and output files after every request.
+- MFLUX progress is parsed from bounded CLI output and streamed as NDJSON over the existing generation response. A broken stream is not terminal proof; keep the local ambiguity lock until Clear.
+- Qwen Image Edit requires a reference image and receives it through `--image-paths`; it does not support FLUX image strength. Motio currently supports one Qwen reference image, not the CLI's multi-image or LoRA options.
+- Never run real MFLUX generation as a smoke test: generation consumes substantial unified memory. Use the fake executable test or an MFLUX executable's `--help` only.
+- MFLUX code and model weights have separate licenses. Do not download, redistribute, or bundle either with this repository.

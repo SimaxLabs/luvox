@@ -18,6 +18,15 @@ import {
   uploadLocalReferenceImage,
 } from "./localH3.js";
 import {
+  beginLocalMfluxShutdown,
+  generateLocalMfluxImage,
+  getAvailableLocalMfluxModels,
+  isLocalMfluxConfigured,
+  isLocalMfluxSupported,
+  LocalMfluxError,
+  shutdownLocalMflux,
+} from "./localMflux.js";
+import {
   generateImage,
   generateVideo,
   getVideoContent,
@@ -108,6 +117,11 @@ app.get("/api/config", (_request, response) => {
         process.env.H3_BINARY?.trim() && process.env.H3_MODEL_DIR?.trim(),
       ),
     },
+    localMflux: {
+      supported: isLocalMfluxSupported(),
+      configured: isLocalMfluxConfigured(),
+      models: getAvailableLocalMfluxModels(),
+    },
   });
 });
 
@@ -159,12 +173,34 @@ app.post(
     response.once("close", abortUpstream);
     try {
       const input = validateGenerateImageInput(request.body);
-      const result = await generateImage(
-        input,
-        getSessionApiKey(request),
-        controller.signal,
-      );
-      response.json(result);
+      if (input.provider === "mflux") {
+        response.status(200);
+        response.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+        response.setHeader("X-Content-Type-Options", "nosniff");
+        response.flushHeaders();
+        const send = (event: unknown) => {
+          if (!response.writableEnded) response.write(`${JSON.stringify(event)}\n`);
+        };
+        try {
+          const result = await generateLocalMfluxImage(input, controller.signal, (progress) => send({ type: "progress", progress }));
+          send({ type: "result", result });
+        } catch (error) {
+          if (!controller.signal.aborted) {
+            if (!(error instanceof LocalMfluxError)) console.error(error);
+            send({
+              type: "error",
+              error: error instanceof LocalMfluxError
+                ? { status: error.status, type: error.type, message: error.message, retryable: error.retryable }
+                : { status: 500, type: "internal_error", message: "The server could not complete the request.", retryable: false },
+            });
+          }
+        } finally {
+          if (!response.writableEnded) response.end();
+        }
+        return;
+      }
+
+      response.json(await generateImage(input, getSessionApiKey(request), controller.signal));
     } catch (error) {
       if (!controller.signal.aborted) next(error);
     } finally {
@@ -387,7 +423,7 @@ app.use(
       return;
     }
 
-    if (error instanceof OpenRouterError || error instanceof LocalH3Error) {
+    if (error instanceof OpenRouterError || error instanceof LocalH3Error || error instanceof LocalMfluxError) {
       if (error instanceof OpenRouterError && error.retryAfter) {
         response.setHeader("Retry-After", error.retryAfter);
       }
@@ -471,6 +507,7 @@ function closeServer(): Promise<void> {
   if (closing) return closing;
   closing = (async () => {
     beginLocalH3Shutdown();
+    beginLocalMfluxShutdown();
     const closed = new Promise<void>((resolve) => server.close(() => resolve()));
     const closeTimeout = new Promise<void>((resolve) => {
       const timeout = setTimeout(() => {
@@ -481,6 +518,7 @@ function closeServer(): Promise<void> {
     });
     await Promise.race([closed, closeTimeout]);
     await shutdownLocalH3Storage();
+    await shutdownLocalMflux();
   })();
   return closing;
 }
