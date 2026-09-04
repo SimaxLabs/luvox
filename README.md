@@ -58,7 +58,7 @@ MFLUX_FLUX2_BINARY=/absolute/path/to/mflux-generate-flux2
 MFLUX_QWEN_EDIT_BINARY=/absolute/path/to/mflux-generate-qwen-edit
 ```
 
-Run `npm run dev`, choose **Text to image**, then select **Local MFLUX**. Motio supports FLUX.2 Klein 4B generation and Qwen Image Edit with common 1:1, 16:9, 9:16, 4:3, 3:4, 3:2, and 2:3 resolution presets. FLUX.2 uses normal text-to-image generation without a reference and its dedicated edit pipeline when one reference is supplied. Qwen requires one reference image; the MFLUX CLI's multi-image and LoRA options are not exposed.
+Run `npm run dev`, choose **Text to image**, then select **Local MFLUX**. Motio supports FLUX.2 Klein 4B generation and Qwen Image Edit with common 1:1, 16:9, 9:16, 4:3, 3:4, 3:2, and 2:3 resolution presets. FLUX.2 uses normal text-to-image generation without a reference and its dedicated edit pipeline when one reference is supplied. Uploaded references can preserve the full image with padding or crop to fill the selected output canvas. Qwen requires one reference image; the MFLUX CLI's multi-image and LoRA options are not exposed.
 
 FLUX.2 defaults to the Fast setup with 1024p / 1:1, four steps, and 4-bit quantization; Quality switches to 8-bit. Qwen defaults to 20 steps, 8-bit quantization, and guidance 2.5, with a 30-step Quality setup. Advanced controls expose each model's allowlisted steps, quantization, seed, Low RAM mode, VAE tiling at 128, 256, or 512 pixels, and Qwen guidance. Low RAM automatically enables VAE tiling.
 

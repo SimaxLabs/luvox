@@ -150,6 +150,7 @@ export function generateImage(
         vaeTiling: boolean;
         vaeTileSize: number;
         guidance?: number;
+        referenceFit?: LocalH3FrameFitId;
         inputReference?: string;
       },
   sessionApiKey?: string,

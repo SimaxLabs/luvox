@@ -19,7 +19,7 @@ export const LOCAL_H3_FRAME_FIT_IDS = ["contain", "cover"] as const;
 
 export const LOCAL_H3_FRAME_FITS = [
   { id: "contain", label: "Preserve full image", note: "Keeps every part of the image without distortion and pads the unused canvas." },
-  { id: "cover", label: "Crop to fill", note: "Fills the video without distortion by cropping image edges." },
+  { id: "cover", label: "Crop to fill", note: "Fills the output without distortion by cropping image edges." },
 ] as const;
 
 export const LOCAL_H3_QUALITY_PRESETS = [

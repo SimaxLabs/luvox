@@ -431,6 +431,7 @@ export default function App() {
   const [mfluxVaeTiling, setMfluxVaeTiling] = useState<boolean>(defaultMfluxSetup.vaeTiling);
   const [mfluxVaeTileSize, setMfluxVaeTileSize] = useState<number>(defaultMfluxSetup.vaeTileSize);
   const [mfluxGuidance, setMfluxGuidance] = useState<number>(defaultMfluxSetup.guidance);
+  const [imageReferenceFit, setImageReferenceFit] = useState<LocalH3FrameFitId>("contain");
   const [imagePrompt, setImagePrompt] = useState("");
   const [imageReference, setImageReference] = useState<{ name: string; dataUrl: string } | null>(null);
   const [readingImageReference, setReadingImageReference] = useState(false);
@@ -656,6 +657,7 @@ export default function App() {
     setMfluxVaeTiling(defaultMfluxSetup.vaeTiling);
     setMfluxVaeTileSize(defaultMfluxSetup.vaeTileSize);
     setMfluxGuidance(defaultMfluxSetup.guidance);
+    setImageReferenceFit("contain");
     setImagePrompt("");
     setImageReference(null);
     setReadingImageReference(false);
@@ -999,6 +1001,7 @@ export default function App() {
         name: file.name,
         dataUrl: `data:${mediaType};base64,${rawDataUrl.slice(rawDataUrl.indexOf(",") + 1)}`,
       });
+      setImageReferenceFit("contain");
     } catch (referenceError) {
       if (version === workspaceVersion.current) setError(messageFrom(referenceError));
     } finally {
@@ -1072,6 +1075,7 @@ export default function App() {
               vaeTiling: mfluxVaeTiling,
               vaeTileSize: mfluxVaeTileSize,
               guidance: selectedMfluxModel.id === "qwen-image-edit" ? mfluxGuidance : undefined,
+              referenceFit: imageReference ? imageReferenceFit : undefined,
               inputReference: imageReference?.dataUrl,
             }, undefined, requestController.signal, (progress) => {
               if (version === workspaceVersion.current) setMfluxProgress(progress);
@@ -1752,16 +1756,41 @@ export default function App() {
                     : ""}
               </p>
               {imageReference && (
-                <div className="mt-3 flex items-center justify-between gap-3 border-t border-black/10 pt-3">
-                  <span className="truncate text-xs text-stone-600">{imageReference.name}</span>
-                  <button
-                    className="shrink-0 text-[10px] font-bold uppercase tracking-[0.12em] text-stone-600 hover:text-black"
-                    onClick={() => setImageReference(null)}
-                    type="button"
-                  >
-                    Remove
-                  </button>
-                </div>
+                <>
+                  <div className="mt-3 flex items-center justify-between gap-3 border-t border-black/10 pt-3">
+                    <span className="truncate text-xs text-stone-600">{imageReference.name}</span>
+                    <button
+                      className="shrink-0 text-[10px] font-bold uppercase tracking-[0.12em] text-stone-600 hover:text-black"
+                      onClick={() => setImageReference(null)}
+                      type="button"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                  {imageProvider === "mflux" && (
+                    <fieldset className="mt-4 border-t border-black/10 pt-4">
+                      <legend className="mb-2 text-[11px] font-bold uppercase tracking-[0.18em] text-stone-700">Reference framing</legend>
+                      <div className="grid grid-cols-2 gap-1.5">
+                        {LOCAL_H3_FRAME_FITS.map((fit) => (
+                          <button
+                            aria-describedby={`image-reference-fit-${fit.id}-description`}
+                            aria-pressed={imageReferenceFit === fit.id}
+                            className={`min-h-11 border px-3 text-xs font-bold transition ${imageReferenceFit === fit.id ? "border-black bg-black text-[#d9ff72]" : "border-black/15 bg-[#faf9f3] hover:border-black/50"}`}
+                            key={fit.id}
+                            onClick={() => setImageReferenceFit(fit.id)}
+                            type="button"
+                          >
+                            {fit.label}
+                            <span className="sr-only" id={`image-reference-fit-${fit.id}-description`}>{fit.note}</span>
+                          </button>
+                        ))}
+                      </div>
+                      <p className="mt-2 text-[11px] leading-4 text-stone-600">
+                        {LOCAL_H3_FRAME_FITS.find((fit) => fit.id === imageReferenceFit)?.note}
+                      </p>
+                    </fieldset>
+                  )}
+                </>
               )}
             </div>
             {imageProvider === "mflux" && (

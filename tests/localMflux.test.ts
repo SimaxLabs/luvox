@@ -117,6 +117,13 @@ for (const argument of ["--model", "--prompt-file", "--steps", "--width", "--hei
 const model = process.argv[process.argv.indexOf("--model") + 1];
 if (model !== "flux2-klein-4b" && model !== "qwen-image-edit") process.exit(2);
 const steps = Number(process.argv[process.argv.indexOf("--steps") + 1]);
+const referenceIndex = process.argv.indexOf("--image-paths");
+if (referenceIndex >= 0) {
+  const referenceInfo = spawnSync("/usr/bin/sips", ["-g", "pixelWidth", "-g", "pixelHeight", process.argv[referenceIndex + 1]], { encoding: "utf8" });
+  const width = process.argv[process.argv.indexOf("--width") + 1];
+  const height = process.argv[process.argv.indexOf("--height") + 1];
+  if (referenceInfo.status !== 0 || !referenceInfo.stdout.includes("pixelWidth: " + width) || !referenceInfo.stdout.includes("pixelHeight: " + height)) process.exit(2);
+}
 process.stderr.write("  0%|          | 0/" + steps + " [00:00<?, ?it/s]\\r");
 process.stderr.write(" 50%|#####     | " + Math.floor(steps / 2) + "/" + steps + " [00:20<00:20, 2.00s/it]\\r");
 process.stderr.write("100%|##########| " + steps + "/" + steps + " [00:40<00:00, 2.00s/it]\\r");
@@ -165,6 +172,7 @@ process.exit(resizeStatus);
       lowRam: true,
       vaeTiling: false,
       vaeTileSize: 256,
+      referenceFit: "cover",
       inputReference: referenceImage,
     });
     assert.equal(result.mediaType, "image/png");
@@ -174,13 +182,14 @@ process.exit(resizeStatus);
       provider: "mflux",
       model: "qwen-image-edit",
       prompt: "edit image",
-      resolution: "1024x1024",
+      resolution: "1280x720",
       steps: 20,
       quantization: 8,
       lowRam: false,
       vaeTiling: false,
       vaeTileSize: 512,
       guidance: 2.5,
+      referenceFit: "contain",
       inputReference: referenceImage,
     }, undefined, (update) => progress.push(update));
     assert.equal(editResult.mediaType, "image/png");
@@ -199,6 +208,7 @@ process.exit(resizeStatus);
       lowRam: false,
       vaeTiling: false,
       vaeTileSize: 512,
+      referenceFit: "contain",
     }, controller.signal, (update) => {
       if (update.phase === "generating") markStarted();
     });
@@ -220,6 +230,7 @@ process.exit(resizeStatus);
         lowRam: false,
         vaeTiling: false,
         vaeTileSize: 512,
+        referenceFit: "contain",
       }),
       (error) => error instanceof LocalMfluxError && error.type === "local_mflux_output_error",
     );

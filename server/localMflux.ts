@@ -6,6 +6,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { getMfluxImageModel, getMfluxImageResolution, MFLUX_IMAGE_MODELS } from "../shared/imageModels.js";
 import type { ImageGenerationResponse, LocalMfluxProgress } from "../shared/imageTypes.js";
+import type { LocalH3FrameFitId } from "../shared/localH3.js";
 import type { LocalMfluxGenerateImageInput } from "./validation.js";
 import { rasterMediaType } from "./validation.js";
 
@@ -108,7 +109,7 @@ function signalChild(child: ChildProcess, signal: NodeJS.Signals): void {
   }
 }
 
-async function inspectRaster(file: string, label: string, expectedSize?: { width: number; height: number }): Promise<void> {
+async function inspectRaster(file: string, label: string, expectedSize?: { width: number; height: number }): Promise<{ width: number; height: number }> {
   const errorStatus = expectedSize ? 502 : 400;
   const errorType = expectedSize ? "local_mflux_output_error" : "local_mflux_image_error";
   let stdout: string;
@@ -156,6 +157,55 @@ async function inspectRaster(file: string, label: string, expectedSize?: { width
   } finally {
     await rm(probe, { force: true });
   }
+  return { width, height };
+}
+
+async function frameReferenceImage(
+  source: string,
+  directory: string,
+  target: { width: number; height: number },
+  fit: LocalH3FrameFitId,
+): Promise<string> {
+  const sourceSize = await inspectRaster(source, "The reference image");
+  const scale = fit === "cover"
+    ? Math.max(target.width / sourceSize.width, target.height / sourceSize.height)
+    : Math.min(target.width / sourceSize.width, target.height / sourceSize.height);
+  const round = fit === "cover" ? Math.ceil : Math.floor;
+  const scaledWidth = Math.max(1, round(sourceSize.width * scale));
+  const scaledHeight = Math.max(1, round(sourceSize.height * scale));
+  const output = path.join(directory, "reference-framed.png");
+  const framingArgs = fit === "cover"
+    ? ["--cropToHeightWidth", String(target.height), String(target.width)]
+    : ["--padToHeightWidth", String(target.height), String(target.width), "--padColor", "000000"];
+  try {
+    await execFileAsync(
+      "/usr/bin/sips",
+      [
+        "--resampleHeightWidth", String(scaledHeight), String(scaledWidth),
+        ...framingArgs,
+        source,
+        "--out", output,
+      ],
+      { encoding: "utf8", env: childEnvironment(), maxBuffer: 8_192, timeout: 30_000 },
+    );
+  } catch {
+    throw new LocalMfluxError(
+      "The reference image could not be framed for the selected resolution.",
+      400,
+      "local_mflux_image_error",
+      false,
+    );
+  }
+  const outputSize = await inspectRaster(output, "The framed reference image");
+  if (outputSize.width !== target.width || outputSize.height !== target.height) {
+    throw new LocalMfluxError(
+      "The reference image could not be framed for the selected resolution.",
+      400,
+      "local_mflux_image_error",
+      false,
+    );
+  }
+  return output;
 }
 
 function parseClock(value: string): number | undefined {
@@ -343,8 +393,7 @@ export async function generateLocalMfluxImage(
       const extension = header === "data:image/jpeg;base64" ? "jpg" : header === "data:image/webp;base64" ? "webp" : "png";
       const referencePath = path.join(directory, `reference.${extension}`);
       await writeFile(referencePath, Buffer.from(base64, "base64"), { mode: 0o600 });
-      await inspectRaster(referencePath, "The reference image");
-      args.push("--image-paths", referencePath);
+      args.push("--image-paths", await frameReferenceImage(referencePath, directory, resolution, input.referenceFit));
     }
 
     if (shuttingDown || signal?.aborted) {
