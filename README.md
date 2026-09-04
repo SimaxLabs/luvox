@@ -4,9 +4,11 @@
 
 **Start with an idea or a frame. Choose how it runs. Set it in motion.**
 
-Luvox is a local studio for shaping prompts, reference frames, and model-specific controls without changing tools every time the backend changes. Generate videos remotely through [OpenRouter](https://openrouter.ai/docs/guides/overview/multimodal/video-generation), create images through OpenRouter or local [MFLUX](https://github.com/mflux-community/mflux), or run [h3.c](https://github.com/antirez/h3.c) directly on a compatible Mac.
+Luvox is a local studio for shaping prompts, reference frames, and model-specific controls without changing tools every time the backend changes.
 
-The first integrations are intentionally focused. The goal is a small interface that can grow with new generation models and workflows while keeping credentials and local files behind your own server.
+Luvox is designed for non-professional users who want to turn a prompt into an image or video without managing node graphs, templates, or other complex workflow tools. The goal is a small, approachable interface that can grow with new generation models while keeping credentials and local files behind your own server.
+
+Generate videos remotely through [OpenRouter](https://openrouter.ai/docs/guides/overview/multimodal/video-generation), create images through OpenRouter or local [MFLUX](https://github.com/mflux-community/mflux), or run [h3.c](https://github.com/antirez/h3.c) directly on a compatible Mac.
 
 ## AI Development Disclosure
 
@@ -91,13 +93,9 @@ Each generation type has one slot: OpenRouter image, local MFLUX image, OpenRout
 
 Luvox uses volatile session state instead of accounts or a generation database. API responses are marked `private, no-store`, and credentials are kept out of payloads and URLs.
 
-### Hosted version
+When using OpenRouter, Luvox creates no local generation files. UI-entered keys, prompts, results, and job records stay in tab or transit memory and are not persisted by Luvox. Keys travel only in request headers, remain pinned to submitted jobs in tab memory, and disappear on workspace reset, reload, or tab close. Videos are streamed through an authenticated proxy rather than saved to disk; temporary-key media uses revocable browser `blob:` URLs. Server-key video access uses a per-job capability kept only in tab and server memory, never in a URL, and expires after 24 hours without use. A server-configured `OPENROUTER_API_KEY` never reaches the browser.
 
-The hosted version is OpenRouter-only; h3.c is unavailable and Luvox creates no local generation files. UI-entered keys, prompts, results, and job records stay in tab or transit memory and are not persisted by Luvox. Keys travel only in request headers, remain pinned to submitted jobs in tab memory, and disappear on workspace reset, reload, or tab close. Videos are streamed through an authenticated proxy rather than saved to disk; temporary-key media uses revocable browser `blob:` URLs. Server-key video access uses a per-job capability kept only in tab and server memory, never in a URL, and expires after 24 hours without use. A server-configured `OPENROUTER_API_KEY` never reaches the browser.
-
-OpenRouter, model providers, and hosting infrastructure have separate data practices. Review OpenRouter's [privacy policy](https://openrouter.ai/privacy) and [provider logging documentation](https://openrouter.ai/docs/features/privacy-and-logging). Closing Luvox does not cancel provider work already submitted.
-
-### Self-hosted local h3.c
+OpenRouter and model providers have separate data practices. Review OpenRouter's [privacy policy](https://openrouter.ai/privacy) and [provider logging documentation](https://openrouter.ai/docs/features/privacy-and-logging). Closing Luvox does not cancel provider work already submitted.
 
 Local MFLUX and h3.c run only on a compatible Mac. MFLUX uses an owner-marked private system temporary directory for each request, removes it when the request finishes or stops, and removes stale owned directories at startup after an abrupt server exit. h3.c temporarily stores app-owned jobs, outputs, and uploaded references under `.h3-jobs` or `H3_JOBS_DIR`; per-tab tokens isolate them. Luvox cleans h3.c files when a job is deleted or aborted, on Clear, reload/close cleanup, startup, graceful shutdown, or after a browser workspace misses its five-minute lease.
 
