@@ -51,16 +51,16 @@ NODE_ENV=production npm start
 
 ## Local image generation with MFLUX
 
-Install and verify [MFLUX](https://github.com/mflux-community/mflux) on a Mac with Apple Silicon. Motio automatically finds `mflux-generate-flux2` and `mflux-generate-qwen-edit` on the server process's `PATH`; set absolute paths in `.env` when either executable is not detected:
+Install and verify [MFLUX](https://github.com/mflux-community/mflux) on a Mac with Apple Silicon. Motio automatically finds `mflux-generate-flux2`, its `mflux-generate-flux2-edit` companion, and `mflux-generate-qwen-edit` on the server process's `PATH`; set absolute paths in `.env` when the primary executables are not detected:
 
 ```bash
 MFLUX_FLUX2_BINARY=/absolute/path/to/mflux-generate-flux2
 MFLUX_QWEN_EDIT_BINARY=/absolute/path/to/mflux-generate-qwen-edit
 ```
 
-Run `npm run dev`, choose **Text to image**, then select **Local MFLUX**. Motio supports FLUX.2 Klein 4B generation and Qwen Image Edit with common 1:1, 16:9, 9:16, 4:3, 3:4, 3:2, and 2:3 resolution presets. FLUX.2 accepts an optional image-to-image reference with strength control. Qwen requires one reference image and does not use image strength; the MFLUX CLI's multi-image and LoRA options are not exposed.
+Run `npm run dev`, choose **Text to image**, then select **Local MFLUX**. Motio supports FLUX.2 Klein 4B generation and Qwen Image Edit with common 1:1, 16:9, 9:16, 4:3, 3:4, 3:2, and 2:3 resolution presets. FLUX.2 uses normal text-to-image generation without a reference and its dedicated edit pipeline when one reference is supplied. Qwen requires one reference image; the MFLUX CLI's multi-image and LoRA options are not exposed.
 
-FLUX.2 defaults to the Fast setup with 1024p / 1:1, four steps, and 4-bit quantization; Quality switches to 8-bit. Qwen defaults to 20 steps, 8-bit quantization, and guidance 2.5, with a 30-step Quality setup. Advanced controls expose each model's allowlisted steps, quantization, seed, Low RAM mode, VAE tiling at 128, 256, or 512 pixels, Qwen guidance, and FLUX.2 reference strength. Low RAM automatically enables VAE tiling.
+FLUX.2 defaults to the Fast setup with 1024p / 1:1, four steps, and 4-bit quantization; Quality switches to 8-bit. Qwen defaults to 20 steps, 8-bit quantization, and guidance 2.5, with a 30-step Quality setup. Advanced controls expose each model's allowlisted steps, quantization, seed, Low RAM mode, VAE tiling at 128, 256, or 512 pixels, and Qwen guidance. Low RAM automatically enables VAE tiling.
 
 Before using a model in Motio, run its MFLUX executable successfully once in Terminal so its weights are downloaded and cached. Motio does not download or bundle weights, keeps prompts and references in a private temporary directory, allows only one MFLUX generation at a time, and removes temporary files after each request. MFLUX and model weights have separate licenses; review them before use.
 

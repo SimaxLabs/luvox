@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -20,7 +20,6 @@ test("MFLUX validation enforces shared presets and advanced ranges", () => {
     lowRam: false,
     vaeTiling: false,
     vaeTileSize: 512,
-    imageStrength: 0.4,
   }));
   assert.throws(() => validateGenerateImageInput({
     provider: "mflux",
@@ -32,7 +31,6 @@ test("MFLUX validation enforces shared presets and advanced ranges", () => {
     lowRam: false,
     vaeTiling: false,
     vaeTileSize: 512,
-    imageStrength: 0.4,
   }));
   assert.throws(() => validateGenerateImageInput({
     provider: "mflux",
@@ -44,7 +42,6 @@ test("MFLUX validation enforces shared presets and advanced ranges", () => {
     lowRam: false,
     vaeTiling: false,
     vaeTileSize: 512,
-    imageStrength: 0.4,
   }));
   assert.throws(() => validateGenerateImageInput({
     provider: "mflux",
@@ -56,7 +53,6 @@ test("MFLUX validation enforces shared presets and advanced ranges", () => {
     lowRam: false,
     vaeTiling: true,
     vaeTileSize: 1024,
-    imageStrength: 0.4,
   }));
   assert.throws(() => validateGenerateImageInput({
     provider: "mflux",
@@ -69,7 +65,6 @@ test("MFLUX validation enforces shared presets and advanced ranges", () => {
     vaeTiling: false,
     vaeTileSize: 512,
     guidance: 2.5,
-    imageStrength: 0.4,
     inputReference: referenceImage,
   }));
   assert.throws(() => validateGenerateImageInput({
@@ -82,7 +77,6 @@ test("MFLUX validation enforces shared presets and advanced ranges", () => {
     lowRam: false,
     vaeTiling: false,
     vaeTileSize: 512,
-    imageStrength: 0.4,
   }));
   assert.doesNotThrow(() => validateGenerateImageInput({
     provider: "mflux",
@@ -95,7 +89,6 @@ test("MFLUX validation enforces shared presets and advanced ranges", () => {
     vaeTiling: false,
     vaeTileSize: 512,
     guidance: 2.5,
-    imageStrength: 0.4,
     inputReference: referenceImage,
   }));
 });
@@ -105,13 +98,17 @@ test("MFLUX adapter returns and cleans a generated raster", {
 }, async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "motio-mflux-test-"));
   const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "motio-mflux-output-test-"));
-  const binary = path.join(directory, "fake-mflux");
+  const binary = path.join(directory, "mflux-generate-flux2");
+  const editDirectory = path.join(directory, "bin");
+  const editBinary = path.join(editDirectory, "mflux-generate-flux2-edit");
   const previousFlux2Binary = process.env.MFLUX_FLUX2_BINARY;
   const previousQwenEditBinary = process.env.MFLUX_QWEN_EDIT_BINARY;
   const previousTemporaryDirectory = process.env.TMPDIR;
-  await writeFile(binary, `#!/usr/bin/env node
+  const previousPath = process.env.PATH;
+  const fakeBinary = `#!/usr/bin/env node
 const { readFileSync, statSync, truncateSync, writeFileSync } = require("node:fs");
 const { spawnSync } = require("node:child_process");
+const { basename } = require("node:path");
 const output = process.argv[process.argv.indexOf("--output") + 1];
 const prompt = readFileSync(process.argv[process.argv.indexOf("--prompt-file") + 1], "utf8");
 for (const argument of ["--model", "--prompt-file", "--steps", "--width", "--height"]) {
@@ -128,10 +125,10 @@ if (prompt === "wait") {
   setInterval(() => {}, 1000);
 } else {
 if (prompt === "test image") {
-  for (const argument of ["3", "--seed", "42", "--low-ram", "--vae-tiling", "--vae-tile-size", "256", "--image-strength", "0.6"]) {
+  for (const argument of ["3", "--seed", "42", "--low-ram", "--vae-tiling", "--vae-tile-size", "256", "--image-paths"]) {
     if (!process.argv.includes(argument)) process.exit(2);
   }
-  if (process.argv.includes("--quantize")) process.exit(2);
+  if (basename(process.argv[1]) !== "mflux-generate-flux2-edit" || process.argv.includes("--quantize") || process.argv.includes("--image-strength")) process.exit(2);
 }
 if (prompt === "edit image") {
   for (const argument of ["20", "--quantize", "8", "--guidance", "2.5", "--image-paths"]) {
@@ -139,6 +136,7 @@ if (prompt === "edit image") {
   }
   if (process.argv.includes("--image-path") || process.argv.includes("--image-strength")) process.exit(2);
 }
+if ((prompt === "wait" || prompt === "invalid output") && basename(process.argv[1]) !== "mflux-generate-flux2") process.exit(2);
 const width = process.argv[process.argv.indexOf("--width") + 1];
 const height = process.argv[process.argv.indexOf("--height") + 1];
 writeFileSync(output, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"));
@@ -146,11 +144,14 @@ const resizeStatus = spawnSync("/usr/bin/sips", ["-z", height, width, output], {
 if (prompt === "invalid output") truncateSync(output, Math.floor(statSync(output).size / 2));
 process.exit(resizeStatus);
 }
-`);
-  await chmod(binary, 0o700);
+`;
+  await mkdir(editDirectory);
+  await Promise.all([writeFile(binary, fakeBinary), writeFile(editBinary, fakeBinary)]);
+  await Promise.all([chmod(binary, 0o700), chmod(editBinary, 0o700)]);
   process.env.MFLUX_FLUX2_BINARY = binary;
   process.env.MFLUX_QWEN_EDIT_BINARY = binary;
   process.env.TMPDIR = temporaryRoot;
+  process.env.PATH = `${editDirectory}${path.delimiter}${previousPath || ""}`;
 
   try {
     const result = await generateLocalMfluxImage({
@@ -164,7 +165,6 @@ process.exit(resizeStatus);
       lowRam: true,
       vaeTiling: false,
       vaeTileSize: 256,
-      imageStrength: 0.6,
       inputReference: referenceImage,
     });
     assert.equal(result.mediaType, "image/png");
@@ -181,7 +181,6 @@ process.exit(resizeStatus);
       vaeTiling: false,
       vaeTileSize: 512,
       guidance: 2.5,
-      imageStrength: 0.4,
       inputReference: referenceImage,
     }, undefined, (update) => progress.push(update));
     assert.equal(editResult.mediaType, "image/png");
@@ -200,7 +199,6 @@ process.exit(resizeStatus);
       lowRam: false,
       vaeTiling: false,
       vaeTileSize: 512,
-      imageStrength: 0.4,
     }, controller.signal, (update) => {
       if (update.phase === "generating") markStarted();
     });
@@ -222,7 +220,6 @@ process.exit(resizeStatus);
         lowRam: false,
         vaeTiling: false,
         vaeTileSize: 512,
-        imageStrength: 0.4,
       }),
       (error) => error instanceof LocalMfluxError && error.type === "local_mflux_output_error",
     );
@@ -234,6 +231,8 @@ process.exit(resizeStatus);
     else process.env.MFLUX_QWEN_EDIT_BINARY = previousQwenEditBinary;
     if (previousTemporaryDirectory === undefined) delete process.env.TMPDIR;
     else process.env.TMPDIR = previousTemporaryDirectory;
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
     await rm(directory, { recursive: true, force: true });
     await rm(temporaryRoot, { recursive: true, force: true });
   }

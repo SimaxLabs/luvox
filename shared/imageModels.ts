@@ -28,7 +28,6 @@ export const MFLUX_IMAGE_MODEL = {
   environmentVariable: "MFLUX_QWEN_EDIT_BINARY",
   steps: MFLUX_QWEN_EDIT_STEPS,
   requiresReference: true,
-  supportsImageStrength: false,
 } as const;
 
 export const MFLUX_IMAGE_MODELS = [
@@ -37,10 +36,10 @@ export const MFLUX_IMAGE_MODELS = [
     id: "flux2-klein-4b",
     name: "FLUX.2 Klein 4B",
     executable: "mflux-generate-flux2",
+    referenceExecutable: "mflux-generate-flux2-edit",
     environmentVariable: "MFLUX_FLUX2_BINARY",
     steps: MFLUX_FLUX2_STEPS,
     requiresReference: false,
-    supportsImageStrength: true,
   },
 ] as const;
 
@@ -58,7 +57,6 @@ export const MFLUX_IMAGE_RECOMMENDED_SETUPS = [
     vaeTiling: false,
     vaeTileSize: 512,
     guidance: MFLUX_QWEN_EDIT_GUIDANCE,
-    imageStrength: 0.4,
   },
   {
     id: "quality",
@@ -73,7 +71,6 @@ export const MFLUX_IMAGE_RECOMMENDED_SETUPS = [
     vaeTiling: false,
     vaeTileSize: 512,
     guidance: MFLUX_QWEN_EDIT_GUIDANCE,
-    imageStrength: 0.4,
   },
   {
     id: "fast",
@@ -88,7 +85,6 @@ export const MFLUX_IMAGE_RECOMMENDED_SETUPS = [
     vaeTiling: false,
     vaeTileSize: 512,
     guidance: MFLUX_QWEN_EDIT_GUIDANCE,
-    imageStrength: 0.4,
   },
   {
     id: "qwen-quality",
@@ -103,7 +99,6 @@ export const MFLUX_IMAGE_RECOMMENDED_SETUPS = [
     vaeTiling: false,
     vaeTileSize: 512,
     guidance: MFLUX_QWEN_EDIT_GUIDANCE,
-    imageStrength: 0.4,
   },
 ] as const;
 

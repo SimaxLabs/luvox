@@ -150,7 +150,6 @@ export function generateImage(
         vaeTiling: boolean;
         vaeTileSize: number;
         guidance?: number;
-        imageStrength: number;
         inputReference?: string;
       },
   sessionApiKey?: string,

@@ -136,7 +136,6 @@ const localMfluxGenerateImageSchema = z
     vaeTiling: z.boolean(),
     vaeTileSize: z.number().int().refine((value) => (MFLUX_VAE_TILE_SIZES as readonly number[]).includes(value), "Unsupported MFLUX VAE tile size."),
     guidance: z.number().finite().min(0).max(20).optional(),
-    imageStrength: z.number().finite().min(0).max(1),
     inputReference: imageReferenceDataUrl,
   })
   .strict();

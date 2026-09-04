@@ -431,7 +431,6 @@ export default function App() {
   const [mfluxVaeTiling, setMfluxVaeTiling] = useState<boolean>(defaultMfluxSetup.vaeTiling);
   const [mfluxVaeTileSize, setMfluxVaeTileSize] = useState<number>(defaultMfluxSetup.vaeTileSize);
   const [mfluxGuidance, setMfluxGuidance] = useState<number>(defaultMfluxSetup.guidance);
-  const [mfluxImageStrength, setMfluxImageStrength] = useState<number>(defaultMfluxSetup.imageStrength);
   const [imagePrompt, setImagePrompt] = useState("");
   const [imageReference, setImageReference] = useState<{ name: string; dataUrl: string } | null>(null);
   const [readingImageReference, setReadingImageReference] = useState(false);
@@ -537,6 +536,7 @@ export default function App() {
   const currentImageResult = imageProvider === "openrouter" ? imageResult : mfluxImageResult;
   const currentImageFailure = imageProvider === "openrouter" ? imageFailure : mfluxImageFailure;
   const currentImageModel = imageProvider === "openrouter" ? MUSE_IMAGE_MODEL : selectedMfluxModel;
+  const usesMfluxEdit = imageProvider === "mflux" && (selectedMfluxModel.requiresReference || Boolean(imageReference));
   const selectedMfluxModelAvailable = appConfig?.localMflux.models.includes(selectedMfluxModel.id) === true;
   const openRouterSubmissionStatus = openRouterSubmitting
     ? "submitting"
@@ -598,7 +598,6 @@ export default function App() {
     setMfluxVaeTiling(setup.vaeTiling);
     setMfluxVaeTileSize(setup.vaeTileSize);
     setMfluxGuidance(setup.guidance);
-    setMfluxImageStrength(setup.imageStrength);
     setMfluxAdvancedStatus(`${setup.label} setup applied.`);
   };
 
@@ -657,7 +656,6 @@ export default function App() {
     setMfluxVaeTiling(defaultMfluxSetup.vaeTiling);
     setMfluxVaeTileSize(defaultMfluxSetup.vaeTileSize);
     setMfluxGuidance(defaultMfluxSetup.guidance);
-    setMfluxImageStrength(defaultMfluxSetup.imageStrength);
     setImagePrompt("");
     setImageReference(null);
     setReadingImageReference(false);
@@ -1074,7 +1072,6 @@ export default function App() {
               vaeTiling: mfluxVaeTiling,
               vaeTileSize: mfluxVaeTileSize,
               guidance: selectedMfluxModel.id === "qwen-image-edit" ? mfluxGuidance : undefined,
-              imageStrength: mfluxImageStrength,
               inputReference: imageReference?.dataUrl,
             }, undefined, requestController.signal, (progress) => {
               if (version === workspaceVersion.current) setMfluxProgress(progress);
@@ -1588,7 +1585,7 @@ export default function App() {
               </div>
             )}
             <div>
-              <FieldLabel htmlFor="image-prompt">{imageProvider === "mflux" && selectedMfluxModel.requiresReference ? "Edit instruction" : "Image prompt"}</FieldLabel>
+              <FieldLabel htmlFor="image-prompt">{usesMfluxEdit ? "Edit instruction" : "Image prompt"}</FieldLabel>
               <div className="relative">
                 <textarea
                   autoFocus
@@ -1596,7 +1593,7 @@ export default function App() {
                   id="image-prompt"
                   maxLength={10_000}
                   onChange={(event) => setImagePrompt(event.target.value)}
-                  placeholder={imageProvider === "mflux" && selectedMfluxModel.requiresReference
+                  placeholder={usesMfluxEdit
                     ? "Replace the background with a rain-soaked night market while preserving the subject..."
                     : "The opening frame of a rain-soaked night market, cinematic lighting, reflections rippling across the pavement..."}
                   required
@@ -1618,8 +1615,7 @@ export default function App() {
                       mfluxLowRam === setup.lowRam &&
                       mfluxVaeTiling === setup.vaeTiling &&
                       mfluxVaeTileSize === setup.vaeTileSize &&
-                      mfluxGuidance === setup.guidance &&
-                      mfluxImageStrength === setup.imageStrength;
+                      mfluxGuidance === setup.guidance;
                     return (
                       <button
                         aria-pressed={selected}
@@ -1733,7 +1729,9 @@ export default function App() {
                   <p className="mt-1 text-[11px] leading-4 text-stone-500">
                     {imageProvider === "mflux" && selectedMfluxModel.requiresReference
                       ? "Qwen Image Edit requires one PNG, JPEG, or WebP image up to 10 MB."
-                      : "Add one optional PNG, JPEG, or WebP image up to 10 MB."}
+                      : selectedMfluxModel.id === "flux2-klein-4b" && imageProvider === "mflux"
+                        ? "Add one optional PNG, JPEG, or WebP image to use FLUX.2's dedicated edit mode."
+                        : "Add one optional PNG, JPEG, or WebP image up to 10 MB."}
                   </p>
                 </div>
               </div>
@@ -1891,25 +1889,6 @@ export default function App() {
                       </label>
                     </div>
 
-                    {imageReference && selectedMfluxModel.supportsImageStrength && (
-                      <div className="mt-6">
-                        <div className="mb-2 flex items-center justify-between gap-3">
-                          <label className="text-[11px] font-bold uppercase tracking-[0.18em] text-stone-700" htmlFor="mflux-image-strength">Reference strength</label>
-                          <output className="font-mono text-xs text-stone-600" htmlFor="mflux-image-strength">{mfluxImageStrength.toFixed(1)}</output>
-                        </div>
-                        <input
-                          className="w-full accent-black"
-                          id="mflux-image-strength"
-                          max={1}
-                          min={0}
-                          onChange={(event) => setMfluxImageStrength(Number(event.target.value))}
-                          step={0.1}
-                          type="range"
-                          value={mfluxImageStrength}
-                        />
-                        <p className="mt-1.5 text-[10px] leading-4 text-stone-500">Higher values preserve more of the reference image.</p>
-                      </div>
-                    )}
                   </div>
                 </details>
               </>
@@ -2539,7 +2518,7 @@ export default function App() {
                     download={`${imageProvider === "mflux" ? "mflux" : "muse"}-image.${imageExtension}`}
                     href={imageSource}
                   >
-                    <Icon name="download" /> Download first frame
+                    <Icon name="download" /> Download
                   </a>
                   <button
                     className="flex h-12 flex-1 items-center justify-center border border-white/15 text-xs font-bold uppercase tracking-[0.12em] text-white transition hover:border-[#ff826e]/70 hover:text-[#ff826e]"

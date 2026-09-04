@@ -46,10 +46,10 @@
 
 ## Local MFLUX Constraints
 
-- Local MFLUX is a macOS/Apple-Silicon host feature and is unavailable in Docker. Use `MFLUX_FLUX2_BINARY` and `MFLUX_QWEN_EDIT_BINARY` only as absolute paths; otherwise Motio may discover the corresponding executables on the server process's `PATH`.
+- Local MFLUX is a macOS/Apple-Silicon host feature and is unavailable in Docker. Use `MFLUX_FLUX2_BINARY` and `MFLUX_QWEN_EDIT_BINARY` only as absolute paths; otherwise Motio may discover the corresponding executables on the server process's `PATH`. FLUX.2 reference editing uses `mflux-generate-flux2-edit`, discovered beside `MFLUX_FLUX2_BINARY` or on `PATH`.
 - `server/localMflux.ts` must spawn with an argument array and `shell: false`, use server-owned temporary paths, cap output and diagnostics, and avoid passing the full server environment. Prompts use `--prompt-file` so they do not appear in process listings.
 - Keep OpenRouter image and local MFLUX image slots independent. MFLUX permits only one server-wide process, aborts it when the request closes, validates the output raster, and removes prompt, reference, and output files after every request.
 - MFLUX progress is parsed from bounded CLI output and streamed as NDJSON over the existing generation response. A broken stream is not terminal proof; keep the local ambiguity lock until Clear.
-- Qwen Image Edit requires a reference image and receives it through `--image-paths`; it does not support FLUX image strength. Motio currently supports one Qwen reference image, not the CLI's multi-image or LoRA options.
+- Qwen Image Edit requires a reference image and receives it through `--image-paths`. FLUX.2 uses `mflux-generate-flux2` without a reference and `mflux-generate-flux2-edit --image-paths` with one. Motio supports one reference image, not the CLIs' multi-image or LoRA options.
 - Never run real MFLUX generation as a smoke test: generation consumes substantial unified memory. Use the fake executable test or an MFLUX executable's `--help` only.
 - MFLUX code and model weights have separate licenses. Do not download, redistribute, or bundle either with this repository.

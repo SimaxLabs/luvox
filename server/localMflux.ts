@@ -37,12 +37,21 @@ export function isLocalMfluxSupported(): boolean {
   return process.platform === "darwin" && process.arch === "arm64";
 }
 
-function resolveMfluxBinary(model: (typeof MFLUX_IMAGE_MODELS)[number]): string | undefined {
+function resolveMfluxBinary(
+  model: (typeof MFLUX_IMAGE_MODELS)[number],
+  executable: string = model.executable,
+): string | undefined {
   const configured = process.env[model.environmentVariable]?.trim();
   if (configured && !path.isAbsolute(configured)) return undefined;
+  const pathCandidates = (process.env.PATH || "")
+    .split(path.delimiter)
+    .filter(Boolean)
+    .map((directory) => path.join(directory, executable));
   const candidates = configured
-    ? [configured]
-    : (process.env.PATH || "").split(path.delimiter).filter(Boolean).map((directory) => path.join(directory, model.executable));
+    ? executable === model.executable
+      ? [configured]
+      : [path.join(path.dirname(configured), executable), ...pathCandidates]
+    : pathCandidates;
   for (const candidate of candidates) {
     try {
       if (!statSync(candidate).isFile()) continue;
@@ -278,10 +287,15 @@ export async function generateLocalMfluxImage(
   if (model.requiresReference && !input.inputReference) {
     throw new LocalMfluxError("Qwen Image Edit requires a reference image.", 400, "local_mflux_image_error", false);
   }
-  const binary = resolveMfluxBinary(model);
+  const executable = input.inputReference && "referenceExecutable" in model
+    ? model.referenceExecutable
+    : model.executable;
+  const binary = resolveMfluxBinary(model, executable);
   if (!binary) {
     throw new LocalMfluxError(
-      `Install ${model.executable} or set ${model.environmentVariable} to its absolute path.`,
+      executable === model.executable
+        ? `Install ${executable} or set ${model.environmentVariable} to its absolute path.`
+        : `Install ${executable} beside ${model.executable} or on the server PATH.`,
       503,
       "local_mflux_configuration_error",
       false,
@@ -330,8 +344,7 @@ export async function generateLocalMfluxImage(
       const referencePath = path.join(directory, `reference.${extension}`);
       await writeFile(referencePath, Buffer.from(base64, "base64"), { mode: 0o600 });
       await inspectRaster(referencePath, "The reference image");
-      if (model.supportsImageStrength) args.push("--image-path", referencePath, "--image-strength", String(input.imageStrength));
-      else args.push("--image-paths", referencePath);
+      args.push("--image-paths", referencePath);
     }
 
     if (shuttingDown || signal?.aborted) {
