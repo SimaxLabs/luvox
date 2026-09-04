@@ -47,7 +47,7 @@ const app = express();
 const isProduction = process.env.NODE_ENV === "production";
 const port = Number(process.env.PORT || (isProduction ? 3000 : 3001));
 const host = process.env.HOST?.trim() || "127.0.0.1";
-const trustContainerProxy = process.env.MOTIO_TRUST_CONTAINER_PROXY === "1";
+const trustContainerProxy = process.env.LUVOX_TRUST_CONTAINER_PROXY === "1";
 const serverSessionId = randomUUID();
 const sessionApiKeySchema = z
   .string()
@@ -67,11 +67,11 @@ function getSessionApiKey(request: Request): string | undefined {
 }
 
 function getLocalWorkspaceToken(request: Request): string {
-  return localWorkspaceTokenSchema.parse(request.get("X-Motio-Workspace-Token"));
+  return localWorkspaceTokenSchema.parse(request.get("X-Luvox-Workspace-Token"));
 }
 
 function getVideoCapabilityToken(request: Request): string | undefined {
-  return videoCapabilityTokenSchema.optional().parse(request.get("X-Motio-Video-Token"));
+  return videoCapabilityTokenSchema.optional().parse(request.get("X-Luvox-Video-Token"));
 }
 
 function assertLoopbackRequest(request: Request): void {
@@ -94,7 +94,7 @@ function assertLoopbackRequest(request: Request): void {
     (originHostname !== undefined && !allowedHostnames.has(originHostname))
   ) {
     throw new LocalH3Error(
-      "Motio accepts this operation only from a loopback origin.",
+      "Luvox accepts this operation only from a loopback origin.",
       403,
       "local_request_forbidden",
       false,
@@ -440,7 +440,7 @@ app.delete(
       if (isLocalJobId(id)) {
         throw new OpenRouterError("The video generation was not found.", 404, "not_found", false);
       }
-      response.json(releaseVideoCapability(id, videoCapabilityTokenSchema.parse(request.get("X-Motio-Video-Token"))));
+      response.json(releaseVideoCapability(id, videoCapabilityTokenSchema.parse(request.get("X-Luvox-Video-Token"))));
     } catch (error) {
       next(error);
     }
@@ -569,7 +569,7 @@ await initializeLocalMfluxStorage();
 await initializeLocalH3Storage();
 
 const server = app.listen(port, host, () => {
-  console.log(`Motio server listening on http://${host}:${port}`);
+  console.log(`Luvox server listening on http://${host}:${port}`);
 });
 
 let closing: Promise<void> | undefined;

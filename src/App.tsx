@@ -79,10 +79,10 @@ type IconName =
 const statusOrder: GenerationStatus[] = ["queued", "processing", "completed", "failed"];
 const defaultMfluxSetup = MFLUX_IMAGE_RECOMMENDED_SETUPS[0];
 const imageReferenceMaxBytes = 10 * 1024 * 1024;
-const uncertainSubmissionMessage = "OpenRouter may already be processing a paid request that Motio cannot track. Check OpenRouter Activity before unlocking another submission.";
-const uncertainLocalSubmissionMessage = "The local h3.c submission may have been accepted but Motio did not receive its job ID. Clear the workspace before submitting another local job.";
+const uncertainSubmissionMessage = "OpenRouter may already be processing a paid request that Luvox cannot track. Check OpenRouter Activity before unlocking another submission.";
+const uncertainLocalSubmissionMessage = "The local h3.c submission may have been accepted but Luvox did not receive its job ID. Clear the workspace before submitting another local job.";
 const uncertainMfluxSubmissionMessage = "The local MFLUX request status is unknown. Clear the workspace before submitting another local MFLUX image.";
-const untrackedRemoteWork = "__motio_untracked_remote_work__";
+const untrackedRemoteWork = "__luvox_untracked_remote_work__";
 const uncertainSubmissionErrors = new Set([
   "invalid_local_response",
   "invalid_provider_response",
@@ -1081,7 +1081,7 @@ export default function App() {
 
     const requestController = new AbortController();
     generationControllers.current.set(submissionKind, requestController);
-    const pendingRemoteSubmission = `__motio_pending_submission_${crypto.randomUUID()}__`;
+    const pendingRemoteSubmission = `__luvox_pending_submission_${crypto.randomUUID()}__`;
     const paidRemoteWork = submissionKind === "image" ? remoteImageWork.current : remoteVideoWork.current;
     if (isPaidSubmission) paidRemoteWork.add(pendingRemoteSubmission);
     const version = workspaceVersion.current;
@@ -1404,7 +1404,7 @@ export default function App() {
         <div className="mx-auto flex max-w-[1500px] items-center justify-between px-5 py-4 sm:px-8 lg:px-10">
           <div className="flex items-center gap-3">
             <img alt="" className="size-8 object-contain" src="/logo.png" />
-            <p className="font-display text-sm uppercase tracking-[-0.02em]">Motio</p>
+            <p className="font-display text-sm uppercase tracking-[-0.02em]">Luvox</p>
           </div>
           <div className="flex items-center gap-2">
             {sessionItemCount > 0 && (
@@ -1502,7 +1502,7 @@ export default function App() {
             )}
             <a
               className="flex items-center gap-2 rounded-full border border-white/10 px-3 py-1.5 text-[9px] uppercase tracking-[0.15em] text-white/55 transition hover:border-[#d9ff72]/50 hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#d9ff72]"
-              href="https://github.com/SimaxLabs/motio"
+              href="https://github.com/SimaxLabs/luvox"
               rel="noreferrer"
               target="_blank"
             >
@@ -1637,7 +1637,7 @@ export default function App() {
                   <h3 className="flex-1 text-xs font-bold uppercase tracking-[0.12em]">Local engine</h3>
                   <a
                     className="border border-black/20 px-2.5 py-1 text-[9px] font-bold uppercase tracking-[0.12em] transition hover:border-black hover:bg-black hover:text-[#d9ff72]"
-                    href="https://github.com/SimaxLabs/motio#local-image-generation-with-mflux"
+                    href="https://github.com/SimaxLabs/luvox#local-image-generation-with-mflux"
                     rel="noreferrer"
                     target="_blank"
                   >
@@ -1995,7 +1995,7 @@ export default function App() {
                   <h3 className="flex-1 text-xs font-bold uppercase tracking-[0.12em]">Local engine</h3>
                   <a
                     className="border border-black/20 px-2.5 py-1 text-[9px] font-bold uppercase tracking-[0.12em] transition hover:border-black hover:bg-black hover:text-[#d9ff72]"
-                    href="https://github.com/SimaxLabs/motio#local-generation-with-h3c"
+                    href="https://github.com/SimaxLabs/luvox#local-generation-with-h3c"
                     rel="noreferrer"
                     target="_blank"
                   >

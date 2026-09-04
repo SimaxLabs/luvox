@@ -1,5 +1,5 @@
 services:
-  motio:
+  luvox:
     build: .
     init: true
     ports:
@@ -9,6 +9,6 @@ services:
     environment:
       PORT: 3000
       HOST: 0.0.0.0
-      MOTIO_TRUST_CONTAINER_PROXY: 1
+      LUVOX_TRUST_CONTAINER_PROXY: 1
       NODE_ENV: production
     restart: unless-stopped

@@ -20,7 +20,7 @@ concurrency:
 
 env:
   REGISTRY: ${{ secrets.REGISTRY_URL }}
-  IMAGE_NAME: motio
+  IMAGE_NAME: luvox
 
 jobs:
   verify:

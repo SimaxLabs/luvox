@@ -36,7 +36,7 @@ async function waitFor(check: () => Promise<boolean> | boolean): Promise<void> {
 test("local h3.c jobs can be aborted and completed output can be deleted", {
   skip: process.platform !== "darwin" || process.arch !== "arm64",
 }, async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "motio-h3-test-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "luvox-h3-test-"));
   const jobsDirectory = path.join(directory, "jobs");
   const modelDirectory = path.join(directory, "model");
   const binary = path.join(directory, "fake-h3");

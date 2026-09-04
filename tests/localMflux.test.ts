@@ -13,15 +13,15 @@ const referenceImage = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCA
 test("MFLUX startup removes only stale owner-marked directories", {
   skip: process.platform !== "darwin" || process.arch !== "arm64",
 }, async () => {
-  const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "motio-mflux-cleanup-test-"));
+  const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "luvox-mflux-cleanup-test-"));
   const previousTemporaryDirectory = process.env.TMPDIR;
   let orphanPid: number | undefined;
   process.env.TMPDIR = temporaryRoot;
   try {
-    const stale = path.join(temporaryRoot, "motio-mflux-stale");
-    const orphaned = path.join(temporaryRoot, "motio-mflux-orphaned");
-    const live = path.join(temporaryRoot, "motio-mflux-live");
-    const unmarked = path.join(temporaryRoot, "motio-mflux-unmarked");
+    const stale = path.join(temporaryRoot, "luvox-mflux-stale");
+    const orphaned = path.join(temporaryRoot, "luvox-mflux-orphaned");
+    const live = path.join(temporaryRoot, "luvox-mflux-live");
+    const unmarked = path.join(temporaryRoot, "luvox-mflux-unmarked");
     await Promise.all([mkdir(stale), mkdir(orphaned), mkdir(live), mkdir(unmarked)]);
     const orphanPrompt = path.join(orphaned, "prompt.txt");
     await writeFile(orphanPrompt, "test");
@@ -32,13 +32,13 @@ test("MFLUX startup removes only stale owner-marked directories", {
     assert.ok(orphan.pid);
     orphanPid = orphan.pid;
     await Promise.all([
-      writeFile(path.join(stale, ".motio-owned"), `${JSON.stringify({ kind: "motio-mflux-request", version: 1, pid: 2_147_483_647, binary: process.execPath })}\n`),
-      writeFile(path.join(orphaned, ".motio-owned"), `${JSON.stringify({ kind: "motio-mflux-request", version: 1, pid: 2_147_483_647, binary: process.execPath })}\n`),
-      writeFile(path.join(live, ".motio-owned"), `${JSON.stringify({ kind: "motio-mflux-request", version: 1, pid: process.pid, binary: process.execPath })}\n`),
+      writeFile(path.join(stale, ".luvox-owned"), `${JSON.stringify({ kind: "luvox-mflux-request", version: 1, pid: 2_147_483_647, binary: process.execPath })}\n`),
+      writeFile(path.join(orphaned, ".luvox-owned"), `${JSON.stringify({ kind: "luvox-mflux-request", version: 1, pid: 2_147_483_647, binary: process.execPath })}\n`),
+      writeFile(path.join(live, ".luvox-owned"), `${JSON.stringify({ kind: "luvox-mflux-request", version: 1, pid: process.pid, binary: process.execPath })}\n`),
     ]);
 
     await initializeLocalMfluxStorage();
-    assert.deepEqual((await readdir(temporaryRoot)).sort(), ["motio-mflux-live", "motio-mflux-unmarked"]);
+    assert.deepEqual((await readdir(temporaryRoot)).sort(), ["luvox-mflux-live", "luvox-mflux-unmarked"]);
     await assert.rejects(
       generateLocalMfluxImage({
         provider: "mflux",
@@ -158,8 +158,8 @@ test("MFLUX validation enforces shared presets and advanced ranges", () => {
 test("MFLUX adapter returns and cleans a generated raster", {
   skip: process.platform !== "darwin" || process.arch !== "arm64",
 }, async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "motio-mflux-test-"));
-  const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "motio-mflux-output-test-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "luvox-mflux-test-"));
+  const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "luvox-mflux-output-test-"));
   const binary = path.join(directory, "mflux-generate-flux2");
   const editDirectory = path.join(directory, "bin");
   const editBinary = path.join(editDirectory, "mflux-generate-flux2-edit");

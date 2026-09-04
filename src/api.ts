@@ -71,11 +71,11 @@ function sessionKeyHeaders(sessionApiKey?: string): Record<string, string> {
 }
 
 function localWorkspaceHeaders(workspaceToken?: string): Record<string, string> {
-  return workspaceToken ? { "X-Motio-Workspace-Token": workspaceToken } : {};
+  return workspaceToken ? { "X-Luvox-Workspace-Token": workspaceToken } : {};
 }
 
 function videoCapabilityHeaders(capabilityToken?: string): Record<string, string> {
-  return capabilityToken ? { "X-Motio-Video-Token": capabilityToken } : {};
+  return capabilityToken ? { "X-Luvox-Video-Token": capabilityToken } : {};
 }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
