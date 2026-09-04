@@ -123,6 +123,10 @@ const steps = Number(process.argv[process.argv.indexOf("--steps") + 1]);
 process.stderr.write("  0%|          | 0/" + steps + " [00:00<?, ?it/s]\\r");
 process.stderr.write(" 50%|#####     | " + Math.floor(steps / 2) + "/" + steps + " [00:20<00:20, 2.00s/it]\\r");
 process.stderr.write("100%|##########| " + steps + "/" + steps + " [00:40<00:00, 2.00s/it]\\r");
+if (prompt === "wait") {
+  process.on("SIGTERM", () => process.exit(0));
+  setInterval(() => {}, 1000);
+} else {
 if (prompt === "test image") {
   for (const argument of ["3", "--seed", "42", "--low-ram", "--vae-tiling", "--vae-tile-size", "256", "--image-strength", "0.6"]) {
     if (!process.argv.includes(argument)) process.exit(2);
@@ -141,6 +145,7 @@ writeFileSync(output, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCA
 const resizeStatus = spawnSync("/usr/bin/sips", ["-z", height, width, output], { stdio: "ignore" }).status || 0;
 if (prompt === "invalid output") truncateSync(output, Math.floor(statSync(output).size / 2));
 process.exit(resizeStatus);
+}
 `);
   await chmod(binary, 0o700);
   process.env.MFLUX_FLUX2_BINARY = binary;
@@ -182,6 +187,30 @@ process.exit(resizeStatus);
     assert.equal(editResult.mediaType, "image/png");
     assert.ok(progress.some((update) => update.phase === "generating" && update.step === 10 && update.etaSeconds === 20 && update.secondsPerStep === 2));
     assert.equal(progress.at(-1)?.phase, "decoding");
+    const controller = new AbortController();
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const pending = generateLocalMfluxImage({
+      provider: "mflux",
+      model: "flux2-klein-4b",
+      prompt: "wait",
+      resolution: "1024x1024",
+      steps: 4,
+      quantization: 8,
+      lowRam: false,
+      vaeTiling: false,
+      vaeTileSize: 512,
+      imageStrength: 0.4,
+    }, controller.signal, (update) => {
+      if (update.phase === "generating") markStarted();
+    });
+    await started;
+    controller.abort();
+    await assert.rejects(
+      pending,
+      (error) => error instanceof LocalMfluxError && error.type === "local_mflux_aborted",
+    );
+    assert.deepEqual(await readdir(temporaryRoot), []);
     await assert.rejects(
       generateLocalMfluxImage({
         provider: "mflux",

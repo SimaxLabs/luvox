@@ -283,6 +283,13 @@ export function discardLocalWorkspace(
   });
 }
 
+export function deleteLocalVideoJob(id: string, workspaceToken: string): Promise<{ deleted: true }> {
+  return request<{ deleted: true }>(`/api/local/video/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    headers: localWorkspaceHeaders(workspaceToken),
+  });
+}
+
 export function getVideoStatus(
   id: string,
   sessionApiKey?: string,

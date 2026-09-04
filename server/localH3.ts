@@ -71,6 +71,7 @@ interface LocalJob {
   error?: string;
   diagnostics: string;
   progressCarry: string;
+  cancelRequested?: boolean;
   discardOnCompletion?: boolean;
 }
 
@@ -91,6 +92,7 @@ const execFileAsync = promisify(execFile);
 const queue: string[] = [];
 let activeJobId: string | undefined;
 let activeExecution: Promise<void> | undefined;
+let stopActiveJob: (() => void) | undefined;
 let pendingJobReservations = 0;
 let referenceUploadTail: Promise<void> = Promise.resolve();
 let referenceProcessingTail: Promise<void> = Promise.resolve();
@@ -1271,8 +1273,14 @@ export function discardLocalH3Workspace(workspaceToken: string): Promise<{ clear
   if (!isLocalH3Supported()) return Promise.resolve({ cleared: true });
   const release = beginLocalOperation();
   retireLocalWorkspace(workspaceToken);
+  const activeJob = activeJobId ? jobs.get(activeJobId) : undefined;
+  const discardedActiveExecution = activeJob?.workspaceToken === workspaceToken ? activeExecution : undefined;
   for (const job of jobs.values()) {
     if (job.workspaceToken === workspaceToken) job.discardOnCompletion = true;
+  }
+  if (activeJob?.workspaceToken === workspaceToken) {
+    activeJob.cancelRequested = true;
+    stopActiveJob?.();
   }
   for (let index = queue.length - 1; index >= 0; index -= 1) {
     const job = jobs.get(queue[index]);
@@ -1280,6 +1288,7 @@ export function discardLocalH3Workspace(workspaceToken: string): Promise<{ clear
   }
   const operation = referenceUploadTail.then(async () => {
     assertLocalOperationMayContinue();
+    await discardedActiveExecution;
     let cleanupError: unknown;
     for (const job of jobs.values()) {
       if (
@@ -1311,6 +1320,42 @@ export function discardLocalH3Workspace(workspaceToken: string): Promise<{ clear
     return { cleared: true } as const;
   });
   referenceUploadTail = operation.then(() => undefined, () => undefined);
+  return operation.finally(release);
+}
+
+export function deleteLocalVideoJob(id: string, workspaceToken: string): Promise<{ deleted: true }> {
+  assertLocalWorkspaceActive(workspaceToken);
+  const release = beginLocalOperation();
+  const operation = (async () => {
+    const job = jobs.get(id);
+    if (!job || job.workspaceToken !== workspaceToken) {
+      throw new LocalH3Error(
+        "The local generation job was not found. Local jobs are lost when the server restarts.",
+        404,
+        "local_job_not_found",
+        false,
+      );
+    }
+
+    job.discardOnCompletion = true;
+    const queueIndex = queue.indexOf(id);
+    if (queueIndex >= 0) queue.splice(queueIndex, 1);
+
+    if (id === activeJobId) {
+      job.cancelRequested = true;
+      const execution = activeExecution;
+      stopActiveJob?.();
+      await execution;
+      if (jobs.has(id)) {
+        await rm(job.directory, { recursive: true, force: true });
+        jobs.delete(id);
+      }
+    } else {
+      await rm(job.directory, { recursive: true, force: true });
+      jobs.delete(id);
+    }
+    return { deleted: true } as const;
+  })();
   return operation.finally(release);
 }
 
@@ -1524,6 +1569,13 @@ async function executeJob(job: LocalJob): Promise<void> {
       forceKill.unref();
     }, jobTimeoutMs());
     timeout.unref();
+    stopActiveJob = () => {
+      signalProcessGroup(child, "SIGTERM");
+      if (!forceKill) {
+        forceKill = setTimeout(() => signalProcessGroup(child, "SIGKILL"), 10_000);
+        forceKill.unref();
+      }
+    };
 
     child.stdout.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf8");
@@ -1564,10 +1616,14 @@ async function executeJob(job: LocalJob): Promise<void> {
       }
       result = await resultPromise;
     } finally {
+      stopActiveJob = undefined;
       deactivateProcessGroup(child);
     }
 
     if (job.progressCarry) parseProgressLine(job, job.progressCarry);
+    if (job.cancelRequested) {
+      throw new Error("Local h3.c generation was stopped.");
+    }
     if (timedOut) {
       throw new Error(`h3.c exceeded the ${jobTimeoutMs() / 60_000}-minute generation timeout.`);
     }

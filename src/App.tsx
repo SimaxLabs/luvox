@@ -14,6 +14,7 @@ import {
 } from "../shared/localH3";
 import {
   ApiError,
+  deleteLocalVideoJob,
   discardLocalWorkspace,
   deleteLocalReferenceImage,
   generateImage,
@@ -463,11 +464,14 @@ export default function App() {
   const [localAdvancedStatus, setLocalAdvancedStatus] = useState("");
   const [mfluxAdvancedStatus, setMfluxAdvancedStatus] = useState("");
   const [clearingWorkspace, setClearingWorkspace] = useState(false);
+  const [removingJobId, setRemovingJobId] = useState<string | null>(null);
   const [localCleanupFailed, setLocalCleanupFailed] = useState(false);
   const [jobAnnouncement, setJobAnnouncement] = useState("");
   const [referenceUploadTokens, setReferenceUploadTokens] = useState<Partial<Record<"first" | "last", string>>>({});
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const generationControllers = useRef(new Map<SubmissionKind, AbortController>());
+  const cancelledSubmissions = useRef(new Set<SubmissionKind>());
+  const removingJobIdRef = useRef<string | null>(null);
   const localWorkspaceToken = useRef(crypto.randomUUID());
   const pendingLocalWorkspaceDiscards = useRef(new Set<string>());
   const remoteImageWork = useRef(new Set<string>());
@@ -513,6 +517,8 @@ export default function App() {
         : false;
   const currentSubmissionKindRef = useRef(currentSubmissionKind);
   currentSubmissionKindRef.current = currentSubmissionKind;
+  const selectedJobIdRef = useRef(selectedJobId);
+  selectedJobIdRef.current = selectedJobId;
   const submitting = imageSubmitting || mfluxImageSubmitting || openRouterSubmitting || localSubmitting;
   const currentSubmitting = currentSubmissionKind === "image"
     ? imageSubmitting
@@ -636,6 +642,8 @@ export default function App() {
     workspaceVersion.current += 1;
     for (const controller of generationControllers.current.values()) controller.abort();
     generationControllers.current.clear();
+    cancelledSubmissions.current.clear();
+    removingJobIdRef.current = null;
     leaveJobView();
     setWorkflow("video");
     setForm(initialForm());
@@ -679,6 +687,7 @@ export default function App() {
     setMfluxAdvancedStatus("");
     setReferenceUploadTokens({});
     setClearingWorkspace(false);
+    setRemovingJobId(null);
     setLocalCleanupFailed(false);
     setJobAnnouncement("");
     firstFramePathOnFocus.current = "";
@@ -1138,6 +1147,17 @@ export default function App() {
       setJobAnnouncement(`${trackedJob.provider === "local" ? "Local h3.c" : "OpenRouter"} job ${trackedJob.id.slice(0, 12)} ${trackedJob.status}.`);
     } catch (submitError) {
       if (version !== workspaceVersion.current) return;
+      if (requestController.signal.aborted && cancelledSubmissions.current.delete(submissionKind)) {
+        if (submissionKind === "mflux") {
+          setMfluxImageResult(null);
+          setMfluxImageFailure(uncertainMfluxSubmissionMessage);
+          setMfluxProgress(null);
+          setMfluxElapsedSeconds(0);
+          setError(uncertainMfluxSubmissionMessage);
+          setJobAnnouncement("Local MFLUX stop requested; status unknown until Clear.");
+        }
+        return;
+      }
       const apiError = submitError instanceof ApiError ? submitError : null;
       const outcomeIsUnknown = (
         apiError?.status === 0 ||
@@ -1181,6 +1201,7 @@ export default function App() {
     } finally {
       if (generationControllers.current.get(submissionKind) === requestController) {
         generationControllers.current.delete(submissionKind);
+        cancelledSubmissions.current.delete(submissionKind);
         if (version === workspaceVersion.current) {
           if (submissionKind === "image") setImageSubmitting(false);
           else if (submissionKind === "mflux") setMfluxImageSubmitting(false);
@@ -1191,15 +1212,65 @@ export default function App() {
     }
   };
 
+  const stopMfluxImage = () => {
+    const controller = generationControllers.current.get("mflux");
+    if (!controller || !window.confirm("Abort this local MFLUX generation?")) return;
+    cancelledSubmissions.current.add("mflux");
+    controller.abort();
+    setJobAnnouncement("Stopping local MFLUX image.");
+  };
+
+  const deleteImageTask = () => {
+    if (!currentImageResult || !window.confirm("Delete this completed image from the session?")) return;
+    if (imageProvider === "mflux") {
+      setMfluxImageResult(null);
+      setMfluxImageFailure(null);
+      setMfluxProgress(null);
+      setMfluxElapsedSeconds(0);
+    } else {
+      setImageResult(null);
+      setImageFailure(null);
+    }
+    setError(null);
+    setJobAnnouncement(`${imageProvider === "mflux" ? "Local MFLUX" : "Meta Muse"} image deleted.`);
+  };
+
+  const removeVideoJob = async (target: DisplayJob) => {
+    const active = target.status === "queued" || target.status === "processing";
+    if (removingJobIdRef.current || (active && target.provider !== "local") || (target.status !== "completed" && !active)) return;
+    const action = active ? "Abort this local h3.c job?" : "Delete this completed video job?";
+    if (!window.confirm(action)) return;
+
+    const version = workspaceVersion.current;
+    removingJobIdRef.current = target.id;
+    setRemovingJobId(target.id);
+    try {
+      if (target.provider === "local") await deleteLocalVideoJob(target.id, localWorkspaceToken.current);
+      if (version !== workspaceVersion.current) return;
+      remoteVideoWork.current.delete(target.id);
+      setJobs((current) => current.filter((candidate) => candidate.id !== target.id));
+      if (selectedJobIdRef.current === target.id) {
+        leaveJobView();
+        setError(null);
+      }
+      setJobAnnouncement(`${target.provider === "local" ? "Local h3.c" : "OpenRouter"} job ${active ? "aborted" : "deleted"}.`);
+    } catch (removeError) {
+      if (version === workspaceVersion.current && selectedJobIdRef.current === target.id) setError(messageFrom(removeError));
+    } finally {
+      if (removingJobIdRef.current === target.id) removingJobIdRef.current = null;
+      if (version === workspaceVersion.current) setRemovingJobId(null);
+    }
+  };
+
   const clear = () => {
-    if (submitting || clearingWorkspace || uploadingReference !== null || readingImageReference) return;
+    if (submitting || clearingWorkspace || removingJobId || uploadingReference !== null || readingImageReference) return;
     if (
       (openRouterImageUncertain || openRouterVideoUncertain) &&
       !window.confirm("OpenRouter may already be processing this request. Check OpenRouter Activity first. Unlock another paid submission anyway?")
     ) return;
     if (
       hasActiveJobs &&
-      !window.confirm(`Clear the workspace and stop watching ${activeJobCount} active ${activeJobCount === 1 ? "job" : "jobs"}? Provider and h3.c work may continue in the background.`)
+      !window.confirm(`Clear the workspace and stop watching ${activeJobCount} active ${activeJobCount === 1 ? "job" : "jobs"}?${hasActiveOpenRouterJob ? " OpenRouter work may continue in the background." : ""}`)
     ) {
       return;
     }
@@ -2340,7 +2411,9 @@ export default function App() {
 
           {(currentSubmissionUncertain || error) && (
             <div className="mt-5 border-l-4 border-[#e44d38] bg-[#f9dfd9] px-4 py-3 text-sm leading-5 text-[#712519]" role="alert">
-              {currentSubmissionUncertain ? uncertainSubmissionMessage : error}
+              {currentSubmissionUncertain
+                ? currentSubmissionKind === "mflux" ? uncertainMfluxSubmissionMessage : uncertainSubmissionMessage
+                : error}
             </div>
           )}
 
@@ -2376,7 +2449,7 @@ export default function App() {
             </button>
             <button
               className="h-14 border border-black/20 px-4 text-[10px] font-bold uppercase tracking-[0.12em] hover:border-black disabled:cursor-not-allowed disabled:opacity-45"
-              disabled={submitting || clearingWorkspace || uploadingReference !== null || readingImageReference}
+              disabled={submitting || clearingWorkspace || Boolean(removingJobId) || uploadingReference !== null || readingImageReference}
               onClick={clear}
               type="button"
             >
@@ -2475,19 +2548,36 @@ export default function App() {
           <div className="border-t border-white/10 px-5 py-5 sm:px-8">
             {currentImageResult && imageSource ? (
               <>
-                <a
-                  className="flex h-12 w-full items-center justify-center gap-2 bg-[#d9ff72] text-xs font-bold uppercase tracking-[0.12em] text-black transition hover:bg-white"
-                  download={`${imageProvider === "mflux" ? "mflux" : "muse"}-image.${imageExtension}`}
-                  href={imageSource}
-                >
-                  <Icon name="download" /> Download first frame
-                </a>
+                <div className="flex flex-col gap-3 sm:flex-row">
+                  <a
+                    className="flex h-12 flex-1 items-center justify-center gap-2 bg-[#d9ff72] text-xs font-bold uppercase tracking-[0.12em] text-black transition hover:bg-white"
+                    download={`${imageProvider === "mflux" ? "mflux" : "muse"}-image.${imageExtension}`}
+                    href={imageSource}
+                  >
+                    <Icon name="download" /> Download first frame
+                  </a>
+                  <button
+                    className="flex h-12 flex-1 items-center justify-center border border-white/15 text-xs font-bold uppercase tracking-[0.12em] text-white transition hover:border-[#ff826e]/70 hover:text-[#ff826e]"
+                    onClick={deleteImageTask}
+                    type="button"
+                  >
+                    Delete result
+                  </button>
+                </div>
                 {typeof currentImageResult.cost === "number" && (
                   <p className="mt-3 text-right font-mono text-[9px] uppercase tracking-[0.15em] text-white/60">
                     OpenRouter cost ${currentImageResult.cost.toFixed(4)}
                   </p>
                 )}
               </>
+            ) : imageProvider === "mflux" && mfluxImageSubmitting ? (
+              <button
+                className="flex h-12 w-full items-center justify-center border border-[#ff826e]/40 text-xs font-bold uppercase tracking-[0.12em] text-[#ff826e] transition hover:border-[#ff826e] hover:bg-[#ff826e]/5"
+                onClick={stopMfluxImage}
+                type="button"
+              >
+                Abort local generation
+              </button>
             ) : (
               <p className="font-mono text-[9px] uppercase tracking-[0.15em] text-white/60">
                 Output controls unlock on completion
@@ -2536,25 +2626,46 @@ export default function App() {
           )}
 
           <div className="border-t border-white/10 px-5 py-5 sm:px-8">
-            {job?.status === "completed" && downloadSource ? (
+            {job?.status === "completed" ? (
               <div className="flex flex-col gap-3 sm:flex-row">
-                <a
-                  className="flex h-12 flex-1 items-center justify-center gap-2 bg-[#d9ff72] text-xs font-bold uppercase tracking-[0.12em] text-black transition hover:bg-white"
-                  download={usesSessionMedia
-                    ? job.provider === "local" ? "h3-local-video.mp4" : "openrouter-video.mp4"
-                    : undefined}
-                  href={downloadSource}
-                >
-                  <Icon name="download" /> Download video
-                </a>
+                {downloadSource && (
+                  <>
+                    <a
+                      className="flex h-12 flex-1 items-center justify-center gap-2 bg-[#d9ff72] text-xs font-bold uppercase tracking-[0.12em] text-black transition hover:bg-white"
+                      download={usesSessionMedia
+                        ? job.provider === "local" ? "h3-local-video.mp4" : "openrouter-video.mp4"
+                        : undefined}
+                      href={downloadSource}
+                    >
+                      <Icon name="download" /> Download video
+                    </a>
+                    <button
+                      className="flex h-12 flex-1 items-center justify-center gap-2 border border-white/15 text-xs font-bold uppercase tracking-[0.12em] text-white transition hover:border-white/50"
+                      onClick={copyVideoUrl}
+                      type="button"
+                    >
+                      <Icon name={copied ? "check" : "copy"} /> {copied ? "Copied" : usesSessionMedia ? "Copy temporary URL" : "Copy video URL"}
+                    </button>
+                  </>
+                )}
                 <button
-                  className="flex h-12 flex-1 items-center justify-center gap-2 border border-white/15 text-xs font-bold uppercase tracking-[0.12em] text-white transition hover:border-white/50"
-                  onClick={copyVideoUrl}
+                  className="flex h-12 flex-1 items-center justify-center border border-white/15 text-xs font-bold uppercase tracking-[0.12em] text-white transition hover:border-[#ff826e]/70 hover:text-[#ff826e] disabled:cursor-not-allowed disabled:opacity-45"
+                  disabled={Boolean(removingJobId)}
+                  onClick={() => void removeVideoJob(job)}
                   type="button"
                 >
-                  <Icon name={copied ? "check" : "copy"} /> {copied ? "Copied" : usesSessionMedia ? "Copy temporary URL" : "Copy video URL"}
+                  {removingJobId === job.id ? "Deleting..." : "Delete job"}
                 </button>
               </div>
+            ) : job?.provider === "local" && isActive ? (
+              <button
+                className="flex h-12 w-full items-center justify-center border border-[#ff826e]/40 text-xs font-bold uppercase tracking-[0.12em] text-[#ff826e] transition hover:border-[#ff826e] hover:bg-[#ff826e]/5 disabled:cursor-not-allowed disabled:opacity-45"
+                disabled={Boolean(removingJobId)}
+                onClick={() => void removeVideoJob(job)}
+                type="button"
+              >
+                {removingJobId === job.id ? "Stopping..." : "Abort local job"}
+              </button>
             ) : (
               <div className="flex items-center justify-between font-mono text-[9px] uppercase tracking-[0.15em] text-white/60">
                 <span>{currentVideoSubmissionStatus && !job ? currentSubmitting ? "Waiting for provider job ID" : "Submission did not create a provider job" : pollingStopped ? "Automatic polling stopped" : isActive ? "Polling every 10 seconds" : "Output controls unlock on completion"}</span>

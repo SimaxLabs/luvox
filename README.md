@@ -85,7 +85,7 @@ The h3.c source and MiniMax H3 model weights have their own licenses and usage r
 
 ## Session jobs
 
-Each generation type has one slot: OpenRouter image, local MFLUX image, OpenRouter video, and local h3.c video can overlap, but the same type must finish or fail before another starts. Unknown submissions stay locked until Unlock (OpenRouter) or Clear (local). Session jobs remain until Clear, reload, or server restart.
+Each generation type has one slot: OpenRouter image, local MFLUX image, OpenRouter video, and local h3.c video can overlap, but the same type must finish or fail before another starts. Unknown submissions stay locked until Unlock (OpenRouter) or Clear (local). Completed results can be deleted individually; other session jobs remain until Clear, reload, or server restart. Active local MFLUX and h3.c work can be aborted, but OpenRouter exposes no cancellation endpoint.
 
 ## Privacy
 
@@ -99,7 +99,7 @@ OpenRouter, model providers, and hosting infrastructure have separate data pract
 
 ### Self-hosted local h3.c
 
-Local MFLUX and h3.c run only on a compatible Mac. MFLUX uses a private system temporary directory for each request and removes it when the request finishes or stops. h3.c temporarily stores app-owned jobs, outputs, and uploaded references under `.h3-jobs` or `H3_JOBS_DIR`; per-tab tokens isolate them. Motio cleans h3.c files on Clear, delivered reload/close cleanup, startup, and graceful shutdown; an abrupt close may leave files until restart.
+Local MFLUX and h3.c run only on a compatible Mac. MFLUX uses a private system temporary directory for each request and removes it when the request finishes or stops. h3.c temporarily stores app-owned jobs, outputs, and uploaded references under `.h3-jobs` or `H3_JOBS_DIR`; per-tab tokens isolate them. Motio cleans h3.c files when a job is deleted or aborted, on Clear, delivered reload/close cleanup, startup, and graceful shutdown; an abrupt close may leave files until restart.
 
 ## License
 

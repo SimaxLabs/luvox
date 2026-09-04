@@ -5,6 +5,7 @@ import { Readable } from "node:stream";
 import { z, ZodError } from "zod";
 import {
   beginLocalH3Shutdown,
+  deleteLocalVideoJob,
   discardLocalH3Workspace,
   deleteLocalReferenceImage,
   generateLocalVideo,
@@ -231,6 +232,19 @@ app.delete(
     try {
       assertLoopbackRequest(request);
       const result = await discardLocalH3Workspace(getLocalWorkspaceToken(request));
+      response.json(result);
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+app.delete(
+  "/api/local/video/:id",
+  async (request: Request, response: Response, next: NextFunction) => {
+    try {
+      assertLoopbackRequest(request);
+      const result = await deleteLocalVideoJob(validateJobId(request.params.id), getLocalWorkspaceToken(request));
       response.json(result);
     } catch (error) {
       next(error);
