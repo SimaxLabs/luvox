@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   rasterMediaType,
   type OpenRouterGenerateImageInput,
@@ -15,6 +16,9 @@ const OPENROUTER_API_BASE = "https://openrouter.ai/api/v1";
 const JSON_REQUEST_TIMEOUT_MS = 30_000;
 const IMAGE_REQUEST_TIMEOUT_MS = 300_000;
 const CONTENT_REQUEST_TIMEOUT_MS = 300_000;
+const VIDEO_CONTENT_TYPES = new Set(["application/octet-stream", "video/mp4"]);
+const VIDEO_CAPABILITY_IDLE_MS = 24 * 60 * 60 * 1_000;
+const videoCapabilities = new Map<string, { id: string; expiresAt: number }>();
 
 const OPENROUTER_STATUSES = [
   "pending",
@@ -73,6 +77,28 @@ function getApiKey(overrideApiKey?: string): string {
   }
 
   return apiKey;
+}
+
+function assertVideoAccess(id: string, overrideApiKey?: string, capabilityToken?: string): void {
+  if (overrideApiKey?.trim()) return;
+  const capability = capabilityToken ? videoCapabilities.get(capabilityToken) : undefined;
+  const now = Date.now();
+  if (capability && capability.expiresAt <= now) videoCapabilities.delete(capabilityToken!);
+  else if (capability?.id === id) {
+    capability.expiresAt = now + VIDEO_CAPABILITY_IDLE_MS;
+    return;
+  }
+  throw new OpenRouterError("The video generation was not found.", 404, "not_found", false);
+}
+
+export function releaseVideoCapability(id: string, capabilityToken: string): { released: true } {
+  const capability = videoCapabilities.get(capabilityToken);
+  if (capability?.expiresAt && capability.expiresAt <= Date.now()) videoCapabilities.delete(capabilityToken);
+  else if (capability && capability.id !== id) {
+    throw new OpenRouterError("The video generation was not found.", 404, "not_found", false);
+  }
+  else if (capability) videoCapabilities.delete(capabilityToken);
+  return { released: true };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -380,7 +406,16 @@ export async function generateVideo(
     overrideApiKey,
   );
 
-  return publicStatus(parseVideoResponse(payload));
+  const result = publicStatus(parseVideoResponse(payload));
+  if (!overrideApiKey?.trim() && result.status !== "failed") {
+    result.capabilityToken = randomUUID();
+    const now = Date.now();
+    for (const [token, capability] of videoCapabilities) {
+      if (capability.expiresAt <= now) videoCapabilities.delete(token);
+    }
+    videoCapabilities.set(result.capabilityToken, { id: result.id, expiresAt: now + VIDEO_CAPABILITY_IDLE_MS });
+  }
+  return result;
 }
 
 export async function generateImage(
@@ -418,14 +453,25 @@ export async function getVideoStatus(
   id: string,
   overrideApiKey?: string,
   signal?: AbortSignal,
+  capabilityToken?: string,
 ): Promise<VideoStatusResponse> {
+  assertVideoAccess(id, overrideApiKey, capabilityToken);
   const payload = await requestJson(
     `/videos/${encodeURIComponent(id)}`,
     { method: "GET", signal },
     overrideApiKey,
   );
 
-  return publicStatus(parseVideoResponse(payload));
+  const response = parseVideoResponse(payload);
+  if (response.id !== id) {
+    throw new OpenRouterError(
+      "OpenRouter returned a mismatched video generation response.",
+      502,
+      "invalid_provider_response",
+      true,
+    );
+  }
+  return publicStatus(response);
 }
 
 export async function getVideoContent(
@@ -433,7 +479,9 @@ export async function getVideoContent(
   range?: string,
   overrideApiKey?: string,
   signal?: AbortSignal,
+  capabilityToken?: string,
 ): Promise<Response> {
+  assertVideoAccess(id, overrideApiKey, capabilityToken);
   const response = await fetchOpenRouter(
     `/videos/${encodeURIComponent(id)}/content?index=0`,
     {
@@ -445,8 +493,20 @@ export async function getVideoContent(
     overrideApiKey,
   );
 
-  if (response.status === 416) return response;
-
+  const contentType = response.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase();
+  if (response.status === 416) {
+    const contentRange = response.headers.get("content-range");
+    if ((!contentType || VIDEO_CONTENT_TYPES.has(contentType)) && /^bytes \*\/\d+$/.test(contentRange || "")) {
+      return response;
+    }
+    void response.body?.cancel();
+    throw new OpenRouterError(
+      "OpenRouter returned an unsupported video format.",
+      502,
+      "invalid_provider_response",
+      true,
+    );
+  }
   if (!response.ok) {
     const payload = await readJsonOrUndefined(response);
 
@@ -454,6 +514,16 @@ export async function getVideoContent(
       response.status,
       extractErrorMessage(payload),
       response.headers.get("retry-after"),
+    );
+  }
+
+  if (!contentType || !VIDEO_CONTENT_TYPES.has(contentType)) {
+    void response.body?.cancel();
+    throw new OpenRouterError(
+      "OpenRouter returned an unsupported video format.",
+      502,
+      "invalid_provider_response",
+      true,
     );
   }
 

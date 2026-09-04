@@ -22,6 +22,8 @@ import {
   getAppConfig,
   getVideoContent,
   getVideoStatus,
+  releaseVideoCapability,
+  renewLocalWorkspace,
   uploadLocalReferenceImage,
   type GenerationStatus,
   type AppConfig,
@@ -336,7 +338,7 @@ function JobPoller({
   setJobs: Dispatch<SetStateAction<DisplayJob[]>>;
   workspaceVersion: { current: number };
 }) {
-  const { id, provider, temporaryApiKey } = job;
+  const { capabilityToken, id, provider, temporaryApiKey } = job;
 
   useEffect(() => {
     let disposed = false;
@@ -352,6 +354,7 @@ function JobPoller({
           temporaryApiKey,
           controller.signal,
           provider === "local" ? localWorkspaceToken : undefined,
+          capabilityToken,
         );
         if (disposed || version !== workspaceVersion.current) return;
 
@@ -360,6 +363,7 @@ function JobPoller({
           ? {
               ...nextJob,
               aspectRatio: existing.aspectRatio,
+              capabilityToken: nextJob.status === "failed" ? undefined : existing.capabilityToken,
               temporaryApiKey: nextJob.status === "failed" ? undefined : existing.temporaryApiKey,
               pollWarning: undefined,
               pollingStopped: false,
@@ -368,6 +372,9 @@ function JobPoller({
 
         if (nextJob.status === "completed" || nextJob.status === "failed") {
           remoteWork.current.delete(id);
+          if (nextJob.status === "failed" && capabilityToken) {
+            void releaseVideoCapability(id, capabilityToken).catch(() => undefined);
+          }
           setAnnouncement(`${provider === "local" ? "Local h3.c" : "OpenRouter"} job ${id.slice(0, 12)} ${nextJob.status}.`);
           return;
         }
@@ -413,7 +420,7 @@ function JobPoller({
       controller.abort();
       clearTimeout(timer);
     };
-  }, [id, localWorkspaceToken, provider, remoteWork, setAnnouncement, setJobs, temporaryApiKey, workspaceVersion]);
+  }, [capabilityToken, id, localWorkspaceToken, provider, remoteWork, setAnnouncement, setJobs, temporaryApiKey, workspaceVersion]);
 
   return null;
 }
@@ -519,6 +526,8 @@ export default function App() {
   currentSubmissionKindRef.current = currentSubmissionKind;
   const selectedJobIdRef = useRef(selectedJobId);
   selectedJobIdRef.current = selectedJobId;
+  const jobsRef = useRef(jobs);
+  jobsRef.current = jobs;
   const submitting = imageSubmitting || mfluxImageSubmitting || openRouterSubmitting || localSubmitting;
   const currentSubmitting = currentSubmissionKind === "image"
     ? imageSubmitting
@@ -568,9 +577,10 @@ export default function App() {
     + Number(localSubmitting);
   const hasActiveJobs = activeJobCount > 0;
   const jobApiKey = job?.provider === "openrouter" ? job.temporaryApiKey : undefined;
+  const jobCapabilityToken = job?.provider === "openrouter" ? job.capabilityToken : undefined;
   const pollWarning = job?.pollWarning;
   const pollingStopped = Boolean(job?.pollingStopped);
-  const usesSessionMedia = Boolean(job && (job.provider === "local" || jobApiKey));
+  const usesSessionMedia = Boolean(job && (job.provider === "local" || jobApiKey || jobCapabilityToken));
   const videoSource = usesSessionMedia ? temporaryVideoUrl || undefined : job?.videoUrl;
   const downloadSource = usesSessionMedia ? temporaryVideoUrl || undefined : job?.downloadUrl;
   const imageSource = currentImageResult
@@ -773,18 +783,62 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const discardOnPageHide = (event: PageTransitionEvent) => {
-      if (!event.persisted) {
-        for (const token of new Set([
-          ...pendingLocalWorkspaceDiscards.current,
-          localWorkspaceToken.current,
-        ])) {
-          void discardLocalWorkspace(token, true).catch(() => undefined);
+    if (!appConfig?.localH3.supported) return;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const renew = async () => {
+      const token = localWorkspaceToken.current;
+      try {
+        await renewLocalWorkspace(token);
+      } catch (renewError) {
+        if (
+          !disposed &&
+          token === localWorkspaceToken.current &&
+          renewError instanceof ApiError &&
+          renewError.status === 410
+        ) {
+          pendingLocalWorkspaceDiscards.current.add(token);
+          localWorkspaceToken.current = crypto.randomUUID();
+          resetWorkspace(remoteImageWork.current.size > 0, remoteVideoWork.current.size > 0);
+          setError("The inactive local workspace expired and was cleared.");
+        }
+      } finally {
+        if (!disposed) timer = setTimeout(() => void renew(), 30_000);
+      }
+    };
+    void renew();
+    return () => {
+      disposed = true;
+      clearTimeout(timer);
+    };
+  }, [appConfig?.localH3.supported]);
+
+  useEffect(() => {
+    const discardOnPageHide = () => {
+      for (const token of new Set([
+        ...pendingLocalWorkspaceDiscards.current,
+        localWorkspaceToken.current,
+      ])) {
+        void discardLocalWorkspace(token, true).catch(() => undefined);
+      }
+      for (const trackedJob of jobsRef.current) {
+        if (trackedJob.provider === "openrouter" && trackedJob.capabilityToken) {
+          void releaseVideoCapability(trackedJob.id, trackedJob.capabilityToken, true).catch(() => undefined);
         }
       }
     };
+    const resetAfterCacheRestore = (event: PageTransitionEvent) => {
+      if (!event.persisted) return;
+      pendingLocalWorkspaceDiscards.current.add(localWorkspaceToken.current);
+      localWorkspaceToken.current = crypto.randomUUID();
+      resetWorkspace(remoteImageWork.current.size > 0, remoteVideoWork.current.size > 0);
+    };
     window.addEventListener("pagehide", discardOnPageHide);
-    return () => window.removeEventListener("pagehide", discardOnPageHide);
+    window.addEventListener("pageshow", resetAfterCacheRestore);
+    return () => {
+      window.removeEventListener("pagehide", discardOnPageHide);
+      window.removeEventListener("pageshow", resetAfterCacheRestore);
+    };
   }, []);
 
   useEffect(() => {
@@ -796,7 +850,7 @@ export default function App() {
       workflow !== "video" ||
       job?.status !== "completed" ||
       !job.videoUrl ||
-      (job.provider === "openrouter" && !jobApiKey)
+      (job.provider === "openrouter" && !jobApiKey && !jobCapabilityToken)
     ) {
       return;
     }
@@ -814,6 +868,7 @@ export default function App() {
       key,
       controller.signal,
       job.provider === "local" ? localWorkspaceToken.current : undefined,
+      jobCapabilityToken,
     )
       .then((blob) => {
         if (
@@ -846,7 +901,7 @@ export default function App() {
       controller.abort();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [workflow, job?.id, job?.status, job?.videoUrl, jobApiKey, mediaRetry]);
+  }, [workflow, job?.id, job?.status, job?.videoUrl, jobApiKey, jobCapabilityToken, mediaRetry]);
 
   useEffect(() => {
     return () => {
@@ -1247,6 +1302,9 @@ export default function App() {
     setRemovingJobId(target.id);
     try {
       if (target.provider === "local") await deleteLocalVideoJob(target.id, localWorkspaceToken.current);
+      if (target.provider === "openrouter" && target.capabilityToken) {
+        await releaseVideoCapability(target.id, target.capabilityToken);
+      }
       if (version !== workspaceVersion.current) return;
       remoteVideoWork.current.delete(target.id);
       setJobs((current) => current.filter((candidate) => candidate.id !== target.id));
@@ -1278,6 +1336,11 @@ export default function App() {
     const selectedWorkflow = workflow;
     const selectedProvider = form.provider;
     const selectedImageProvider = imageProvider;
+    for (const trackedJob of jobs) {
+      if (trackedJob.provider === "openrouter" && trackedJob.capabilityToken) {
+        void releaseVideoCapability(trackedJob.id, trackedJob.capabilityToken).catch(() => undefined);
+      }
+    }
     resetWorkspace(false, false);
     setWorkflow(selectedWorkflow);
     setForm((current) => ({ ...current, provider: selectedProvider }));
@@ -1944,6 +2007,9 @@ export default function App() {
                     Set H3_BINARY and H3_MODEL_DIR on the backend. The h3.c binary, model snapshot, and FFmpeg are required.
                   </p>
                 )}
+                <p className="mt-2 border-t border-black/10 pt-2 text-[11px] leading-4 text-stone-500">
+                  Privacy note: the current h3.c CLI exposes prompts to local process-inspection tools while generation runs.
+                </p>
               </div>
             )}
             <div>

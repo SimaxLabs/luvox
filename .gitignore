@@ -2,6 +2,7 @@ node_modules/
 dist/
 dist-server/
 .h3-jobs/
-.env
+.env*
+!.env.example
 *.log
 .DS_Store

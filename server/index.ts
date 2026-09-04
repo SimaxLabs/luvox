@@ -15,6 +15,7 @@ import {
   isLocalJobId,
   isLocalH3Supported,
   LocalH3Error,
+  renewLocalH3Workspace,
   shutdownLocalH3Storage,
   uploadLocalReferenceImage,
 } from "./localH3.js";
@@ -22,6 +23,7 @@ import {
   beginLocalMfluxShutdown,
   generateLocalMfluxImage,
   getAvailableLocalMfluxModels,
+  initializeLocalMfluxStorage,
   isLocalMfluxConfigured,
   isLocalMfluxSupported,
   LocalMfluxError,
@@ -33,6 +35,7 @@ import {
   getVideoContent,
   getVideoStatus,
   OpenRouterError,
+  releaseVideoCapability,
 } from "./openrouter.js";
 import {
   validateGenerateImageInput,
@@ -57,6 +60,7 @@ const localReferenceDeleteSchema = z
   .strict();
 const localReferenceTokenSchema = z.string().uuid();
 const localWorkspaceTokenSchema = z.string().uuid();
+const videoCapabilityTokenSchema = z.string().uuid();
 
 function getSessionApiKey(request: Request): string | undefined {
   return sessionApiKeySchema.parse(request.get("X-OpenRouter-Api-Key"));
@@ -64,6 +68,10 @@ function getSessionApiKey(request: Request): string | undefined {
 
 function getLocalWorkspaceToken(request: Request): string {
   return localWorkspaceTokenSchema.parse(request.get("X-Motio-Workspace-Token"));
+}
+
+function getVideoCapabilityToken(request: Request): string | undefined {
+  return videoCapabilityTokenSchema.optional().parse(request.get("X-Motio-Video-Token"));
 }
 
 function assertLoopbackRequest(request: Request): void {
@@ -104,6 +112,14 @@ function loopbackOnly(request: Request, _response: Response, next: NextFunction)
 }
 
 app.disable("x-powered-by");
+app.use((_request, response, next) => {
+  response.setHeader("Content-Security-Policy", "base-uri 'none'; frame-ancestors 'none'; object-src 'none'");
+  response.setHeader("Cross-Origin-Resource-Policy", "same-origin");
+  response.setHeader("Referrer-Policy", "no-referrer");
+  response.setHeader("X-Content-Type-Options", "nosniff");
+  response.setHeader("X-Frame-Options", "DENY");
+  next();
+});
 app.use("/api", (_request, response, next) => {
   response.setHeader("Cache-Control", "private, no-store");
   next();
@@ -125,6 +141,18 @@ app.get("/api/config", (_request, response) => {
     },
   });
 });
+
+app.put(
+  "/api/local/workspace",
+  loopbackOnly,
+  (request: Request, response: Response, next: NextFunction) => {
+    try {
+      response.json(renewLocalH3Workspace(getLocalWorkspaceToken(request)));
+    } catch (error) {
+      next(error);
+    }
+  },
+);
 
 app.post(
   "/api/local/reference-image",
@@ -293,7 +321,12 @@ app.get(
       const id = validateJobId(request.params.id);
       const result = isLocalJobId(id)
         ? getLocalVideoStatus(id, getLocalWorkspaceToken(request))
-        : await getVideoStatus(id, getSessionApiKey(request), controller.signal);
+        : await getVideoStatus(
+            id,
+            getSessionApiKey(request),
+            controller.signal,
+            getVideoCapabilityToken(request),
+          );
       response.json(result);
     } catch (error) {
       if (!controller.signal.aborted) next(error);
@@ -317,6 +350,8 @@ app.head(
 
       const videoPath = await getLocalVideoPath(id, getLocalWorkspaceToken(request));
       response.setHeader("Content-Disposition", "inline");
+      response.setHeader("Content-Security-Policy", "default-src 'none'; sandbox");
+      response.setHeader("Content-Type", "video/mp4");
       response.sendFile(videoPath, { dotfiles: "allow" }, (error) => {
         if (error) next(error);
       });
@@ -346,6 +381,8 @@ app.get(
             ? "attachment; filename=\"h3-local-video.mp4\""
             : "inline",
         );
+        response.setHeader("Content-Security-Policy", "default-src 'none'; sandbox");
+        response.setHeader("Content-Type", "video/mp4");
         response.sendFile(videoPath, { dotfiles: "allow" }, (error) => {
           if (error) next(error);
         });
@@ -357,6 +394,7 @@ app.get(
         request.headers.range,
         getSessionApiKey(request),
         controller.signal,
+        getVideoCapabilityToken(request),
       );
 
       response.status(upstream.status);
@@ -364,11 +402,12 @@ app.get(
         "accept-ranges",
         "content-length",
         "content-range",
-        "content-type",
       ]) {
         const value = upstream.headers.get(header);
         if (value) response.setHeader(header, value);
       }
+      response.setHeader("Content-Type", "video/mp4");
+      response.setHeader("Content-Security-Policy", "default-src 'none'; sandbox");
 
       response.setHeader(
         "Content-Disposition",
@@ -388,6 +427,22 @@ app.get(
       stream.pipe(response);
     } catch (error) {
       if (!controller.signal.aborted) next(error);
+    }
+  },
+);
+
+app.delete(
+  "/api/video/:id",
+  loopbackOnly,
+  (request: Request, response: Response, next: NextFunction) => {
+    try {
+      const id = validateJobId(request.params.id);
+      if (isLocalJobId(id)) {
+        throw new OpenRouterError("The video generation was not found.", 404, "not_found", false);
+      }
+      response.json(releaseVideoCapability(id, videoCapabilityTokenSchema.parse(request.get("X-Motio-Video-Token"))));
+    } catch (error) {
+      next(error);
     }
   },
 );
@@ -510,6 +565,7 @@ if (!Number.isInteger(port) || port < 1 || port > 65_535) {
   throw new Error("PORT must be a valid TCP port.");
 }
 
+await initializeLocalMfluxStorage();
 await initializeLocalH3Storage();
 
 const server = app.listen(port, host, () => {

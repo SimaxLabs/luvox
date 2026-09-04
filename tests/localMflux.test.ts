@@ -1,13 +1,75 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { generateLocalMfluxImage, LocalMfluxError } from "../server/localMflux.js";
+import { generateLocalMfluxImage, initializeLocalMfluxStorage, LocalMfluxError } from "../server/localMflux.js";
 import { validateGenerateImageInput } from "../server/validation.js";
 import type { LocalMfluxProgress } from "../shared/imageTypes.js";
 
 const referenceImage = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
+test("MFLUX startup removes only stale owner-marked directories", {
+  skip: process.platform !== "darwin" || process.arch !== "arm64",
+}, async () => {
+  const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "motio-mflux-cleanup-test-"));
+  const previousTemporaryDirectory = process.env.TMPDIR;
+  let orphanPid: number | undefined;
+  process.env.TMPDIR = temporaryRoot;
+  try {
+    const stale = path.join(temporaryRoot, "motio-mflux-stale");
+    const orphaned = path.join(temporaryRoot, "motio-mflux-orphaned");
+    const live = path.join(temporaryRoot, "motio-mflux-live");
+    const unmarked = path.join(temporaryRoot, "motio-mflux-unmarked");
+    await Promise.all([mkdir(stale), mkdir(orphaned), mkdir(live), mkdir(unmarked)]);
+    const orphanPrompt = path.join(orphaned, "prompt.txt");
+    await writeFile(orphanPrompt, "test");
+    const orphan = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", orphanPrompt], {
+      detached: true,
+      stdio: "ignore",
+    });
+    assert.ok(orphan.pid);
+    orphanPid = orphan.pid;
+    await Promise.all([
+      writeFile(path.join(stale, ".motio-owned"), `${JSON.stringify({ kind: "motio-mflux-request", version: 1, pid: 2_147_483_647, binary: process.execPath })}\n`),
+      writeFile(path.join(orphaned, ".motio-owned"), `${JSON.stringify({ kind: "motio-mflux-request", version: 1, pid: 2_147_483_647, binary: process.execPath })}\n`),
+      writeFile(path.join(live, ".motio-owned"), `${JSON.stringify({ kind: "motio-mflux-request", version: 1, pid: process.pid, binary: process.execPath })}\n`),
+    ]);
+
+    await initializeLocalMfluxStorage();
+    assert.deepEqual((await readdir(temporaryRoot)).sort(), ["motio-mflux-live", "motio-mflux-unmarked"]);
+    await assert.rejects(
+      generateLocalMfluxImage({
+        provider: "mflux",
+        model: "flux2-klein-4b",
+        prompt: "test image",
+        resolution: "1280x720",
+        steps: 3,
+        quantization: null,
+        lowRam: false,
+        vaeTiling: false,
+        vaeTileSize: 512,
+        referenceFit: "contain",
+      }),
+      (error) => error instanceof LocalMfluxError && error.type === "local_mflux_unavailable",
+    );
+  } finally {
+    if (orphanPid) {
+      try {
+        process.kill(-orphanPid, "SIGKILL");
+      } catch {
+        // Startup cleanup should already have stopped the fake orphan.
+      }
+    }
+    await rm(temporaryRoot, { recursive: true, force: true });
+    await mkdir(temporaryRoot);
+    await initializeLocalMfluxStorage();
+    await rm(temporaryRoot, { recursive: true, force: true });
+    if (previousTemporaryDirectory === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = previousTemporaryDirectory;
+  }
+});
 
 test("MFLUX validation enforces shared presets and advanced ranges", () => {
   assert.throws(() => validateGenerateImageInput({
@@ -106,9 +168,9 @@ test("MFLUX adapter returns and cleans a generated raster", {
   const previousTemporaryDirectory = process.env.TMPDIR;
   const previousPath = process.env.PATH;
   const fakeBinary = `#!/usr/bin/env node
-const { readFileSync, statSync, truncateSync, writeFileSync } = require("node:fs");
+const { readFileSync, readdirSync, statSync, truncateSync, writeFileSync } = require("node:fs");
 const { spawnSync } = require("node:child_process");
-const { basename } = require("node:path");
+const { basename, dirname } = require("node:path");
 const output = process.argv[process.argv.indexOf("--output") + 1];
 const prompt = readFileSync(process.argv[process.argv.indexOf("--prompt-file") + 1], "utf8");
 for (const argument of ["--model", "--prompt-file", "--steps", "--width", "--height"]) {
@@ -119,6 +181,7 @@ if (model !== "flux2-klein-4b" && model !== "qwen-image-edit") process.exit(2);
 const steps = Number(process.argv[process.argv.indexOf("--steps") + 1]);
 const referenceIndex = process.argv.indexOf("--image-paths");
 if (referenceIndex >= 0) {
+  if (readdirSync(dirname(process.argv[referenceIndex + 1])).some((name) => /^reference\\.(?:jpg|png|webp)$/.test(name))) process.exit(2);
   const referenceInfo = spawnSync("/usr/bin/sips", ["-g", "pixelWidth", "-g", "pixelHeight", process.argv[referenceIndex + 1]], { encoding: "utf8" });
   const width = process.argv[process.argv.indexOf("--width") + 1];
   const height = process.argv[process.argv.indexOf("--height") + 1];
@@ -195,6 +258,26 @@ process.exit(resizeStatus);
     assert.equal(editResult.mediaType, "image/png");
     assert.ok(progress.some((update) => update.phase === "generating" && update.step === 10 && update.etaSeconds === 20 && update.secondsPerStep === 2));
     assert.equal(progress.at(-1)?.phase, "decoding");
+    const preprocessingController = new AbortController();
+    const preprocessing = generateLocalMfluxImage({
+      provider: "mflux",
+      model: "flux2-klein-4b",
+      prompt: "test image",
+      resolution: "1280x720",
+      steps: 3,
+      quantization: null,
+      lowRam: false,
+      vaeTiling: false,
+      vaeTileSize: 512,
+      referenceFit: "contain",
+      inputReference: referenceImage,
+    }, preprocessingController.signal);
+    setTimeout(() => preprocessingController.abort(), 1);
+    await assert.rejects(
+      preprocessing,
+      (error) => error instanceof LocalMfluxError && error.type === "local_mflux_aborted",
+    );
+    assert.deepEqual(await readdir(temporaryRoot), []);
     const controller = new AbortController();
     let markStarted!: () => void;
     const started = new Promise<void>((resolve) => { markStarted = resolve; });

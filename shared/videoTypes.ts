@@ -4,6 +4,7 @@ export interface VideoStatusResponse {
   id: string;
   provider: "openrouter" | "local";
   status: GenerationStatus;
+  capabilityToken?: string;
   error?: string;
   videoUrl?: string;
   downloadUrl?: string;

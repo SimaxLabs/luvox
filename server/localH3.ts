@@ -25,7 +25,6 @@ const STORAGE_LOCK_OWNER = "owner.json";
 const STORAGE_LOCK_TOMBSTONE = /^\.motio\.lock\.stale-\d+-\d+$/;
 const STORAGE_OWNER = ".motio-owned";
 const STORAGE_OWNER_CONTENT = "motio-h3-jobs-v1\n";
-const MAX_DIAGNOSTIC_CHARS = 16_000;
 const MAX_PROGRESS_CARRY_CHARS = 4_096;
 const MAX_QUEUED_JOBS = 3;
 const MAX_REFERENCE_IMAGE_BYTES = 25 * 1024 * 1024;
@@ -33,6 +32,7 @@ const MAX_REFERENCE_IMAGE_PIXELS = 50_000_000;
 const MAX_REFERENCE_ASPECT_RATIO = 16;
 const MAX_RETAINED_REFERENCE_IMAGES = 20;
 const REFERENCE_IMAGE_TTL_MS = 24 * 60 * 60_000;
+const WORKSPACE_LEASE_MS = 5 * 60_000;
 const REFERENCE_IMAGE_NAME = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(?:jpg|png|webp)$/;
 
 interface LocalH3Runtime {
@@ -69,7 +69,6 @@ interface LocalJob {
   phase: string;
   progress: number;
   error?: string;
-  diagnostics: string;
   progressCarry: string;
   cancelRequested?: boolean;
   discardOnCompletion?: boolean;
@@ -98,6 +97,7 @@ let referenceUploadTail: Promise<void> = Promise.resolve();
 let referenceProcessingTail: Promise<void> = Promise.resolve();
 const referenceUploads = new Map<string, { path: string; workspaceToken: string }>();
 const discardedWorkspaces = new Set<string>();
+const workspaceLeases = new Map<string, ReturnType<typeof setTimeout>>();
 const storageLockToken = randomUUID();
 let storageLockPath: string | undefined;
 let storageServerStartedAt: string | undefined;
@@ -421,6 +421,26 @@ function retireLocalWorkspace(workspaceToken: string): void {
   discardedWorkspaces.add(workspaceToken);
 }
 
+function clearLocalH3WorkspaceLease(workspaceToken: string): void {
+  const lease = workspaceLeases.get(workspaceToken);
+  if (lease) clearTimeout(lease);
+  workspaceLeases.delete(workspaceToken);
+}
+
+export function renewLocalH3Workspace(workspaceToken: string): { renewed: true } {
+  if (!isLocalH3Supported()) return { renewed: true };
+  assertLocalOperationMayContinue();
+  assertLocalWorkspaceActive(workspaceToken);
+  clearLocalH3WorkspaceLease(workspaceToken);
+  const lease = setTimeout(() => {
+    workspaceLeases.delete(workspaceToken);
+    void discardLocalH3Workspace(workspaceToken).catch(() => undefined);
+  }, WORKSPACE_LEASE_MS);
+  lease.unref();
+  workspaceLeases.set(workspaceToken, lease);
+  return { renewed: true };
+}
+
 async function removeOwnedArtifact(
   target: string,
   recursive: boolean,
@@ -668,6 +688,8 @@ async function cleanOwnedStorage(jobsDirectory: string): Promise<void> {
   queue.length = 0;
   referenceUploads.clear();
   discardedWorkspaces.clear();
+  for (const lease of workspaceLeases.values()) clearTimeout(lease);
+  workspaceLeases.clear();
 }
 
 export async function initializeLocalH3Storage(): Promise<void> {
@@ -689,6 +711,8 @@ export function beginLocalH3Shutdown(): void {
   shuttingDown = true;
   storageReady = false;
   queue.length = 0;
+  for (const lease of workspaceLeases.values()) clearTimeout(lease);
+  workspaceLeases.clear();
 }
 
 export async function shutdownLocalH3Storage(): Promise<void> {
@@ -1031,10 +1055,9 @@ async function processReferenceImage(
         detached: true,
         env: localProcessEnvironment(),
         shell: false,
-        stdio: ["ignore", "ignore", "pipe"],
+        stdio: ["ignore", "ignore", "ignore"],
       });
       trackChildProcess(child);
-      let diagnostics = "";
       let settled = false;
       let terminationError: LocalH3Error | undefined;
       const finish = (error?: LocalH3Error) => {
@@ -1055,9 +1078,6 @@ async function processReferenceImage(
       }, 30_000);
       timeout.unref();
 
-      child.stderr!.on("data", (chunk: Buffer) => {
-        diagnostics = `${diagnostics}${chunk.toString("utf8")}`.slice(-2_000);
-      });
       child.once("error", () => finish(new LocalH3Error(
         "FFmpeg is required to frame local reference images.",
         503,
@@ -1073,11 +1093,8 @@ async function processReferenceImage(
           finish();
           return;
         }
-        const detail = diagnostics.trim();
         finish(new LocalH3Error(
-          detail
-            ? `The reference image could not be framed: ${detail}`
-            : "The reference image could not be framed for the selected resolution.",
+          "The reference image could not be framed for the selected resolution.",
           400,
           "local_reference_error",
           false,
@@ -1243,6 +1260,7 @@ export function uploadLocalReferenceImage(
   workspaceToken: string,
   previousToken?: string,
 ): Promise<{ path: string; token: string }> {
+  renewLocalH3Workspace(workspaceToken);
   const release = beginLocalOperation();
   const operation = referenceUploadTail.then(() => {
     assertLocalOperationMayContinue();
@@ -1271,6 +1289,7 @@ export function deleteLocalReferenceImage(token: string, workspaceToken: string)
 
 export function discardLocalH3Workspace(workspaceToken: string): Promise<{ cleared: true }> {
   if (!isLocalH3Supported()) return Promise.resolve({ cleared: true });
+  clearLocalH3WorkspaceLease(workspaceToken);
   const release = beginLocalOperation();
   retireLocalWorkspace(workspaceToken);
   const activeJob = activeJobId ? jobs.get(activeJobId) : undefined;
@@ -1466,10 +1485,6 @@ function toResponse(job: LocalJob): VideoStatusResponse {
   return response;
 }
 
-function appendDiagnostics(job: LocalJob, text: string): void {
-  job.diagnostics = `${job.diagnostics}${text}`.slice(-MAX_DIAGNOSTIC_CHARS);
-}
-
 function parseProgressLine(job: LocalJob, line: string): void {
   const match = line.match(/^\s*(.+?)\s+(\d+)\/(\d+)(?:\s+.*)?$/);
   if (!match) return;
@@ -1478,7 +1493,7 @@ function parseProgressLine(job: LocalJob, line: string): void {
   const total = Number(match[3]);
   if (!Number.isFinite(completed) || !Number.isFinite(total) || total < 1) return;
 
-  job.phase = match[1].trim().slice(0, 80);
+  job.phase = "Generating video";
   job.progress = Math.min(99, Math.max(0, Math.round((completed / total) * 100)));
 }
 
@@ -1488,15 +1503,13 @@ function consumeProgress(job: LocalJob, text: string): void {
   for (const line of parts) parseProgressLine(job, line);
 }
 
-function failureDetails(job: LocalJob, code: number | null, signal: NodeJS.Signals | null): string {
-  const detailLines = job.diagnostics
-    .split(/[\r\n]+/)
-    .map((line) => line.trim())
-    .filter((line) => line && !/^.+?\s+\d+\/\d+$/.test(line))
-    .slice(-6);
-  const exit = signal ? `signal ${signal}` : `exit code ${code ?? "unknown"}`;
-  const details = detailLines.join(" ").slice(-2_000);
-  return details ? `h3.c failed with ${exit}: ${details}` : `h3.c failed with ${exit}.`;
+function publicExecutionError(error: unknown): string {
+  const message = error instanceof Error ? error.message : "";
+  return message === "Local h3.c generation was stopped." ||
+    message === "h3.c exited successfully but did not create a video." ||
+    /^h3\.c exceeded the \d+-minute generation timeout\.$/.test(message)
+    ? message
+    : "Local h3.c generation failed.";
 }
 
 async function writeTerminalMarker(job: LocalJob, status: "completed" | "failed"): Promise<void> {
@@ -1579,20 +1592,18 @@ async function executeJob(job: LocalJob): Promise<void> {
 
     child.stdout.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf8");
-      appendDiagnostics(job, text);
       consumeProgress(job, text);
     });
     child.stderr.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf8");
-      appendDiagnostics(job, text);
       consumeProgress(job, text);
     });
     const resultPromise = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
       (resolve, reject) => {
-        child.once("error", (error) => {
+        child.once("error", () => {
           clearTimeout(timeout);
           if (forceKill) clearTimeout(forceKill);
-          reject(error);
+          reject(new Error("Local h3.c generation failed."));
         });
         child.once("close", (code, signal) => {
           clearTimeout(timeout);
@@ -1628,7 +1639,7 @@ async function executeJob(job: LocalJob): Promise<void> {
       throw new Error(`h3.c exceeded the ${jobTimeoutMs() / 60_000}-minute generation timeout.`);
     }
     if (result.code !== 0) {
-      throw new Error(failureDetails(job, result.code, result.signal));
+      throw new Error("Local h3.c generation failed.");
     }
 
     job.phase = "Finalizing video";
@@ -1646,7 +1657,7 @@ async function executeJob(job: LocalJob): Promise<void> {
     await rm(job.temporaryOutput, { force: true }).catch(() => undefined);
     job.status = "failed";
     job.phase = "Failed";
-    job.error = error instanceof Error ? error.message : "Local h3.c generation failed.";
+    job.error = publicExecutionError(error);
     await writeTerminalMarker(job, "failed").catch(() => undefined);
   }
 }
@@ -1759,7 +1770,6 @@ async function generateLocalVideoOperation(
       status: "queued",
       phase: activeJobId ? "Waiting for local GPU" : "Queued",
       progress: 0,
-      diagnostics: "",
       progressCarry: "",
     };
 
@@ -1782,12 +1792,14 @@ async function generateLocalVideoOperation(
 }
 
 export function generateLocalVideo(input: LocalGenerateVideoInput, workspaceToken: string): Promise<VideoStatusResponse> {
+  renewLocalH3Workspace(workspaceToken);
   assertLocalWorkspaceActive(workspaceToken);
   const release = beginLocalOperation();
   return generateLocalVideoOperation(input, workspaceToken).finally(release);
 }
 
 export function getLocalVideoStatus(id: string, workspaceToken: string): VideoStatusResponse {
+  renewLocalH3Workspace(workspaceToken);
   assertLocalWorkspaceActive(workspaceToken);
   const job = jobs.get(id);
   if (!job || job.workspaceToken !== workspaceToken) {
@@ -1802,6 +1814,7 @@ export function getLocalVideoStatus(id: string, workspaceToken: string): VideoSt
 }
 
 export async function getLocalVideoPath(id: string, workspaceToken: string): Promise<string> {
+  renewLocalH3Workspace(workspaceToken);
   assertLocalWorkspaceActive(workspaceToken);
   const job = jobs.get(id);
   if (!job || job.workspaceToken !== workspaceToken) {

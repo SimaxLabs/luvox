@@ -77,7 +77,7 @@ H3_BINARY=/absolute/path/to/h3.c/h3
 H3_MODEL_DIR=/absolute/path/to/MiniMax-H3
 ```
 
-Run `npm run dev` and select **Local** in Motio. Local mode does not need an OpenRouter API key.
+Run `npm run dev` and select **Local** in Motio. Local mode does not need an OpenRouter API key. The current official h3.c CLI accepts one-shot prompts only through a process argument, so prompts may be visible to local process-inspection and monitoring tools while generation runs.
 
 The Advanced section includes allowlisted h3.c acceleration presets, seed control, and SSD streaming. Reduced tokens and the fast internal canvas are limited to the officially validated 512p / 1:1 / Balanced path.
 
@@ -93,13 +93,13 @@ Motio uses volatile session state instead of accounts or a generation database. 
 
 ### Hosted version
 
-The hosted version is OpenRouter-only; h3.c is unavailable and Motio creates no local generation files. UI-entered keys, prompts, results, and job records stay in tab or transit memory and are not persisted by Motio. Keys travel only in request headers, remain pinned to submitted jobs in tab memory, and disappear on workspace reset, reload, or tab close. Videos are streamed through an authenticated proxy rather than saved to disk; temporary-key media uses revocable browser `blob:` URLs. A server-configured `OPENROUTER_API_KEY` never reaches the browser.
+The hosted version is OpenRouter-only; h3.c is unavailable and Motio creates no local generation files. UI-entered keys, prompts, results, and job records stay in tab or transit memory and are not persisted by Motio. Keys travel only in request headers, remain pinned to submitted jobs in tab memory, and disappear on workspace reset, reload, or tab close. Videos are streamed through an authenticated proxy rather than saved to disk; temporary-key media uses revocable browser `blob:` URLs. Server-key video access uses a per-job capability kept only in tab and server memory, never in a URL, and expires after 24 hours without use. A server-configured `OPENROUTER_API_KEY` never reaches the browser.
 
 OpenRouter, model providers, and hosting infrastructure have separate data practices. Review OpenRouter's [privacy policy](https://openrouter.ai/privacy) and [provider logging documentation](https://openrouter.ai/docs/features/privacy-and-logging). Closing Motio does not cancel provider work already submitted.
 
 ### Self-hosted local h3.c
 
-Local MFLUX and h3.c run only on a compatible Mac. MFLUX uses a private system temporary directory for each request and removes it when the request finishes or stops. h3.c temporarily stores app-owned jobs, outputs, and uploaded references under `.h3-jobs` or `H3_JOBS_DIR`; per-tab tokens isolate them. Motio cleans h3.c files when a job is deleted or aborted, on Clear, delivered reload/close cleanup, startup, and graceful shutdown; an abrupt close may leave files until restart.
+Local MFLUX and h3.c run only on a compatible Mac. MFLUX uses an owner-marked private system temporary directory for each request, removes it when the request finishes or stops, and removes stale owned directories at startup after an abrupt server exit. h3.c temporarily stores app-owned jobs, outputs, and uploaded references under `.h3-jobs` or `H3_JOBS_DIR`; per-tab tokens isolate them. Motio cleans h3.c files when a job is deleted or aborted, on Clear, reload/close cleanup, startup, graceful shutdown, or after a browser workspace misses its five-minute lease.
 
 ## License
 

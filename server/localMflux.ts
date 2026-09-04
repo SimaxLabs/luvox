@@ -1,8 +1,9 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
-import { constants as fsConstants, accessSync, statSync } from "node:fs";
-import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { constants as fsConstants, accessSync, rmSync, statSync } from "node:fs";
+import { chmod, lstat, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import { getMfluxImageModel, getMfluxImageResolution, MFLUX_IMAGE_MODELS } from "../shared/imageModels.js";
 import type { ImageGenerationResponse, LocalMfluxProgress } from "../shared/imageTypes.js";
@@ -11,16 +12,22 @@ import type { LocalMfluxGenerateImageInput } from "./validation.js";
 import { rasterMediaType } from "./validation.js";
 
 const MAX_OUTPUT_BYTES = 50 * 1024 * 1024;
-const MAX_DIAGNOSTIC_CHARS = 16_000;
-const MAX_REFERENCE_PIXELS = 50_000_000;
+const MAX_REFERENCE_PIXELS = 4_096 * 4_096;
 const MAX_REFERENCE_ASPECT_RATIO = 16;
+const MFLUX_TEMP_PREFIX = "motio-mflux-";
+const MFLUX_OWNER_FILE = ".motio-owned";
+const MFLUX_OWNER_KIND = "motio-mflux-request";
+const MFLUX_OWNER_MAX_BYTES = 4_096;
 const execFileAsync = promisify(execFile);
+const activeDirectories = new Set<string>();
+const shutdownController = new AbortController();
 let activeChild: ChildProcess | undefined;
 let activeExecution: Promise<void> | undefined;
 let activeCompletion: Promise<void> | undefined;
 let generationReserved = false;
 let stopActive: (() => void) | undefined;
 let shuttingDown = false;
+let storageBlocked = false;
 
 export class LocalMfluxError extends Error {
   constructor(
@@ -70,7 +77,7 @@ export function isLocalMfluxConfigured(): boolean {
 }
 
 export function getAvailableLocalMfluxModels(): string[] {
-  if (!isLocalMfluxSupported()) return [];
+  if (!isLocalMfluxSupported() || storageBlocked) return [];
   try {
     timeoutMilliseconds();
   } catch {
@@ -109,7 +116,129 @@ function signalChild(child: ChildProcess, signal: NodeJS.Signals): void {
   }
 }
 
-async function inspectRaster(file: string, label: string, expectedSize?: { width: number; height: number }): Promise<{ width: number; height: number }> {
+function assertMfluxMayContinue(signal?: AbortSignal): void {
+  if (!shuttingDown && !signal?.aborted) return;
+  throw new LocalMfluxError("MFLUX generation was stopped.", 499, "local_mflux_aborted", false);
+}
+
+function processDefinitelyStopped(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid < 1) return false;
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ESRCH";
+  }
+}
+
+function processGroupExists(pid: number): boolean {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+async function stopOwnedProcessGroup(
+  directory: string,
+  binary: string | undefined,
+): Promise<boolean> {
+  if (!binary) return false;
+  const { stdout } = await execFileAsync(
+    "/bin/ps",
+    ["-axo", "pgid=,command="],
+    { encoding: "utf8", env: childEnvironment(), maxBuffer: 1024 * 1024, timeout: 5_000 },
+  );
+  const promptPath = path.join(directory, "prompt.txt");
+  const processGroups = new Set(stdout.split("\n").flatMap((line) => {
+    const match = /^\s*(\d+)\s+(.+)$/.exec(line);
+    return match && match[2].includes(binary) && match[2].includes(promptPath) ? [Number(match[1])] : [];
+  }));
+  if (processGroups.size === 0) return true;
+  if (processGroups.size !== 1) return false;
+  const [processGroup] = processGroups;
+  if (!Number.isInteger(processGroup) || processGroup < 1) return false;
+
+  try {
+    process.kill(-processGroup, "SIGTERM");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") return true;
+    return false;
+  }
+  for (let attempt = 0; attempt < 25 && processGroupExists(processGroup); attempt += 1) await delay(100);
+  if (processGroupExists(processGroup)) {
+    try {
+      process.kill(-processGroup, "SIGKILL");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") return false;
+    }
+  }
+  for (let attempt = 0; attempt < 10 && processGroupExists(processGroup); attempt += 1) await delay(50);
+  return !processGroupExists(processGroup);
+}
+
+export async function initializeLocalMfluxStorage(): Promise<void> {
+  if (!isLocalMfluxSupported()) return;
+  storageBlocked = false;
+  const temporaryDirectory = os.tmpdir();
+  let entries;
+  try {
+    entries = await readdir(temporaryDirectory, { withFileTypes: true });
+  } catch {
+    storageBlocked = true;
+    return;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !entry.name.startsWith(MFLUX_TEMP_PREFIX)) continue;
+    const candidate = path.join(temporaryDirectory, entry.name);
+    let owned = false;
+    try {
+      const candidateInfo = await lstat(candidate);
+      if (!candidateInfo.isDirectory() || candidateInfo.isSymbolicLink()) continue;
+      if (typeof process.getuid === "function" && candidateInfo.uid !== process.getuid()) continue;
+      const ownerPath = path.join(candidate, MFLUX_OWNER_FILE);
+      const ownerInfo = await lstat(ownerPath);
+      if (!ownerInfo.isFile() || ownerInfo.isSymbolicLink() || ownerInfo.size > MFLUX_OWNER_MAX_BYTES) continue;
+      owned = true;
+      const owner = JSON.parse(await readFile(ownerPath, "utf8")) as {
+        kind?: unknown;
+        version?: unknown;
+        pid?: unknown;
+        binary?: unknown;
+      };
+      if (
+        owner.kind !== MFLUX_OWNER_KIND ||
+        owner.version !== 1 ||
+        typeof owner.pid !== "number"
+      ) {
+        owned = false;
+        continue;
+      }
+      if (!processDefinitelyStopped(owner.pid)) {
+        storageBlocked = true;
+        continue;
+      }
+      if (!await stopOwnedProcessGroup(candidate, typeof owner.binary === "string" ? owner.binary : undefined)) {
+        storageBlocked = true;
+        continue;
+      }
+      await rm(candidate, { recursive: true, force: true });
+    } catch {
+      if (owned) storageBlocked = true;
+      // Unmarked, malformed, or inaccessible directories are not ours to remove.
+    }
+  }
+}
+
+async function inspectRaster(
+  file: string,
+  label: string,
+  expectedSize?: { width: number; height: number },
+  signal?: AbortSignal,
+  decode = true,
+): Promise<{ width: number; height: number }> {
+  assertMfluxMayContinue(signal);
   const errorStatus = expectedSize ? 502 : 400;
   const errorType = expectedSize ? "local_mflux_output_error" : "local_mflux_image_error";
   let stdout: string;
@@ -117,9 +246,10 @@ async function inspectRaster(file: string, label: string, expectedSize?: { width
     ({ stdout } = await execFileAsync(
       "/usr/bin/sips",
       ["-g", "pixelWidth", "-g", "pixelHeight", file],
-      { encoding: "utf8", env: childEnvironment(), maxBuffer: 8_192, timeout: 15_000 },
+      { encoding: "utf8", env: childEnvironment(), killSignal: "SIGKILL", maxBuffer: 8_192, signal, timeout: 15_000 },
     ));
   } catch {
+    assertMfluxMayContinue(signal);
     throw new LocalMfluxError(`${label} is not a decodable raster image.`, errorStatus, errorType, false);
   }
   const width = Number(/pixelWidth:\s*(\d+)/.exec(stdout)?.[1]);
@@ -142,17 +272,19 @@ async function inspectRaster(file: string, label: string, expectedSize?: { width
       false,
     );
   }
+  if (!decode) return { width, height };
 
   const probe = `${file}.probe.png`;
   try {
     await execFileAsync(
       "/usr/bin/sips",
       ["-s", "format", "png", file, "--out", probe],
-      { encoding: "utf8", env: childEnvironment(), maxBuffer: 8_192, timeout: 30_000 },
+      { encoding: "utf8", env: childEnvironment(), killSignal: "SIGKILL", maxBuffer: 8_192, signal, timeout: 30_000 },
     );
     const probeStats = await stat(probe);
     if (!probeStats.isFile() || probeStats.size < 1) throw new Error("empty probe");
   } catch {
+    assertMfluxMayContinue(signal);
     throw new LocalMfluxError(`${label} is not a decodable raster image.`, errorStatus, errorType, false);
   } finally {
     await rm(probe, { force: true });
@@ -165,8 +297,9 @@ async function frameReferenceImage(
   directory: string,
   target: { width: number; height: number },
   fit: LocalH3FrameFitId,
+  signal?: AbortSignal,
 ): Promise<string> {
-  const sourceSize = await inspectRaster(source, "The reference image");
+  const sourceSize = await inspectRaster(source, "The reference image", undefined, signal, false);
   const scale = fit === "cover"
     ? Math.max(target.width / sourceSize.width, target.height / sourceSize.height)
     : Math.min(target.width / sourceSize.width, target.height / sourceSize.height);
@@ -186,9 +319,10 @@ async function frameReferenceImage(
         source,
         "--out", output,
       ],
-      { encoding: "utf8", env: childEnvironment(), maxBuffer: 8_192, timeout: 30_000 },
+      { encoding: "utf8", env: childEnvironment(), killSignal: "SIGKILL", maxBuffer: 8_192, signal, timeout: 30_000 },
     );
   } catch {
+    assertMfluxMayContinue(signal);
     throw new LocalMfluxError(
       "The reference image could not be framed for the selected resolution.",
       400,
@@ -196,7 +330,7 @@ async function frameReferenceImage(
       false,
     );
   }
-  const outputSize = await inspectRaster(output, "The framed reference image");
+  const outputSize = await inspectRaster(output, "The framed reference image", undefined, signal);
   if (outputSize.width !== target.width || outputSize.height !== target.height) {
     throw new LocalMfluxError(
       "The reference image could not be framed for the selected resolution.",
@@ -236,7 +370,6 @@ function runMflux(
       stdio: ["ignore", "pipe", "pipe"],
     });
     activeChild = child;
-    let diagnostics = "";
     let settled = false;
     let stopError: LocalMfluxError | undefined;
     let killTimer: ReturnType<typeof setTimeout> | undefined;
@@ -245,7 +378,6 @@ function runMflux(
 
     const appendDiagnostics = (chunk: Buffer) => {
       const text = chunk.toString("utf8");
-      diagnostics = (diagnostics + text).slice(-MAX_DIAGNOSTIC_CHARS);
       progressBuffer = (progressBuffer + text).slice(-4_096);
       for (const match of progressBuffer.matchAll(/(\d{1,3})%\|[^\r\n]*\|\s*(\d+)\/(\d+)\s*\[([^\]]+)\]/g)) {
         const step = Number(match[2]);
@@ -284,7 +416,7 @@ function runMflux(
     }, timeoutMs);
     timeout.unref();
 
-    child.once("error", (error) => {
+    child.once("error", () => {
       if (settled) return;
       settled = true;
       if (activeChild === child) activeChild = undefined;
@@ -292,7 +424,7 @@ function runMflux(
       clearTimeout(timeout);
       if (killTimer) clearTimeout(killTimer);
       signal?.removeEventListener("abort", abort);
-      reject(new LocalMfluxError(`MFLUX could not start: ${error.message}`, 503, "local_mflux_spawn_error", false));
+      reject(new LocalMfluxError("MFLUX could not start.", 503, "local_mflux_spawn_error", false));
     });
     child.once("close", (code) => {
       if (activeChild === child) activeChild = undefined;
@@ -304,15 +436,7 @@ function runMflux(
       settled = true;
       if (stopError) reject(stopError);
       else if (code === 0) resolve();
-      else {
-        const detail = diagnostics.trim();
-        reject(new LocalMfluxError(
-          detail ? `MFLUX generation failed: ${detail}` : "MFLUX generation failed.",
-          500,
-          "local_mflux_error",
-          false,
-        ));
-      }
+      else reject(new LocalMfluxError("MFLUX generation failed.", 500, "local_mflux_error", false));
     });
   });
 }
@@ -328,6 +452,14 @@ export async function generateLocalMfluxImage(
       503,
       "local_mflux_unsupported",
       false,
+    );
+  }
+  if (storageBlocked) {
+    throw new LocalMfluxError(
+      "Local MFLUX storage is still owned by another process.",
+      503,
+      "local_mflux_unavailable",
+      true,
     );
   }
   const model = getMfluxImageModel(input.model);
@@ -357,6 +489,10 @@ export async function generateLocalMfluxImage(
   if (generationReserved) {
     throw new LocalMfluxError("Another local MFLUX generation is active.", 409, "local_mflux_busy", true);
   }
+  const operationSignal = signal
+    ? AbortSignal.any([signal, shutdownController.signal])
+    : shutdownController.signal;
+  assertMfluxMayContinue(operationSignal);
   const resolution = getMfluxImageResolution(input.resolution);
   if (!resolution) {
     throw new LocalMfluxError("Unsupported MFLUX resolution preset.", 400, "local_mflux_resolution_error", false);
@@ -370,11 +506,21 @@ export async function generateLocalMfluxImage(
   });
   let directory: string | undefined;
   try {
-    directory = await mkdtemp(path.join(os.tmpdir(), "motio-mflux-"));
+    directory = await mkdtemp(path.join(os.tmpdir(), MFLUX_TEMP_PREFIX));
+    activeDirectories.add(directory);
     await chmod(directory, 0o700);
+    const owner = `${JSON.stringify({ kind: MFLUX_OWNER_KIND, version: 1, pid: process.pid, binary })}\n`;
+    if (Buffer.byteLength(owner) > MFLUX_OWNER_MAX_BYTES) {
+      throw new LocalMfluxError("The configured MFLUX executable path is too long.", 503, "local_mflux_configuration_error", false);
+    }
+    await writeFile(
+      path.join(directory, MFLUX_OWNER_FILE),
+      owner,
+      { flag: "wx", mode: 0o600, signal: operationSignal },
+    );
     const promptPath = path.join(directory, "prompt.txt");
     const outputPath = path.join(directory, "output.png");
-    await writeFile(promptPath, input.prompt, { mode: 0o600 });
+    await writeFile(promptPath, input.prompt, { mode: 0o600, signal: operationSignal });
     const args = [
       "--model", input.model,
       "--prompt-file", promptPath,
@@ -392,14 +538,29 @@ export async function generateLocalMfluxImage(
       const [header, base64] = input.inputReference.split(",", 2);
       const extension = header === "data:image/jpeg;base64" ? "jpg" : header === "data:image/webp;base64" ? "webp" : "png";
       const referencePath = path.join(directory, `reference.${extension}`);
-      await writeFile(referencePath, Buffer.from(base64, "base64"), { mode: 0o600 });
-      args.push("--image-paths", await frameReferenceImage(referencePath, directory, resolution, input.referenceFit));
+      await writeFile(referencePath, Buffer.from(base64, "base64"), { mode: 0o600, signal: operationSignal });
+      try {
+        args.push("--image-paths", await frameReferenceImage(
+          referencePath,
+          directory,
+          resolution,
+          input.referenceFit,
+          operationSignal,
+        ));
+      } finally {
+        await rm(referencePath, { force: true });
+      }
     }
 
-    if (shuttingDown || signal?.aborted) {
-      throw new LocalMfluxError("MFLUX generation was stopped.", 499, "local_mflux_aborted", false);
-    }
-    activeExecution = runMflux(binary, args, directory, input.steps, signal, onProgress);
+    assertMfluxMayContinue(operationSignal);
+    activeExecution = runMflux(
+      binary,
+      args,
+      directory,
+      input.steps,
+      operationSignal,
+      onProgress,
+    );
     await activeExecution;
     let outputStats;
     try {
@@ -410,17 +571,24 @@ export async function generateLocalMfluxImage(
     if (!outputStats.isFile() || outputStats.size < 1 || outputStats.size > MAX_OUTPUT_BYTES) {
       throw new LocalMfluxError("MFLUX did not create a valid image file.", 502, "local_mflux_output_error", false);
     }
-    await inspectRaster(outputPath, "The MFLUX output", resolution);
+    await inspectRaster(outputPath, "The MFLUX output", resolution, operationSignal);
+    assertMfluxMayContinue(operationSignal);
     const output = await readFile(outputPath);
     const mediaType = rasterMediaType(output.subarray(0, 24).toString("base64"));
     if (!mediaType) {
       throw new LocalMfluxError("MFLUX created an unsupported image format.", 502, "local_mflux_output_error", false);
     }
     return { b64Json: output.toString("base64"), mediaType };
+  } catch (error) {
+    if (operationSignal.aborted) assertMfluxMayContinue(operationSignal);
+    throw error;
   } finally {
     activeExecution = undefined;
     try {
-      if (directory) await rm(directory, { recursive: true, force: true });
+      if (directory) {
+        await rm(directory, { recursive: true, force: true });
+        activeDirectories.delete(directory);
+      }
     } finally {
       generationReserved = false;
       finishCompletion?.();
@@ -431,6 +599,7 @@ export async function generateLocalMfluxImage(
 
 export function beginLocalMfluxShutdown(): void {
   shuttingDown = true;
+  shutdownController.abort();
   stopActive?.();
 }
 
@@ -440,5 +609,13 @@ export async function shutdownLocalMflux(): Promise<void> {
 }
 
 process.once("exit", () => {
+  shutdownController.abort();
   if (activeChild) signalChild(activeChild, "SIGKILL");
+  for (const directory of activeDirectories) {
+    try {
+      rmSync(directory, { recursive: true, force: true });
+    } catch {
+      // Startup cleanup retries owner-marked directories after an abrupt exit.
+    }
+  }
 });

@@ -57,7 +57,11 @@ const prompt = process.argv[process.argv.indexOf("-p") + 1];
 const output = process.argv[process.argv.indexOf("-o") + 1];
 if (prompt === "complete") {
   writeFileSync(output, "video");
+} else if (prompt === "fail") {
+  console.error("private engine detail: /Users/test/secret-model");
+  process.exit(1);
 } else {
+  console.error("private progress detail: /Users/test/secret-model 1/2");
   writeFileSync(${JSON.stringify(started)}, "started");
   process.on("SIGTERM", () => process.exit(0));
   setInterval(() => {}, 1000);
@@ -74,11 +78,17 @@ if (prompt === "complete") {
     const workspaceToken = crypto.randomUUID();
     const active = await generateLocalVideo(input("wait"), workspaceToken);
     await waitFor(async () => (await readdir(directory)).includes("started"));
+    await waitFor(() => getLocalVideoStatus(active.id, workspaceToken).phase === "Generating video");
     assert.deepEqual(await deleteLocalVideoJob(active.id, workspaceToken), { deleted: true });
     assert.throws(
       () => getLocalVideoStatus(active.id, workspaceToken),
       (error) => error instanceof LocalH3Error && error.type === "local_job_not_found",
     );
+
+    const failed = await generateLocalVideo(input("fail"), workspaceToken);
+    await waitFor(() => getLocalVideoStatus(failed.id, workspaceToken).status === "failed");
+    assert.equal(getLocalVideoStatus(failed.id, workspaceToken).error, "Local h3.c generation failed.");
+    await deleteLocalVideoJob(failed.id, workspaceToken);
 
     const completed = await generateLocalVideo(input("complete"), workspaceToken);
     await waitFor(() => getLocalVideoStatus(completed.id, workspaceToken).status === "completed");

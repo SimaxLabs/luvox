@@ -74,6 +74,10 @@ function localWorkspaceHeaders(workspaceToken?: string): Record<string, string> 
   return workspaceToken ? { "X-Motio-Workspace-Token": workspaceToken } : {};
 }
 
+function videoCapabilityHeaders(capabilityToken?: string): Record<string, string> {
+  return capabilityToken ? { "X-Motio-Video-Token": capabilityToken } : {};
+}
+
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   let response: Response;
 
@@ -283,6 +287,13 @@ export function discardLocalWorkspace(
   });
 }
 
+export function renewLocalWorkspace(workspaceToken: string): Promise<{ renewed: true }> {
+  return request<{ renewed: true }>("/api/local/workspace", {
+    method: "PUT",
+    headers: localWorkspaceHeaders(workspaceToken),
+  });
+}
+
 export function deleteLocalVideoJob(id: string, workspaceToken: string): Promise<{ deleted: true }> {
   return request<{ deleted: true }>(`/api/local/video/${encodeURIComponent(id)}`, {
     method: "DELETE",
@@ -295,9 +306,14 @@ export function getVideoStatus(
   sessionApiKey?: string,
   signal?: AbortSignal,
   workspaceToken?: string,
+  capabilityToken?: string,
 ): Promise<VideoJob> {
   return request<VideoJob>(`/api/video/status/${encodeURIComponent(id)}`, {
-    headers: { ...sessionKeyHeaders(sessionApiKey), ...localWorkspaceHeaders(workspaceToken) },
+    headers: {
+      ...sessionKeyHeaders(sessionApiKey),
+      ...localWorkspaceHeaders(workspaceToken),
+      ...videoCapabilityHeaders(capabilityToken),
+    },
     cache: "no-store",
     signal,
   });
@@ -308,6 +324,7 @@ export async function getVideoContent(
   sessionApiKey?: string,
   signal?: AbortSignal,
   workspaceToken?: string,
+  capabilityToken?: string,
 ): Promise<Blob> {
   const contentUrl = new URL(url, window.location.origin);
   if (
@@ -322,7 +339,11 @@ export async function getVideoContent(
 
   try {
     response = await fetch(contentUrl.pathname, {
-      headers: { ...sessionKeyHeaders(sessionApiKey), ...localWorkspaceHeaders(workspaceToken) },
+      headers: {
+        ...sessionKeyHeaders(sessionApiKey),
+        ...localWorkspaceHeaders(workspaceToken),
+        ...videoCapabilityHeaders(capabilityToken),
+      },
       signal,
     });
   } catch {
@@ -345,4 +366,16 @@ export async function getVideoContent(
   }
 
   return response.blob();
+}
+
+export function releaseVideoCapability(
+  id: string,
+  capabilityToken: string,
+  keepalive = false,
+): Promise<{ released: true }> {
+  return request<{ released: true }>(`/api/video/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    headers: videoCapabilityHeaders(capabilityToken),
+    keepalive,
+  });
 }
