@@ -51,6 +51,28 @@ npm run build
 NODE_ENV=production npm start
 ```
 
+## Personalize OpenRouter models
+
+Luvox includes a model library so users can extend the tool without changing its source code. Choose **Manage models** beside the OpenRouter key field to search OpenRouter's dedicated [image](https://openrouter.ai/docs/api/api-reference/images/list-image-generation-models) and [video](https://openrouter.ai/docs/api/api-reference/video-generation/list-all-video-generation-models) catalogs. Luvox creates a compatible JSON definition from the published capabilities, lets you choose defaults, and saves it for immediate use. Discovery does not submit a generation or spend credits.
+
+Built-in models cannot be replaced or removed. Custom definitions may use only controls Luvox understands: image resolution, image aspect ratio, one optional or required image reference, video duration, video resolution, video aspect ratio, public first/last-frame URLs, and generated audio. Models requiring vector output, multiple mandatory references, or unsupported workflows are omitted. Provider-specific parameters continue to use provider defaults.
+
+### Persistence and manual configuration
+
+Host runs store custom models in `.luvox/openrouter-models.json`. Set `LUVOX_DATA_DIR` to an absolute directory to keep the file elsewhere. Docker Compose stores the same file in the persistent `luvox-data` volume; `docker compose down -v` deliberately removes that volume and its model configuration.
+
+The file can also be edited by hand while Luvox is stopped:
+
+```json
+{
+  "version": 1,
+  "images": [],
+  "videos": []
+}
+```
+
+Invalid definitions stop server startup rather than silently weakening request validation. Luvox reads manual changes at startup, so restart it after editing the file.
+
 ## Local image generation with MFLUX
 
 Install and verify [MFLUX](https://github.com/mflux-community/mflux) on a Mac with Apple Silicon. Luvox automatically finds `mflux-generate-flux2`, its `mflux-generate-flux2-edit` companion, and `mflux-generate-qwen-edit` on the server process's `PATH`; set absolute paths in `.env` when the primary executables are not detected:
@@ -91,7 +113,7 @@ Each generation type has one slot: OpenRouter image, local MFLUX image, OpenRout
 
 ## Privacy
 
-Luvox uses volatile session state instead of accounts or a generation database. API responses are marked `private, no-store`, and credentials are kept out of payloads and URLs.
+Luvox uses volatile session state instead of accounts or a generation database. Only custom model definitions are persisted; they contain no credentials, prompts, jobs, or results. API responses are marked `private, no-store`, and credentials are kept out of payloads and URLs.
 
 When using OpenRouter, Luvox creates no local generation files. UI-entered keys, prompts, results, and job records stay in tab or transit memory and are not persisted by Luvox. Keys travel only in request headers, remain pinned to submitted jobs in tab memory, and disappear on workspace reset, reload, or tab close. Videos are streamed through an authenticated proxy rather than saved to disk; temporary-key media uses revocable browser `blob:` URLs. Server-key video access uses a per-job capability kept only in tab and server memory, never in a URL, and expires after 24 hours without use. A server-configured `OPENROUTER_API_KEY` never reaches the browser.
 

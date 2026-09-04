@@ -1,13 +1,13 @@
 export interface VideoModelConfig {
   id: string;
   name: string;
-  price: string;
+  price?: string;
   durations: readonly number[];
   defaultDuration: number;
   aspectRatios: readonly string[];
   defaultAspectRatio: string;
   resolutions: readonly string[];
-  defaultResolution: string;
+  defaultResolution: string | null;
   frameImages: {
     supported: readonly ("first_frame" | "last_frame")[];
     input: "public_url" | "none";
@@ -62,7 +62,3 @@ export const VIDEO_MODELS = [
     },
   },
 ] as const satisfies readonly VideoModelConfig[];
-
-export function getVideoModel(modelId: string): VideoModelConfig | undefined {
-  return VIDEO_MODELS.find((model) => model.id === modelId);
-}

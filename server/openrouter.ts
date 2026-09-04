@@ -11,6 +11,13 @@ import type {
 import type {
   ImageGenerationResponse,
 } from "../shared/imageTypes.js";
+import type { OpenRouterImageModelConfig } from "../shared/imageModels.js";
+import type {
+  DiscoveredOpenRouterModel,
+  OpenRouterDiscoveryResponse,
+} from "../shared/openrouterModels.js";
+import type { VideoModelConfig } from "../shared/videoModels.js";
+import { getOpenRouterImageModel } from "./openrouterModels.js";
 
 const OPENROUTER_API_BASE = "https://openrouter.ai/api/v1";
 const JSON_REQUEST_TIMEOUT_MS = 30_000;
@@ -262,6 +269,184 @@ async function requestJson(
   return payload;
 }
 
+async function requestPublicJson(path: string, signal?: AbortSignal): Promise<unknown> {
+  let response: Response;
+  try {
+    response = await fetch(`${OPENROUTER_API_BASE}${path}`, {
+      headers: { Accept: "application/json" },
+      signal: signal
+        ? AbortSignal.any([signal, AbortSignal.timeout(JSON_REQUEST_TIMEOUT_MS)])
+        : AbortSignal.timeout(JSON_REQUEST_TIMEOUT_MS),
+    });
+  } catch (error) {
+    if (signal?.aborted) throw new OpenRouterError("Model discovery was cancelled.", 499, "request_cancelled", false);
+    if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) {
+      throw new OpenRouterError("OpenRouter model discovery timed out.", 504, "timeout", true);
+    }
+    throw new OpenRouterError("Could not load models from OpenRouter.", 502, "network_error", true);
+  }
+  const payload = await readJsonOrUndefined(response);
+  if (!response.ok) {
+    throw new OpenRouterError("OpenRouter model discovery is temporarily unavailable.", 502, "provider_error", true, response.headers.get("retry-after") || undefined);
+  }
+  return payload;
+}
+
+function stringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.filter((item): item is string => typeof item === "string" && item.length > 0 && item.length <= 40))].slice(0, 64);
+}
+
+function numberList(value: unknown): number[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.filter((item): item is number => Number.isInteger(item) && item >= 1 && item <= 300))].slice(0, 300);
+}
+
+function parameterValues(parameters: Record<string, unknown>, name: string): string[] {
+  const descriptor = parameters[name];
+  return isRecord(descriptor) && descriptor.type === "enum" ? stringList(descriptor.values) : [];
+}
+
+function preferred<T extends string | number>(values: T[], choices: readonly T[]): T {
+  return choices.find((choice) => values.includes(choice)) ?? values[0];
+}
+
+function mapDiscoveredImage(value: unknown): Extract<DiscoveredOpenRouterModel, { kind: "image" }> | undefined {
+  if (!isRecord(value) || typeof value.id !== "string" || typeof value.name !== "string") return undefined;
+  const parameters = isRecord(value.supported_parameters) ? value.supported_parameters : {};
+  const outputFormats = parameterValues(parameters, "output_format");
+  if (outputFormats.length > 0 && !outputFormats.some((format) => format === "png" || format === "jpeg" || format === "webp")) return undefined;
+  const rasterFormats = outputFormats.filter((format): format is "png" | "jpeg" | "webp" => format === "png" || format === "jpeg" || format === "webp");
+  const outputFormat = rasterFormats.find((format) => format === "png") ?? rasterFormats[0];
+
+  const referenceDescriptor = parameters.input_references;
+  const referenceMin = isRecord(referenceDescriptor) && typeof referenceDescriptor.min === "number" ? referenceDescriptor.min : 0;
+  const referenceMax = isRecord(referenceDescriptor) && typeof referenceDescriptor.max === "number" ? referenceDescriptor.max : 0;
+  if (referenceMin > 1) return undefined;
+
+  const aspectRatios = parameterValues(parameters, "aspect_ratio");
+  const resolutions = parameterValues(parameters, "resolution");
+  const model: OpenRouterImageModelConfig = {
+    id: value.id,
+    name: value.name,
+    ...(outputFormat ? { outputFormat } : {}),
+    aspectRatios,
+    defaultAspectRatio: aspectRatios.length > 0 ? preferred(aspectRatios, ["1:1", "auto"]) : null,
+    resolutions,
+    defaultResolution: resolutions.length > 0 ? preferred(resolutions, ["1K", "1024", "2K"]) : null,
+    inputReference: {
+      supported: referenceMax >= 1,
+      required: referenceMin === 1,
+    },
+  };
+  const handled = new Set(["aspect_ratio", "resolution", "input_references", "n", "output_format"]);
+  return {
+    kind: "image",
+    description: typeof value.description === "string" ? value.description : "",
+    providerDefaults: Object.keys(parameters).filter((name) => !handled.has(name)).sort(),
+    model,
+  };
+}
+
+function mapDiscoveredVideo(value: unknown): Extract<DiscoveredOpenRouterModel, { kind: "video" }> | undefined {
+  if (!isRecord(value) || typeof value.id !== "string" || typeof value.name !== "string") return undefined;
+  const durations = numberList(value.supported_durations);
+  const aspectRatios = stringList(value.supported_aspect_ratios);
+  if (durations.length === 0 || aspectRatios.length === 0) return undefined;
+  const resolutions = stringList(value.supported_resolutions);
+  const supportedFrames = stringList(value.supported_frame_images).filter(
+    (frame): frame is "first_frame" | "last_frame" => frame === "first_frame" || frame === "last_frame",
+  );
+  const audioSupported = value.generate_audio === true;
+  const model: VideoModelConfig = {
+    id: value.id,
+    name: value.name,
+    durations,
+    defaultDuration: preferred(durations, [6, 5, 4, 8]),
+    aspectRatios,
+    defaultAspectRatio: preferred(aspectRatios, ["16:9", "1:1", "9:16"]),
+    resolutions,
+    defaultResolution: resolutions.length > 0 ? preferred(resolutions, ["720p", "1080p", "768p", "2K", "480p"]) : null,
+    frameImages: {
+      supported: supportedFrames,
+      input: supportedFrames.length > 0 ? "public_url" : "none",
+    },
+    generateAudio: {
+      supported: audioSupported,
+      default: audioSupported,
+    },
+  };
+  const providerDefaults = [
+    ...(value.seed === true ? ["seed"] : []),
+    ...stringList(value.allowed_passthrough_parameters).map((name) => `provider.${name}`),
+  ];
+  return {
+    kind: "video",
+    description: typeof value.description === "string" ? value.description : "",
+    providerDefaults,
+    model,
+  };
+}
+
+export async function discoverOpenRouterModels(
+  kind: "image" | "video",
+  signal?: AbortSignal,
+): Promise<OpenRouterDiscoveryResponse> {
+  const payload = await requestPublicJson(kind === "image" ? "/images/models" : "/videos/models", signal);
+  if (!isRecord(payload) || !Array.isArray(payload.data)) {
+    throw new OpenRouterError("OpenRouter returned an invalid model list.", 502, "invalid_provider_response", true);
+  }
+  const mapped: Array<DiscoveredOpenRouterModel | undefined> = kind === "image"
+    ? payload.data.map(mapDiscoveredImage)
+    : payload.data.map(mapDiscoveredVideo);
+  const models = mapped.filter((model): model is DiscoveredOpenRouterModel => Boolean(model));
+  return { models, omitted: payload.data.length - models.length };
+}
+
+export async function discoverOpenRouterImageEndpoints(
+  modelId: string,
+  signal?: AbortSignal,
+): Promise<OpenRouterDiscoveryResponse> {
+  if (!/^[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._:-]*$/i.test(modelId)) {
+    throw new OpenRouterError("Invalid OpenRouter model ID.", 400, "invalid_request", false);
+  }
+  const [author, slug] = modelId.split("/", 2);
+  const payload = await requestPublicJson(
+    `/images/models/${encodeURIComponent(author)}/${encodeURIComponent(slug)}/endpoints`,
+    signal,
+  );
+  if (!isRecord(payload) || !Array.isArray(payload.endpoints)) {
+    throw new OpenRouterError("OpenRouter returned an invalid endpoint list.", 502, "invalid_provider_response", true);
+  }
+  const modelName = typeof payload.name === "string" ? payload.name : modelId;
+  const description = typeof payload.description === "string" ? payload.description : "";
+  const models = payload.endpoints.flatMap((endpoint) => {
+    if (!isRecord(endpoint)) return [];
+    const providerId = typeof endpoint.provider_tag === "string" ? endpoint.provider_tag : undefined;
+    if (!providerId) return [];
+    const mapped = mapDiscoveredImage({
+      id: modelId,
+      name: modelName,
+      description,
+      supported_parameters: endpoint.supported_parameters,
+    });
+    if (!mapped) return [];
+    const passthrough = stringList(endpoint.allowed_passthrough_parameters).map((name) => `provider.${name}`);
+    return [{
+      ...mapped,
+      providerDefaults: [...new Set([...mapped.providerDefaults, ...passthrough])].sort(),
+      model: {
+        ...mapped.model,
+        provider: {
+          id: providerId,
+          name: typeof endpoint.provider_name === "string" ? endpoint.provider_name : providerId,
+        },
+      },
+    }];
+  });
+  return { models, omitted: payload.endpoints.length - models.length };
+}
+
 function parseImageResponse(value: unknown): ImageGenerationResponse {
   if (!isRecord(value) || !Array.isArray(value.data) || !isRecord(value.data[0])) {
     throw new OpenRouterError(
@@ -427,6 +612,13 @@ export async function generateImage(
     model: input.model,
     prompt: input.prompt,
   };
+  const configuredModel = getOpenRouterImageModel(input.model);
+  if (configuredModel?.provider) {
+    body.provider = { only: [configuredModel.provider.id], allow_fallbacks: false };
+  }
+  if (configuredModel?.outputFormat) body.output_format = configuredModel.outputFormat;
+  if (input.aspectRatio) body.aspect_ratio = input.aspectRatio;
+  if (input.resolution) body.resolution = input.resolution;
   if (input.inputReference) {
     body.input_references = [{
       type: "image_url",

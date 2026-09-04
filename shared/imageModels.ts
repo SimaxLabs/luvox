@@ -1,8 +1,37 @@
+export interface OpenRouterImageModelConfig {
+  id: string;
+  name: string;
+  price?: string;
+  provider?: {
+    id: string;
+    name: string;
+  };
+  outputFormat?: "png" | "jpeg" | "webp";
+  aspectRatios: readonly string[];
+  defaultAspectRatio: string | null;
+  resolutions: readonly string[];
+  defaultResolution: string | null;
+  inputReference: {
+    supported: boolean;
+    required: boolean;
+  };
+}
+
 export const MUSE_IMAGE_MODEL = {
   id: "meta/muse-image",
   name: "Meta: Muse Image",
   price: "$0.01/image",
-} as const;
+  aspectRatios: [],
+  defaultAspectRatio: null,
+  resolutions: [],
+  defaultResolution: null,
+  inputReference: {
+    supported: true,
+    required: false,
+  },
+} as const satisfies OpenRouterImageModelConfig;
+
+export const OPENROUTER_IMAGE_MODELS = [MUSE_IMAGE_MODEL] as const satisfies readonly OpenRouterImageModelConfig[];
 
 export const MFLUX_IMAGE_RESOLUTIONS = [
   { id: "1024x1024", label: "1024p", aspectRatio: "1:1", width: 1_024, height: 1_024 },

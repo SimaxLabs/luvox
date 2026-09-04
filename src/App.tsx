@@ -1,6 +1,7 @@
 import { type ChangeEvent, type Dispatch, type FormEvent, type ReactNode, type SetStateAction, useEffect, useRef, useState } from "react";
-import { getVideoModel, VIDEO_MODELS } from "../shared/videoModels";
-import { getMfluxImageModel, getMfluxImageResolution, MFLUX_IMAGE_MODEL, MFLUX_IMAGE_MODELS, MFLUX_IMAGE_QUANTIZATIONS, MFLUX_IMAGE_RECOMMENDED_SETUPS, MFLUX_IMAGE_RESOLUTIONS, MFLUX_VAE_TILE_SIZES, MUSE_IMAGE_MODEL } from "../shared/imageModels";
+import { VIDEO_MODELS, type VideoModelConfig } from "../shared/videoModels";
+import { getMfluxImageModel, getMfluxImageResolution, MFLUX_IMAGE_MODEL, MFLUX_IMAGE_MODELS, MFLUX_IMAGE_QUANTIZATIONS, MFLUX_IMAGE_RECOMMENDED_SETUPS, MFLUX_IMAGE_RESOLUTIONS, MFLUX_VAE_TILE_SIZES, MUSE_IMAGE_MODEL, OPENROUTER_IMAGE_MODELS, type OpenRouterImageModelConfig } from "../shared/imageModels";
+import type { DiscoveredOpenRouterModel, OpenRouterModelRegistry } from "../shared/openrouterModels";
 import {
   getLocalH3QualityPreset,
   isLocalH3AccelerationAvailable,
@@ -17,13 +18,17 @@ import {
   deleteLocalVideoJob,
   discardLocalWorkspace,
   deleteLocalReferenceImage,
+  discoverOpenRouterImageEndpoints,
+  discoverOpenRouterModels,
   generateImage,
   generateVideo,
   getAppConfig,
   getVideoContent,
   getVideoStatus,
   releaseVideoCapability,
+  removeOpenRouterModel,
   renewLocalWorkspace,
+  saveOpenRouterModel,
   uploadLocalReferenceImage,
   type GenerationStatus,
   type AppConfig,
@@ -60,9 +65,15 @@ interface FormState {
 
 interface DisplayJob extends VideoJob {
   aspectRatio?: string;
+  modelName?: string;
   temporaryApiKey?: string;
   pollWarning?: string;
   pollingStopped?: boolean;
+}
+
+interface ImageTaskModel {
+  id: string;
+  name: string;
 }
 
 type IconName =
@@ -323,6 +334,344 @@ function getImageTaskStatus(
   return failure ? "failed" : null;
 }
 
+function ModelManager({
+  disabled,
+  initialKind,
+  onClose,
+  onRegistry,
+  open,
+  registry,
+}: {
+  disabled: boolean;
+  initialKind: "image" | "video";
+  onClose: () => void;
+  onRegistry: (registry: OpenRouterModelRegistry) => void;
+  open: boolean;
+  registry: OpenRouterModelRegistry;
+}) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  const discoveryController = useRef<AbortController | null>(null);
+  const endpointController = useRef<AbortController | null>(null);
+  const [kind, setKind] = useState<"image" | "video">("video");
+  const [query, setQuery] = useState("");
+  const [responses, setResponses] = useState<Partial<Record<"image" | "video", { models: DiscoveredOpenRouterModel[]; omitted: number }>>>({});
+  const [draft, setDraft] = useState<DiscoveredOpenRouterModel | null>(null);
+  const [endpointOptions, setEndpointOptions] = useState<Extract<DiscoveredOpenRouterModel, { kind: "image" }>[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [loadingEndpoints, setLoadingEndpoints] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState("");
+
+  const load = async (nextKind: "image" | "video", refresh = false) => {
+    discoveryController.current?.abort();
+    discoveryController.current = null;
+    endpointController.current?.abort();
+    endpointController.current = null;
+    setLoadingEndpoints(false);
+    if (!refresh && responses[nextKind]) {
+      setLoading(false);
+      return;
+    }
+    const controller = new AbortController();
+    discoveryController.current = controller;
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await discoverOpenRouterModels(nextKind, controller.signal);
+      setResponses((current) => ({ ...current, [nextKind]: response }));
+      setStatus(`${response.models.length} compatible ${nextKind} models found.`);
+    } catch (loadError) {
+      if (!controller.signal.aborted) setError(messageFrom(loadError));
+    } finally {
+      if (discoveryController.current === controller) {
+        discoveryController.current = null;
+        setLoading(false);
+      }
+    }
+  };
+
+  useEffect(() => {
+    const element = dialog.current;
+    if (!element) return;
+    if (open) {
+      if (!element.open) element.showModal();
+      setKind(initialKind);
+      setDraft(null);
+      setEndpointOptions([]);
+      setQuery("");
+      setError(null);
+      void load(initialKind);
+    } else if (!open && element.open) {
+      element.close();
+    }
+    return () => {
+      discoveryController.current?.abort();
+      endpointController.current?.abort();
+    };
+  }, [initialKind, open]);
+
+  const response = responses[kind];
+  const normalizedQuery = query.trim().toLowerCase();
+  const results = (response?.models || []).filter((candidate) =>
+    !normalizedQuery || candidate.model.name.toLowerCase().includes(normalizedQuery) || candidate.model.id.toLowerCase().includes(normalizedQuery));
+  const customIds = kind === "image" ? registry.customImageIds : registry.customVideoIds;
+  const installedIds = new Set((kind === "image" ? registry.images : registry.videos).map((model) => model.id));
+  const draftIsBuiltIn = Boolean(draft && installedIds.has(draft.model.id) && !customIds.includes(draft.model.id));
+  const preview = draft ? JSON.stringify({
+    version: 1,
+    images: draft.kind === "image" ? [draft.model] : [],
+    videos: draft.kind === "video" ? [draft.model] : [],
+  }, null, 2) : "";
+
+  const saveDraft = async () => {
+    if (!draft || draftIsBuiltIn || disabled || saving || (draft.kind === "image" && !draft.model.provider)) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const definition = draft.kind === "image"
+        ? { kind: "image" as const, model: draft.model }
+        : { kind: "video" as const, model: draft.model };
+      const nextRegistry = await saveOpenRouterModel(definition);
+      onRegistry(nextRegistry);
+      setStatus(`${draft.model.name} saved to the model configuration.`);
+    } catch (saveError) {
+      setError(messageFrom(saveError));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const inspectModel = async (candidate: DiscoveredOpenRouterModel) => {
+    endpointController.current?.abort();
+    endpointController.current = null;
+    setEndpointOptions([]);
+    setLoadingEndpoints(false);
+    setError(null);
+    if (candidate.kind === "video" || (installedIds.has(candidate.model.id) && !customIds.includes(candidate.model.id))) {
+      setDraft(candidate);
+      return;
+    }
+    const controller = new AbortController();
+    endpointController.current = controller;
+    setDraft(null);
+    setLoadingEndpoints(true);
+    try {
+      const response = await discoverOpenRouterImageEndpoints(candidate.model.id, controller.signal);
+      const options = response.models.flatMap((model) => model.kind === "image" ? [{
+        ...model,
+        description: candidate.description,
+        model: { ...model.model, name: candidate.model.name },
+      }] : []);
+      if (options.length === 0) throw new Error("No compatible provider endpoint is available for this model.");
+      setEndpointOptions(options);
+      setDraft(options[0]);
+      setStatus(`${options.length} compatible provider ${options.length === 1 ? "endpoint" : "endpoints"} found for ${candidate.model.name}.`);
+    } catch (endpointError) {
+      if (!controller.signal.aborted) setError(messageFrom(endpointError));
+    } finally {
+      if (endpointController.current === controller) {
+        endpointController.current = null;
+        setLoadingEndpoints(false);
+      }
+    }
+  };
+
+  const removeModel = async (modelKind: "image" | "video", id: string) => {
+    if (disabled || saving) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const nextRegistry = await removeOpenRouterModel(modelKind, id);
+      onRegistry(nextRegistry);
+      setStatus(`${id} removed from the custom model configuration.`);
+    } catch (removeError) {
+      setError(messageFrom(removeError));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const customModels = [
+    ...registry.images.filter((model) => registry.customImageIds.includes(model.id)).map((model) => ({ kind: "image" as const, model })),
+    ...registry.videos.filter((model) => registry.customVideoIds.includes(model.id)).map((model) => ({ kind: "video" as const, model })),
+  ];
+
+  return (
+    <dialog
+      aria-labelledby="model-library-title"
+      className="m-0 h-[100dvh] max-h-none w-full max-w-none bg-transparent p-0 text-[#191b18] backdrop:bg-black/80 sm:m-auto sm:h-auto sm:max-h-[90dvh] sm:w-[min(72rem,calc(100vw-3rem))]"
+      onCancel={onClose}
+      onClose={onClose}
+      ref={dialog}
+    >
+      <div className="flex h-full max-h-[100dvh] flex-col bg-[#f0efe8] shadow-2xl sm:max-h-[90dvh]">
+        <div className="flex items-start justify-between gap-5 border-b border-black/10 px-5 py-5 sm:px-7">
+          <div>
+            <p className="font-mono text-[9px] uppercase tracking-[0.2em] text-stone-500">Persistent configuration</p>
+            <h2 className="mt-1 font-display text-xl uppercase" id="model-library-title">OpenRouter model library</h2>
+            <p className="mt-2 max-w-2xl text-xs leading-5 text-stone-600">Search OpenRouter, review the generated Luvox JSON, and choose defaults before adding a model.</p>
+          </div>
+          <button className="shrink-0 border border-black/20 px-3 py-2 text-[10px] font-bold uppercase tracking-[0.12em] hover:border-black" onClick={onClose} type="button">Close</button>
+        </div>
+
+        <div className="grid min-h-0 flex-1 overflow-y-auto lg:grid-cols-[0.85fr_1.15fr] lg:overflow-hidden">
+          <section className="border-b border-black/10 p-5 sm:p-7 lg:overflow-y-auto lg:border-b-0 lg:border-r">
+            <div className="grid grid-cols-2 gap-1.5 bg-black/5 p-1.5" aria-label="Model type" role="group">
+              {(["video", "image"] as const).map((option) => (
+                <button
+                  aria-pressed={kind === option}
+                  className={`h-11 text-[10px] font-bold uppercase tracking-[0.12em] ${kind === option ? "bg-black text-[#d9ff72]" : "text-stone-500 hover:bg-white/60 hover:text-black"}`}
+                  key={option}
+                  onClick={() => {
+                    setKind(option);
+                    setDraft(null);
+                    setEndpointOptions([]);
+                    setQuery("");
+                    setError(null);
+                    void load(option);
+                  }}
+                  type="button"
+                >
+                  {option} models
+                </button>
+              ))}
+            </div>
+            <div className="mt-5">
+              <FieldLabel htmlFor="model-search">Search supported models</FieldLabel>
+              <div className="flex gap-2">
+                <input
+                  className="h-11 min-w-0 flex-1 border border-black/15 bg-[#faf9f3] px-3 text-sm outline-none focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
+                  id="model-search"
+                  onChange={(event) => setQuery(event.target.value)}
+                  placeholder="Name or author/model"
+                  type="search"
+                  value={query}
+                />
+                <button className="border border-black/15 px-3 text-[10px] font-bold uppercase tracking-[0.12em] hover:border-black disabled:opacity-45" disabled={loading} onClick={() => void load(kind, true)} type="button">Refresh</button>
+              </div>
+            </div>
+            <p aria-live="polite" className="sr-only" role="status">{status}</p>
+            {error && <p className="mt-4 border-l-4 border-[#e44d38] bg-[#f9dfd9] px-3 py-2 text-xs text-[#712519]" role="alert">{error}</p>}
+            <div aria-busy={loading} className="mt-4 space-y-2">
+              {loading && <p className="py-8 text-center font-mono text-[10px] uppercase tracking-[0.15em] text-stone-500">Loading OpenRouter models...</p>}
+              {!loading && results.map((candidate) => {
+                const installed = installedIds.has(candidate.model.id);
+                return (
+                  <button
+                    aria-pressed={draft?.model.id === candidate.model.id}
+                    className={`w-full border px-3 py-3 text-left transition ${draft?.model.id === candidate.model.id ? "border-black bg-black text-white" : "border-black/10 bg-[#faf9f3] hover:border-black/40"}`}
+                    key={candidate.model.id}
+                    onClick={() => void inspectModel(candidate)}
+                    type="button"
+                  >
+                    <span className="flex items-start justify-between gap-3">
+                      <span className="min-w-0">
+                        <span className="block text-xs font-bold">{candidate.model.name}</span>
+                        <span className={`mt-1 block break-all font-mono text-[9px] ${draft?.model.id === candidate.model.id ? "text-white/55" : "text-stone-500"}`}>{candidate.model.id}</span>
+                      </span>
+                      {installed && <span className="shrink-0 bg-[#d9ff72] px-2 py-1 text-[8px] font-bold uppercase tracking-[0.1em] text-black">{customIds.includes(candidate.model.id) ? "Added" : "Built in"}</span>}
+                    </span>
+                  </button>
+                );
+              })}
+              {!loading && response && results.length === 0 && <p className="py-8 text-center text-xs text-stone-500">No compatible models match this search.</p>}
+            </div>
+            {response && <p className="mt-4 text-[10px] leading-4 text-stone-500">{response.omitted} OpenRouter entries were omitted because they require unsupported inputs, controls, or output formats.</p>}
+          </section>
+
+          <section className="p-5 sm:p-7 lg:overflow-y-auto">
+            {loadingEndpoints ? (
+              <div className="flex min-h-64 items-center justify-center border border-dashed border-black/20 px-6 text-center font-mono text-[10px] uppercase tracking-[0.15em] text-stone-500">Checking provider endpoints...</div>
+            ) : draft ? (
+              <>
+                <p className="font-mono text-[9px] uppercase tracking-[0.2em] text-stone-500">Generated definition</p>
+                <h3 className="mt-1 font-display text-lg uppercase">{draft.model.name}</h3>
+                {draft.description && <p className="mt-3 line-clamp-3 text-xs leading-5 text-stone-600">{draft.description}</p>}
+                <div className="mt-5 grid gap-4 sm:grid-cols-2">
+                  {draft.kind === "image" && draft.model.provider && (
+                    <div>
+                      <FieldLabel htmlFor="draft-provider">Provider endpoint</FieldLabel>
+                      <select
+                        className="h-11 w-full border border-black/15 bg-[#faf9f3] px-3 text-sm"
+                        id="draft-provider"
+                        onChange={(event) => {
+                          const option = endpointOptions.find((candidate) => candidate.model.provider?.id === event.target.value);
+                          if (option) setDraft(option);
+                        }}
+                        value={draft.model.provider.id}
+                      >
+                        {endpointOptions.map((option) => <option key={option.model.provider!.id} value={option.model.provider!.id}>{option.model.provider!.name}</option>)}
+                      </select>
+                    </div>
+                  )}
+                  {draft.kind === "video" && (
+                    <div>
+                      <FieldLabel htmlFor="draft-duration">Default duration</FieldLabel>
+                      <select className="h-11 w-full border border-black/15 bg-[#faf9f3] px-3 text-sm" id="draft-duration" onChange={(event) => setDraft((current) => current?.kind === "video" ? { ...current, model: { ...current.model, defaultDuration: Number(event.target.value) } } : current)} value={draft.model.defaultDuration}>
+                        {draft.model.durations.map((value) => <option key={value} value={value}>{value} seconds</option>)}
+                      </select>
+                    </div>
+                  )}
+                  {draft.model.aspectRatios.length > 0 && (
+                    <div>
+                      <FieldLabel htmlFor="draft-aspect-ratio">Default aspect ratio</FieldLabel>
+                      <select className="h-11 w-full border border-black/15 bg-[#faf9f3] px-3 text-sm" id="draft-aspect-ratio" onChange={(event) => setDraft((current) => current ? { ...current, model: { ...current.model, defaultAspectRatio: event.target.value } } as DiscoveredOpenRouterModel : current)} value={draft.model.defaultAspectRatio || ""}>
+                        {draft.model.aspectRatios.map((value) => <option key={value} value={value}>{value}</option>)}
+                      </select>
+                    </div>
+                  )}
+                  {draft.model.resolutions.length > 0 && (
+                    <div>
+                      <FieldLabel htmlFor="draft-resolution">Default resolution</FieldLabel>
+                      <select className="h-11 w-full border border-black/15 bg-[#faf9f3] px-3 text-sm" id="draft-resolution" onChange={(event) => setDraft((current) => current ? { ...current, model: { ...current.model, defaultResolution: event.target.value } } as DiscoveredOpenRouterModel : current)} value={draft.model.defaultResolution || ""}>
+                        {draft.model.resolutions.map((value) => <option key={value} value={value}>{value}</option>)}
+                      </select>
+                    </div>
+                  )}
+                  {draft.kind === "video" && draft.model.generateAudio.supported && (
+                    <label className="flex h-11 items-center justify-between border border-black/15 bg-[#faf9f3] px-3 text-xs font-bold">
+                      Audio on by default
+                      <input checked={draft.model.generateAudio.default} onChange={(event) => setDraft((current) => current?.kind === "video" ? { ...current, model: { ...current.model, generateAudio: { ...current.model.generateAudio, default: event.target.checked } } } : current)} type="checkbox" />
+                    </label>
+                  )}
+                </div>
+                {draft.providerDefaults.length > 0 && <p className="mt-4 text-[10px] leading-4 text-stone-500">Left to provider defaults: {draft.providerDefaults.join(", ")}.</p>}
+                <div className="mt-5">
+                  <p className="mb-2 text-[11px] font-bold uppercase tracking-[0.18em] text-stone-700">JSON preview</p>
+                  <pre className="max-h-72 overflow-auto border border-black/15 bg-[#171917] p-4 font-mono text-[10px] leading-5 text-white/75">{preview}</pre>
+                </div>
+                <button className="mt-5 h-12 w-full bg-black px-4 text-xs font-bold uppercase tracking-[0.12em] text-[#d9ff72] disabled:cursor-not-allowed disabled:opacity-40" disabled={disabled || saving || draftIsBuiltIn || (draft.kind === "image" && !draft.model.provider)} onClick={() => void saveDraft()} type="button">
+                  {draftIsBuiltIn ? "Built-in model" : saving ? "Saving..." : customIds.includes(draft.model.id) ? "Update custom model" : "Add model"}
+                </button>
+              </>
+            ) : (
+              <div className="flex min-h-64 items-center justify-center border border-dashed border-black/20 px-6 text-center text-xs leading-5 text-stone-500">Choose a compatible OpenRouter model to review its generated configuration.</div>
+            )}
+
+            {customModels.length > 0 && (
+              <div className="mt-8 border-t border-black/10 pt-5">
+                <p className="mb-3 text-[11px] font-bold uppercase tracking-[0.18em] text-stone-700">Custom models</p>
+                <div className="space-y-2">
+                  {customModels.map((entry) => (
+                    <div className="flex items-center justify-between gap-3 border border-black/10 bg-[#faf9f3] px-3 py-3" key={`${entry.kind}-${entry.model.id}`}>
+                      <span className="min-w-0">
+                        <span className="block truncate text-xs font-bold">{entry.model.name}</span>
+                        <span className="mt-1 block truncate font-mono text-[9px] text-stone-500">{entry.kind} / {entry.model.id}</span>
+                      </span>
+                      <button aria-label={`Remove ${entry.model.name}`} className="shrink-0 text-[9px] font-bold uppercase tracking-[0.12em] text-[#9a3023] hover:text-black disabled:opacity-40" disabled={disabled || saving} onClick={() => void removeModel(entry.kind, entry.model.id)} type="button">Remove</button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </section>
+        </div>
+      </div>
+    </dialog>
+  );
+}
+
 function JobPoller({
   job,
   localWorkspaceToken,
@@ -363,6 +712,7 @@ function JobPoller({
           ? {
               ...nextJob,
               aspectRatio: existing.aspectRatio,
+              modelName: existing.modelName,
               capabilityToken: nextJob.status === "failed" ? undefined : existing.capabilityToken,
               temporaryApiKey: nextJob.status === "failed" ? undefined : existing.temporaryApiKey,
               pollWarning: undefined,
@@ -429,6 +779,10 @@ export default function App() {
   const [workflow, setWorkflow] = useState<Workflow>("video");
   const [form, setForm] = useState<FormState>(initialForm);
   const [imageProvider, setImageProvider] = useState<ImageProvider>("openrouter");
+  const [openRouterImageModelId, setOpenRouterImageModelId] = useState<string>(MUSE_IMAGE_MODEL.id);
+  const [openRouterImageAspectRatio, setOpenRouterImageAspectRatio] = useState("");
+  const [openRouterImageResolution, setOpenRouterImageResolution] = useState("");
+  const [openRouterImageTaskModel, setOpenRouterImageTaskModel] = useState<ImageTaskModel | null>(null);
   const [mfluxModel, setMfluxModel] = useState<string>(MFLUX_IMAGE_MODEL.id);
   const [mfluxResolution, setMfluxResolution] = useState<string>(defaultMfluxSetup.resolution);
   const [mfluxSteps, setMfluxSteps] = useState<number>(defaultMfluxSetup.steps);
@@ -466,6 +820,7 @@ export default function App() {
   const [sessionApiKey, setSessionApiKey] = useState("");
   const [temporaryVideoUrl, setTemporaryVideoUrl] = useState<string | null>(null);
   const [appConfig, setAppConfig] = useState<AppConfig | null>(null);
+  const [modelManagerOpen, setModelManagerOpen] = useState(false);
   const [uploadingReference, setUploadingReference] = useState<"first" | "last" | null>(null);
   const [referenceUploadStatus, setReferenceUploadStatus] = useState("");
   const [localAdvancedStatus, setLocalAdvancedStatus] = useState("");
@@ -491,7 +846,15 @@ export default function App() {
   const serviceState = useRef<"unknown" | "online" | "offline">("unknown");
   const workspaceVersion = useRef(0);
 
-  const selectedModel = getVideoModel(form.model) ?? VIDEO_MODELS[0];
+  const openRouterRegistry: OpenRouterModelRegistry = appConfig?.openRouter ?? {
+    revision: 0,
+    images: [...OPENROUTER_IMAGE_MODELS],
+    videos: [...VIDEO_MODELS],
+    customImageIds: [],
+    customVideoIds: [],
+  };
+  const selectedModel = openRouterRegistry.videos.find((model) => model.id === form.model) ?? openRouterRegistry.videos[0] ?? VIDEO_MODELS[0];
+  const selectedOpenRouterImageModel = openRouterRegistry.images.find((model) => model.id === openRouterImageModelId) ?? openRouterRegistry.images[0] ?? MUSE_IMAGE_MODEL;
   const selectedMfluxModel = getMfluxImageModel(mfluxModel) ?? MFLUX_IMAGE_MODEL;
   const selectedMfluxResolution = getMfluxImageResolution(mfluxResolution) ?? MFLUX_IMAGE_RESOLUTIONS[0];
   const mfluxVaeTilingEnabled = mfluxLowRam || mfluxVaeTiling;
@@ -545,7 +908,9 @@ export default function App() {
   const imageTaskStatus = imageProvider === "openrouter" ? openRouterImageTaskStatus : mfluxImageTaskStatus;
   const currentImageResult = imageProvider === "openrouter" ? imageResult : mfluxImageResult;
   const currentImageFailure = imageProvider === "openrouter" ? imageFailure : mfluxImageFailure;
-  const currentImageModel = imageProvider === "openrouter" ? MUSE_IMAGE_MODEL : selectedMfluxModel;
+  const currentImageModel = imageProvider === "openrouter"
+    ? openRouterImageTaskStatus && openRouterImageTaskModel ? openRouterImageTaskModel : selectedOpenRouterImageModel
+    : selectedMfluxModel;
   const usesMfluxEdit = imageProvider === "mflux" && (selectedMfluxModel.requiresReference || Boolean(imageReference));
   const selectedMfluxModelAvailable = appConfig?.localMflux.models.includes(selectedMfluxModel.id) === true;
   const openRouterSubmissionStatus = openRouterSubmitting
@@ -598,6 +963,31 @@ export default function App() {
       localAcceleration: resetAcceleration ? "standard" : current.localAcceleration,
     }));
     setLocalAdvancedStatus(resetAcceleration ? "Acceleration reset to Standard for the selected resolution." : "");
+  };
+
+  const selectOpenRouterVideoModel = (model: VideoModelConfig) => {
+    setForm((current) => ({
+      ...current,
+      model: model.id,
+      duration: model.defaultDuration,
+      aspectRatio: model.defaultAspectRatio,
+      resolution: model.defaultResolution || "",
+      firstFrameUrl: model.frameImages.supported.includes("first_frame") ? current.firstFrameUrl : "",
+      lastFrameUrl: model.frameImages.supported.includes("last_frame") ? current.lastFrameUrl : "",
+      generateAudio: model.generateAudio.default,
+    }));
+  };
+
+  const selectOpenRouterImageModel = (model: OpenRouterImageModelConfig) => {
+    setOpenRouterImageModelId(model.id);
+    setOpenRouterImageAspectRatio(model.defaultAspectRatio || "");
+    setOpenRouterImageResolution(model.defaultResolution || "");
+  };
+
+  const updateOpenRouterRegistry = (registry: OpenRouterModelRegistry) => {
+    setAppConfig((current) => current && current.openRouter.revision <= registry.revision
+      ? { ...current, openRouter: registry }
+      : current);
   };
 
   const applyMfluxSetup = (setup: (typeof MFLUX_IMAGE_RECOMMENDED_SETUPS)[number]) => {
@@ -658,6 +1048,10 @@ export default function App() {
     setWorkflow("video");
     setForm(initialForm());
     setImageProvider("openrouter");
+    setOpenRouterImageModelId(MUSE_IMAGE_MODEL.id);
+    setOpenRouterImageAspectRatio("");
+    setOpenRouterImageResolution("");
+    setOpenRouterImageTaskModel(null);
     setMfluxModel(MFLUX_IMAGE_MODEL.id);
     setMfluxResolution(defaultMfluxSetup.resolution);
     setMfluxSteps(defaultMfluxSetup.steps);
@@ -713,6 +1107,29 @@ export default function App() {
   }, [mfluxImageSubmitting]);
 
   useEffect(() => {
+    if (!appConfig?.openRouter) return;
+    const imageModel = appConfig.openRouter.images.find((model) => model.id === openRouterImageModelId) ?? appConfig.openRouter.images[0] ?? MUSE_IMAGE_MODEL;
+    if (imageModel.id !== openRouterImageModelId) setOpenRouterImageModelId(imageModel.id);
+    setOpenRouterImageAspectRatio((current) => imageModel.aspectRatios.includes(current) ? current : imageModel.defaultAspectRatio || "");
+    setOpenRouterImageResolution((current) => imageModel.resolutions.includes(current) ? current : imageModel.defaultResolution || "");
+    setForm((current) => {
+      const configured = appConfig.openRouter.videos.find((candidate) => candidate.id === current.model);
+      const model = configured ?? appConfig.openRouter.videos[0] ?? VIDEO_MODELS[0];
+      const next = {
+        ...current,
+        model: model.id,
+        duration: configured && model.durations.includes(current.duration) ? current.duration : model.defaultDuration,
+        aspectRatio: configured && model.aspectRatios.includes(current.aspectRatio) ? current.aspectRatio : model.defaultAspectRatio,
+        resolution: configured && model.resolutions.includes(current.resolution) ? current.resolution : model.defaultResolution || "",
+        firstFrameUrl: model.frameImages.supported.includes("first_frame") ? current.firstFrameUrl : "",
+        lastFrameUrl: model.frameImages.supported.includes("last_frame") ? current.lastFrameUrl : "",
+        generateAudio: configured ? model.generateAudio.supported && current.generateAudio : model.generateAudio.default,
+      };
+      return Object.entries(next).every(([key, value]) => current[key as keyof FormState] === value) ? current : next;
+    });
+  }, [appConfig?.openRouter, openRouterImageModelId]);
+
+  useEffect(() => {
     let disposed = false;
     let timer: ReturnType<typeof setTimeout>;
     let controller: AbortController | undefined;
@@ -748,7 +1165,9 @@ export default function App() {
         firstFailureAt = 0;
         serverSession.current = config.sessionId;
         serviceState.current = "online";
-        setAppConfig(config);
+        setAppConfig((current) => current && current.openRouter.revision > config.openRouter.revision
+          ? { ...config, openRouter: current.openRouter }
+          : config);
       } catch {
         if (disposed) return;
         if (consecutiveFailures === 0) firstFailureAt = Date.now();
@@ -1073,6 +1492,7 @@ export default function App() {
       generationControllers.current.has(submissionKind) ||
       currentSubmissionUncertain ||
       readingImageReference ||
+      (workflow === "image" && imageProvider === "openrouter" && selectedOpenRouterImageModel.inputReference.required && !imageReference) ||
       (workflow === "image" && imageProvider === "mflux" && selectedMfluxModel.requiresReference && !imageReference) ||
       (clearingWorkspace && workflow === "video" && form.provider === "local") ||
       (localCleanupFailed && workflow === "video" && form.provider === "local") ||
@@ -1100,7 +1520,8 @@ export default function App() {
     } else if (submissionKind === "image") {
       setImageSubmitting(true);
       setImageFailure(null);
-      setJobAnnouncement("Meta Muse image started.");
+      setOpenRouterImageTaskModel({ id: selectedOpenRouterImageModel.id, name: selectedOpenRouterImageModel.name });
+      setJobAnnouncement(`${selectedOpenRouterImageModel.name} image started.`);
     } else {
       mfluxStartedAt.current = Date.now();
       setMfluxElapsedSeconds(0);
@@ -1138,14 +1559,16 @@ export default function App() {
           : await generateImage({
               provider: "openrouter",
               prompt: imagePrompt,
-              model: MUSE_IMAGE_MODEL.id,
-              inputReference: imageReference?.dataUrl,
+              model: selectedOpenRouterImageModel.id,
+              aspectRatio: openRouterImageAspectRatio || undefined,
+              resolution: openRouterImageResolution || undefined,
+              inputReference: selectedOpenRouterImageModel.inputReference.supported ? imageReference?.dataUrl : undefined,
             }, key || undefined, requestController.signal);
         if (version !== workspaceVersion.current) return;
         if (isPaidSubmission) paidRemoteWork.delete(pendingRemoteSubmission);
         if (isMflux) setMfluxImageResult(result);
         else setImageResult(result);
-        setJobAnnouncement(`${isMflux ? "Local MFLUX" : "Meta Muse"} image completed.`);
+        setJobAnnouncement(`${isMflux ? "Local MFLUX" : selectedOpenRouterImageModel.name} image completed.`);
         return;
       }
 
@@ -1170,9 +1593,9 @@ export default function App() {
               model: selectedModel.id,
               duration: form.duration,
               aspectRatio: form.aspectRatio,
-              resolution: form.resolution,
-              firstFrameUrl: form.firstFrameUrl || undefined,
-              lastFrameUrl: form.lastFrameUrl || undefined,
+              resolution: form.resolution || undefined,
+              firstFrameUrl: selectedModel.frameImages.supported.includes("first_frame") ? form.firstFrameUrl || undefined : undefined,
+              lastFrameUrl: selectedModel.frameImages.supported.includes("last_frame") ? form.lastFrameUrl || undefined : undefined,
               generateAudio: selectedModel.generateAudio.supported ? form.generateAudio : undefined,
             },
             key || undefined,
@@ -1194,6 +1617,7 @@ export default function App() {
           form.provider === "local"
             ? selectedLocalResolution.aspectRatio
             : form.aspectRatio,
+        modelName: form.provider === "openrouter" ? selectedModel.name : "MiniMax H3",
       };
       setJobs((current) => [trackedJob, ...current.filter((existing) => existing.id !== trackedJob.id)]);
       if (
@@ -1247,7 +1671,7 @@ export default function App() {
         if (currentSubmissionKindRef.current === submissionKind) setError(message);
       }
       const submissionLabel = submissionKind === "image"
-        ? "Meta Muse image"
+        ? `${selectedOpenRouterImageModel.name} image`
         : submissionKind === "mflux"
           ? "Local MFLUX image"
         : submissionKind === "openrouter"
@@ -1286,9 +1710,10 @@ export default function App() {
     } else {
       setImageResult(null);
       setImageFailure(null);
+      setOpenRouterImageTaskModel(null);
     }
     setError(null);
-    setJobAnnouncement(`${imageProvider === "mflux" ? "Local MFLUX" : "Meta Muse"} image deleted.`);
+    setJobAnnouncement(`${imageProvider === "mflux" ? "Local MFLUX" : currentImageModel.name} image deleted.`);
   };
 
   const removeVideoJob = async (target: DisplayJob) => {
@@ -1400,6 +1825,14 @@ export default function App() {
           />
         ))}
       <p aria-live="polite" className="sr-only" role="status">{jobAnnouncement}</p>
+      <ModelManager
+        disabled={submitting}
+        initialKind={workflow}
+        onClose={() => setModelManagerOpen(false)}
+        onRegistry={updateOpenRouterRegistry}
+        open={modelManagerOpen}
+        registry={openRouterRegistry}
+      />
       <header className="border-b border-white/10 bg-[#0c0d0c] text-white">
         <div className="mx-auto flex max-w-[1500px] items-center justify-between px-5 py-4 sm:px-8 lg:px-10">
           <div className="flex items-center gap-3">
@@ -1423,7 +1856,7 @@ export default function App() {
                   </div>
                   <div className="max-h-[60vh] overflow-y-auto p-2">
                     {([
-                      ["openrouter", openRouterImageTaskStatus, "Meta Muse Image"],
+                      ["openrouter", openRouterImageTaskStatus, openRouterImageTaskModel?.name || selectedOpenRouterImageModel.name],
                       ["mflux", mfluxImageTaskStatus, "Local MFLUX"],
                     ] as const).map(([provider, status, label]) => status && (
                       <button
@@ -1487,7 +1920,7 @@ export default function App() {
                           type="button"
                         >
                           <span className="min-w-0">
-                            <span className="block text-[10px] font-bold uppercase tracking-[0.12em]">{trackedJob.provider === "local" ? "Local h3.c" : "OpenRouter"}</span>
+                            <span className="block text-[10px] font-bold uppercase tracking-[0.12em]">{trackedJob.modelName || (trackedJob.provider === "local" ? "Local h3.c" : "OpenRouter")}</span>
                             <span className="mt-1 block truncate font-mono text-[9px] text-white/40">{trackedJob.id}</span>
                           </span>
                           <span className={`shrink-0 text-[9px] font-bold uppercase tracking-[0.12em] ${trackedJob.status === "failed" ? "text-[#ff826e]" : active ? "text-[#d9ff72]" : "text-white/55"}`}>
@@ -1620,9 +2053,19 @@ export default function App() {
                     </button>
                   )}
                 </div>
-                <p className="mt-2 text-[11px] leading-4 text-stone-500" id="session-key-help">
-                  Temporary for this browser tab only. The key is never stored server-side and remains here until you remove it or close the tab.
-                </p>
+                <div className="mt-2 flex flex-col items-start justify-between gap-3 sm:flex-row sm:items-center">
+                  <p className="text-[11px] leading-4 text-stone-500" id="session-key-help">
+                    Temporary for this browser tab only. The key is never stored server-side and remains here until you remove it or close the tab.
+                  </p>
+                  <button
+                    className="shrink-0 border border-black/20 px-3 py-2 text-[9px] font-bold uppercase tracking-[0.12em] transition hover:border-black hover:bg-black hover:text-[#d9ff72] disabled:opacity-40"
+                    disabled={submitting}
+                    onClick={() => setModelManagerOpen(true)}
+                    type="button"
+                  >
+                    Manage models
+                  </button>
+                </div>
               </div>
             </div>
           </div>
@@ -1722,12 +2165,22 @@ export default function App() {
                 </>
               ) : (
                 <>
-                  <p className="mb-2 text-[11px] font-bold uppercase tracking-[0.18em] text-stone-700">Model</p>
-                  <p className="flex h-12 items-center border border-black/15 bg-[#faf9f3] px-3 text-sm text-stone-700">{currentImageModel.name}</p>
+                  <FieldLabel htmlFor="openrouter-image-model">Model</FieldLabel>
+                  <select
+                    className="h-12 w-full border border-black/15 bg-[#faf9f3] px-3 text-sm outline-none transition focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
+                    id="openrouter-image-model"
+                    onChange={(event) => {
+                      const model = openRouterRegistry.images.find((candidate) => candidate.id === event.target.value);
+                      if (model) selectOpenRouterImageModel(model);
+                    }}
+                    value={selectedOpenRouterImageModel.id}
+                  >
+                    {openRouterRegistry.images.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}
+                  </select>
                 </>
               )}
               {imageProvider === "openrouter" && (
-                <p className="mt-2 font-mono text-[10px] text-stone-600">OpenRouter price: {MUSE_IMAGE_MODEL.price}</p>
+                <p className="mt-2 font-mono text-[10px] text-stone-600">OpenRouter price: {selectedOpenRouterImageModel.price || "see the model page"}</p>
               )}
               <p className="mt-2 text-[11px] leading-4 text-stone-500">
                 {imageProvider === "openrouter"
@@ -1735,6 +2188,41 @@ export default function App() {
                   : `MFLUX uses ${mfluxSteps} steps and ${mfluxQuantization === null ? "no on-load quantization" : `${mfluxQuantization}-bit quantization`}.`}
               </p>
             </div>
+            {imageProvider === "openrouter" && (selectedOpenRouterImageModel.resolutions.length > 0 || selectedOpenRouterImageModel.aspectRatios.length > 0) && (
+              <div className={`mt-6 grid gap-5 ${selectedOpenRouterImageModel.resolutions.length > 0 ? "sm:grid-cols-[0.7fr_1.3fr]" : ""}`}>
+                {selectedOpenRouterImageModel.resolutions.length > 0 && (
+                  <div>
+                    <FieldLabel htmlFor="openrouter-image-resolution">Resolution</FieldLabel>
+                    <select
+                      className="h-12 w-full border border-black/15 bg-[#faf9f3] px-3 text-sm outline-none transition focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
+                      id="openrouter-image-resolution"
+                      onChange={(event) => setOpenRouterImageResolution(event.target.value)}
+                      value={openRouterImageResolution}
+                    >
+                      {selectedOpenRouterImageModel.resolutions.map((resolution) => <option key={resolution} value={resolution}>{resolution}</option>)}
+                    </select>
+                  </div>
+                )}
+                {selectedOpenRouterImageModel.aspectRatios.length > 0 && (
+                  <fieldset>
+                    <legend className="mb-2 text-[11px] font-bold uppercase tracking-[0.18em] text-stone-700">Aspect ratio</legend>
+                    <div className="grid grid-cols-3 gap-1.5">
+                      {selectedOpenRouterImageModel.aspectRatios.map((ratio) => (
+                        <button
+                          aria-pressed={openRouterImageAspectRatio === ratio}
+                          className={`h-12 border text-xs font-bold transition ${openRouterImageAspectRatio === ratio ? "border-black bg-black text-[#d9ff72]" : "border-black/15 bg-[#faf9f3] hover:border-black/50"}`}
+                          key={ratio}
+                          onClick={() => setOpenRouterImageAspectRatio(ratio)}
+                          type="button"
+                        >
+                          {ratio}
+                        </button>
+                      ))}
+                    </div>
+                  </fieldset>
+                )}
+              </div>
+            )}
             {imageProvider === "mflux" && (
               <div className="mt-6 grid gap-5 sm:grid-cols-[0.8fr_1.2fr]">
                 <div>
@@ -1788,6 +2276,7 @@ export default function App() {
                 </fieldset>
               </div>
             )}
+            {(imageProvider === "mflux" || selectedOpenRouterImageModel.inputReference.supported) && (
             <div className="mt-6 border border-black/12 bg-[#e7e5dc] p-4 sm:p-5">
               <div className="mb-4 flex items-start gap-3">
                 <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center bg-white/70"><Icon name="image" /></div>
@@ -1798,17 +2287,19 @@ export default function App() {
                       ? "Qwen Image Edit requires one PNG, JPEG, or WebP image up to 10 MB."
                       : selectedMfluxModel.id === "flux2-klein-4b" && imageProvider === "mflux"
                         ? "Add one optional PNG, JPEG, or WebP image to use FLUX.2's dedicated edit mode."
-                        : "Add one optional PNG, JPEG, or WebP image up to 10 MB."}
+                        : selectedOpenRouterImageModel.inputReference.required
+                          ? "This model requires one PNG, JPEG, or WebP image up to 10 MB."
+                          : "Add one optional PNG, JPEG, or WebP image up to 10 MB."}
                   </p>
                 </div>
               </div>
-              <FieldLabel htmlFor="image-reference" optional={!(imageProvider === "mflux" && selectedMfluxModel.requiresReference)}>Image file</FieldLabel>
+              <FieldLabel htmlFor="image-reference" optional={imageProvider === "mflux" ? !selectedMfluxModel.requiresReference : !selectedOpenRouterImageModel.inputReference.required}>Image file</FieldLabel>
               <input
                 accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp"
                 className="h-11 w-full cursor-pointer text-[0] outline-none file:h-11 file:w-full file:cursor-pointer file:border file:border-black/15 file:bg-[#faf9f3] file:px-3 file:text-[10px] file:font-bold file:uppercase file:tracking-[0.12em] hover:file:border-black focus-visible:ring-2 focus-visible:ring-black"
                 id="image-reference"
                 onChange={(event) => void selectImageReference(event)}
-                aria-required={imageProvider === "mflux" && selectedMfluxModel.requiresReference}
+                aria-required={imageProvider === "mflux" ? selectedMfluxModel.requiresReference : selectedOpenRouterImageModel.inputReference.required}
                 type="file"
               />
               <p aria-live="polite" className="sr-only" role="status">
@@ -1856,6 +2347,7 @@ export default function App() {
                 </>
               )}
             </div>
+            )}
             {imageProvider === "mflux" && (
               <>
                 <p aria-live="polite" className="sr-only" role="status">{mfluxAdvancedStatus}</p>
@@ -2078,23 +2570,15 @@ export default function App() {
                 className="h-12 w-full border border-black/15 bg-[#faf9f3] px-3 text-sm outline-none transition focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
                 id="model"
                 onChange={(event) => {
-                  const model = getVideoModel(event.target.value);
-                  if (!model) return;
-                  setForm((current) => ({
-                    ...current,
-                    model: model.id,
-                    duration: model.defaultDuration,
-                    aspectRatio: model.defaultAspectRatio,
-                    resolution: model.defaultResolution,
-                    generateAudio: model.generateAudio.default,
-                  }));
+                  const model = openRouterRegistry.videos.find((candidate) => candidate.id === event.target.value);
+                  if (model) selectOpenRouterVideoModel(model);
                 }}
                 value={selectedModel.id}
               >
-                {VIDEO_MODELS.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}
+                {openRouterRegistry.videos.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}
               </select>
               <p className="mt-2 font-mono text-[10px] leading-4 text-stone-600">
-                OpenRouter price: {selectedModel.price}
+                OpenRouter price: {selectedModel.price || "see the model page"}
               </p>
             </div>
             <div>
@@ -2110,8 +2594,8 @@ export default function App() {
             </div>
           </div>
 
-          <div className="mt-6 grid gap-5 sm:grid-cols-[0.7fr_1.3fr]">
-            <div>
+          <div className={`mt-6 grid gap-5 ${selectedModel.resolutions.length > 0 ? "sm:grid-cols-[0.7fr_1.3fr]" : ""}`}>
+            {selectedModel.resolutions.length > 0 && <div>
               <FieldLabel htmlFor="resolution">Resolution</FieldLabel>
               <select
                 className="h-12 w-full border border-black/15 bg-[#faf9f3] px-3 text-sm outline-none transition focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
@@ -2121,7 +2605,7 @@ export default function App() {
               >
                 {selectedModel.resolutions.map((resolution) => <option key={resolution} value={resolution}>{resolution}</option>)}
               </select>
-            </div>
+            </div>}
             <fieldset>
               <legend className="mb-2 text-[11px] font-bold uppercase tracking-[0.18em] text-stone-700">Aspect ratio</legend>
               <div className="grid grid-cols-3 gap-1.5">
@@ -2485,7 +2969,7 @@ export default function App() {
                 currentSubmissionUncertain ||
                 ((clearingWorkspace || localCleanupFailed) && workflow === "video" && form.provider === "local") ||
                 (workflow === "video" && (currentVideoLocked || uploadingReference !== null || !form.prompt.trim())) ||
-                (workflow === "image" && (!imagePrompt.trim() || (imageProvider === "mflux" && (!selectedMfluxModelAvailable || (selectedMfluxModel.requiresReference && !imageReference)))))
+                (workflow === "image" && (!imagePrompt.trim() || (imageProvider === "openrouter" && selectedOpenRouterImageModel.inputReference.required && !imageReference) || (imageProvider === "mflux" && (!selectedMfluxModelAvailable || (selectedMfluxModel.requiresReference && !imageReference)))))
               }
               type="submit"
             >
@@ -2553,7 +3037,7 @@ export default function App() {
                         : "Rendering first frame"}
                     </p>
                     <p className="mt-2 font-mono text-[10px] uppercase tracking-[0.2em] text-white/60">
-                      {imageProvider === "mflux" ? "MFLUX is composing the image" : "Muse is composing the image"}
+                      {imageProvider === "mflux" ? "MFLUX is composing the image" : `${currentImageModel.name} is composing the image`}
                     </p>
                     {imageProvider === "mflux" && (
                       <div className="mt-8 border border-white/10 bg-black/20 p-4 text-left">
@@ -2610,7 +3094,7 @@ export default function App() {
                 <div className="flex flex-col gap-3 sm:flex-row">
                   <a
                     className="flex h-12 flex-1 items-center justify-center gap-2 bg-[#d9ff72] text-xs font-bold uppercase tracking-[0.12em] text-black transition hover:bg-white"
-                    download={`${imageProvider === "mflux" ? "mflux" : "muse"}-image.${imageExtension}`}
+                    download={`${imageProvider === "mflux" ? "mflux" : "openrouter"}-image.${imageExtension}`}
                     href={imageSource}
                   >
                     <Icon name="download" /> Download
@@ -2649,7 +3133,7 @@ export default function App() {
           <div className="flex items-center justify-between px-5 py-5 sm:px-8">
             <div>
               <p className="font-mono text-[9px] uppercase tracking-[0.2em] text-white/60">Output monitor</p>
-              <h2 className="mt-1 font-display text-lg uppercase">{job ? `Job ${job.id.slice(0, 12)}` : currentVideoSubmissionStatus ? "Video submission" : "No active reel"}</h2>
+              <h2 className="mt-1 font-display text-lg uppercase">{job ? job.modelName || `Job ${job.id.slice(0, 12)}` : currentVideoSubmissionStatus ? "Video submission" : "No active reel"}</h2>
             </div>
             {(job || currentVideoSubmissionStatus) && (
               <span className={`rounded-full border px-3 py-1.5 text-[9px] font-bold uppercase tracking-[0.14em] ${job?.status === "failed" || currentVideoSubmissionStatus === "failed" ? "border-[#ff826e]/30 text-[#ff826e]" : "border-[#d9ff72]/30 text-[#d9ff72]"}`}>

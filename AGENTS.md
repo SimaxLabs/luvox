@@ -11,7 +11,7 @@
 ## Architecture
 
 - `src/` is the React client; it must call only the local `/api` routes. `server/index.ts` dispatches provider-neutral routes. Keep OpenRouter HTTP/auth logic in `server/openrouter.ts`, MFLUX process logic in `server/localMflux.ts`, and h3.c process/queue logic in `server/localH3.ts`.
-- `shared/videoModels.ts` is the single capability registry used by both UI controls and server validation. Add or change model options there rather than duplicating capability checks.
+- `shared/imageModels.ts` and `shared/videoModels.ts` define immutable OpenRouter built-ins. `server/openrouterModels.ts` strictly validates and merges additive custom JSON definitions for both UI controls and server validation; do not duplicate capability checks or allow custom models to replace built-ins.
 - Client TypeScript uses bundler resolution, while server TypeScript uses NodeNext. Relative imports in `server/` must use emitted `.js` suffixes even though the sources are `.ts`.
 - Tailwind is v4 through `@tailwindcss/vite` and `src/styles.css`; there is intentionally no `tailwind.config.*` or PostCSS config.
 

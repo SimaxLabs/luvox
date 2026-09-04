@@ -30,6 +30,8 @@ import {
   shutdownLocalMflux,
 } from "./localMflux.js";
 import {
+  discoverOpenRouterImageEndpoints,
+  discoverOpenRouterModels,
   generateImage,
   generateVideo,
   getVideoContent,
@@ -37,6 +39,13 @@ import {
   OpenRouterError,
   releaseVideoCapability,
 } from "./openrouter.js";
+import {
+  getOpenRouterModelRegistry,
+  initializeOpenRouterModels,
+  OpenRouterModelConfigError,
+  removeOpenRouterModel,
+  saveOpenRouterModel,
+} from "./openrouterModels.js";
 import {
   validateGenerateImageInput,
   validateGenerateVideoInput,
@@ -139,8 +148,37 @@ app.get("/api/config", (_request, response) => {
       configured: isLocalMfluxConfigured(),
       models: getAvailableLocalMfluxModels(),
     },
+    openRouter: getOpenRouterModelRegistry(),
   });
 });
+
+app.get(
+  "/api/openrouter/models/discover",
+  loopbackOnly,
+  async (request: Request, response: Response, next: NextFunction) => {
+    const controller = new AbortController();
+    const abortUpstream = () => {
+      if (!response.writableEnded) controller.abort();
+    };
+    response.once("close", abortUpstream);
+    try {
+      const input = z.object({
+        kind: z.enum(["image", "video"]),
+        model: z.string().trim().min(3).max(200).optional(),
+      }).strict().parse(request.query);
+      if (input.model && input.kind !== "image") {
+        throw new OpenRouterError("Endpoint discovery is available only for image models.", 400, "invalid_request", false);
+      }
+      response.json(input.model
+        ? await discoverOpenRouterImageEndpoints(input.model, controller.signal)
+        : await discoverOpenRouterModels(input.kind, controller.signal));
+    } catch (error) {
+      if (!controller.signal.aborted) next(error);
+    } finally {
+      response.off("close", abortUpstream);
+    }
+  },
+);
 
 app.put(
   "/api/local/workspace",
@@ -239,6 +277,30 @@ app.post(
 );
 
 app.use(express.json({ limit: "100kb" }));
+
+app.put(
+  "/api/openrouter/models",
+  loopbackOnly,
+  async (request: Request, response: Response, next: NextFunction) => {
+    try {
+      response.json(await saveOpenRouterModel(request.body));
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+app.delete(
+  "/api/openrouter/models",
+  loopbackOnly,
+  async (request: Request, response: Response, next: NextFunction) => {
+    try {
+      response.json(await removeOpenRouterModel(request.body));
+    } catch (error) {
+      next(error);
+    }
+  },
+);
 
 app.delete(
   "/api/local/reference-image",
@@ -492,7 +554,7 @@ app.use(
       return;
     }
 
-    if (error instanceof OpenRouterError || error instanceof LocalH3Error || error instanceof LocalMfluxError) {
+    if (error instanceof OpenRouterError || error instanceof OpenRouterModelConfigError || error instanceof LocalH3Error || error instanceof LocalMfluxError) {
       if (error instanceof OpenRouterError && error.retryAfter) {
         response.setHeader("Retry-After", error.retryAfter);
       }
@@ -565,6 +627,7 @@ if (!Number.isInteger(port) || port < 1 || port > 65_535) {
   throw new Error("PORT must be a valid TCP port.");
 }
 
+await initializeOpenRouterModels();
 await initializeLocalMfluxStorage();
 await initializeLocalH3Storage();
 

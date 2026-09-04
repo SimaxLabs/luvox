@@ -9,9 +9,9 @@ import {
   LOCAL_H3_DURATIONS,
   LOCAL_H3_FRAME_FIT_IDS,
 } from "../shared/localH3.js";
-import { getVideoModel } from "../shared/videoModels.js";
-import { getMfluxImageModel, getMfluxImageResolution, MFLUX_IMAGE_STEPS, MFLUX_VAE_TILE_SIZES, MUSE_IMAGE_MODEL } from "../shared/imageModels.js";
+import { getMfluxImageModel, getMfluxImageResolution, MFLUX_IMAGE_STEPS, MFLUX_VAE_TILE_SIZES } from "../shared/imageModels.js";
 import type { ImageMediaType } from "../shared/imageTypes.js";
+import { getOpenRouterImageModel, getOpenRouterVideoModel } from "./openrouterModels.js";
 
 const IMAGE_REFERENCE_MAX_BYTES = 10 * 1024 * 1024;
 
@@ -118,7 +118,9 @@ const openRouterGenerateImageSchema = z
   .object({
     provider: z.literal("openrouter"),
     prompt: promptSchema,
-    model: z.literal(MUSE_IMAGE_MODEL.id),
+    model: z.string().trim().min(1, "Model is required."),
+    aspectRatio: z.string().trim().min(1, "Aspect ratio is required.").optional(),
+    resolution: z.string().trim().min(1, "Resolution is required.").optional(),
     inputReference: imageReferenceDataUrl,
   })
   .strict();
@@ -152,7 +154,27 @@ export type ImageGenerateInput = z.infer<typeof generateImageSchema>;
 
 export function validateGenerateImageInput(value: unknown): ImageGenerateInput {
   const input = generateImageSchema.parse(value);
-  if (input.provider === "mflux") {
+  if (input.provider === "openrouter") {
+    const model = getOpenRouterImageModel(input.model);
+    if (!model) throw new z.ZodError([customIssue("model", "Unsupported OpenRouter image model.")]);
+    const issues: z.ZodIssue[] = [];
+    if (model.aspectRatios.length > 0 && !input.aspectRatio) {
+      issues.push(customIssue("aspectRatio", "Aspect ratio is required for this model."));
+    } else if (input.aspectRatio && !model.aspectRatios.includes(input.aspectRatio)) {
+      issues.push(customIssue("aspectRatio", "Unsupported aspect ratio for this model."));
+    }
+    if (model.resolutions.length > 0 && !input.resolution) {
+      issues.push(customIssue("resolution", "Resolution is required for this model."));
+    } else if (input.resolution && !model.resolutions.includes(input.resolution)) {
+      issues.push(customIssue("resolution", "Unsupported resolution for this model."));
+    }
+    if (input.inputReference && !model.inputReference.supported) {
+      issues.push(customIssue("inputReference", "This model does not support a reference image."));
+    } else if (!input.inputReference && model.inputReference.required) {
+      issues.push(customIssue("inputReference", "This model requires a reference image."));
+    }
+    if (issues.length > 0) throw new z.ZodError(issues);
+  } else {
     const issues: z.ZodIssue[] = [];
     const model = getMfluxImageModel(input.model);
     if (!model) issues.push(customIssue("model", "Unsupported MFLUX model."));
@@ -241,7 +263,7 @@ export function validateGenerateVideoInput(value: unknown): VideoGenerateInput {
     return input;
   }
 
-  const model = getVideoModel(input.model);
+  const model = getOpenRouterVideoModel(input.model);
 
   if (!model) {
     throw new z.ZodError([customIssue("model", "Unsupported video model.")]);
@@ -295,7 +317,7 @@ export function validateGenerateVideoInput(value: unknown): VideoGenerateInput {
     ));
   }
 
-  if (input.generateAudio && !model.generateAudio.supported) {
+  if (typeof input.generateAudio === "boolean" && !model.generateAudio.supported) {
     issues.push(customIssue("generateAudio", "This model does not support generated audio."));
   }
 

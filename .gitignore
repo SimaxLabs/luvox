@@ -2,6 +2,7 @@ node_modules/
 dist/
 dist-server/
 .h3-jobs/
+.luvox/
 .env*
 !.env.example
 *.log

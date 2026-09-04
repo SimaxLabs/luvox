@@ -1,6 +1,11 @@
 import type { LocalH3FrameFitId } from "../shared/localH3";
 import type { VideoStatusResponse as VideoJob } from "../shared/videoTypes";
 import type { ImageGenerationResponse, LocalMfluxProgress } from "../shared/imageTypes";
+import type {
+  OpenRouterDiscoveryResponse,
+  OpenRouterModelDefinition,
+  OpenRouterModelRegistry,
+} from "../shared/openrouterModels";
 
 export type { GenerationStatus, VideoStatusResponse as VideoJob } from "../shared/videoTypes";
 export type { ImageGenerationResponse, LocalMfluxProgress } from "../shared/imageTypes";
@@ -50,6 +55,7 @@ export interface AppConfig {
     configured: boolean;
     models: string[];
   };
+  openRouter: OpenRouterModelRegistry;
 }
 
 export class ApiError extends Error {
@@ -141,7 +147,7 @@ export function generateVideo(
 
 export function generateImage(
   payload:
-    | { provider: "openrouter"; prompt: string; model: string; inputReference?: string }
+    | { provider: "openrouter"; prompt: string; model: string; aspectRatio?: string; resolution?: string; inputReference?: string }
     | {
         provider: "mflux";
         prompt: string;
@@ -246,6 +252,34 @@ async function streamMfluxImage(
 
 export function getAppConfig(signal?: AbortSignal): Promise<AppConfig> {
   return request<AppConfig>("/api/config", { signal });
+}
+
+export function discoverOpenRouterModels(
+  kind: "image" | "video",
+  signal?: AbortSignal,
+): Promise<OpenRouterDiscoveryResponse> {
+  return request<OpenRouterDiscoveryResponse>(`/api/openrouter/models/discover?kind=${kind}`, { signal });
+}
+
+export function discoverOpenRouterImageEndpoints(model: string, signal?: AbortSignal): Promise<OpenRouterDiscoveryResponse> {
+  const query = new URLSearchParams({ kind: "image", model });
+  return request<OpenRouterDiscoveryResponse>(`/api/openrouter/models/discover?${query}`, { signal });
+}
+
+export function saveOpenRouterModel(definition: OpenRouterModelDefinition): Promise<OpenRouterModelRegistry> {
+  return request<OpenRouterModelRegistry>("/api/openrouter/models", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(definition),
+  });
+}
+
+export function removeOpenRouterModel(kind: "image" | "video", id: string): Promise<OpenRouterModelRegistry> {
+  return request<OpenRouterModelRegistry>("/api/openrouter/models", {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ kind, id }),
+  });
 }
 
 export function uploadLocalReferenceImage(
