@@ -28,7 +28,7 @@ Open [http://localhost:3000](http://localhost:3000).
 
 Compose intentionally publishes Motio only on `127.0.0.1`. Keep that host binding so paid generation routes are not exposed to the network.
 
-Local MFLUX and h3.c generation are not available in Docker because the Linux container cannot access macOS Metal or host model files.
+Local MFLUX and h3.c generation are not available in Docker because the Linux container cannot access macOS Metal or host model files, so the Docker UI hides the provider selectors and uses OpenRouter only.
 
 ## Run with npm
 

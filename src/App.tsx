@@ -1484,14 +1484,12 @@ export default function App() {
             ))}
           </div>
 
-          {workflow === "image" && (
-          <>
+          {workflow === "image" && appConfig?.localMflux.supported === true && (
           <div className="mb-7 grid grid-cols-2 gap-1.5 border border-black/10 p-1.5" aria-label="Image generation provider">
             {(["openrouter", "mflux"] as const).map((provider) => (
               <button
                 aria-pressed={imageProvider === provider}
                 className={`h-11 text-[10px] font-bold uppercase tracking-[0.12em] transition disabled:cursor-not-allowed disabled:opacity-40 ${imageProvider === provider ? "bg-black text-[#d9ff72]" : "text-stone-500 hover:bg-white/60 hover:text-black"}`}
-                disabled={provider === "mflux" && appConfig?.localMflux.supported !== true}
                 key={provider}
                 onClick={() => {
                   leaveJobView();
@@ -1504,22 +1502,15 @@ export default function App() {
               </button>
             ))}
           </div>
-          {appConfig?.localMflux.supported === false && (
-            <p className="-mt-5 mb-7 text-[11px] leading-4 text-stone-500">
-              Local MFLUX requires macOS on Apple Silicon and is unavailable in Docker.
-            </p>
-          )}
-          </>
           )}
 
-          {workflow === "video" && (
-          <>
+          {workflow === "video" && appConfig?.localH3.supported === true && (
           <div className="mb-7 grid grid-cols-2 gap-1.5 border border-black/10 p-1.5" aria-label="Video generation provider">
             {(["openrouter", "local"] as const).map((provider) => (
               <button
                 aria-pressed={form.provider === provider}
                 className={`h-11 text-[10px] font-bold uppercase tracking-[0.12em] transition disabled:cursor-not-allowed disabled:opacity-40 ${form.provider === provider ? "bg-black text-[#d9ff72]" : "text-stone-500 hover:bg-white/60 hover:text-black"}`}
-                disabled={uploadingReference !== null || (provider === "local" && appConfig?.localH3.supported !== true)}
+                disabled={uploadingReference !== null}
                 key={provider}
                 onClick={() => {
                   leaveJobView();
@@ -1532,12 +1523,6 @@ export default function App() {
               </button>
             ))}
           </div>
-          {appConfig?.localH3.supported === false && (
-            <p className="-mt-5 mb-7 text-[11px] leading-4 text-stone-500">
-              Local h3.c requires macOS on Apple Silicon and a loopback-only server. It is unavailable in Docker.
-            </p>
-          )}
-          </>
           )}
 
           {((workflow === "image" && imageProvider === "openrouter") || (workflow === "video" && form.provider === "openrouter")) && (
