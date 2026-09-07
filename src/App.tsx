@@ -36,6 +36,7 @@ import {
   type LocalMfluxProgress,
   type VideoJob,
 } from "./api";
+import { MAX_SAVED_PROMPTS, persistSavedPrompts, readSavedPrompts, type SavedPrompt, type SavedPromptSettings } from "./savedPrompts";
 
 type Workflow = "video" | "image";
 type VideoProvider = "openrouter" | "local";
@@ -156,14 +157,182 @@ function Icon({ name, className = "size-4" }: { name: IconName; className?: stri
   );
 }
 
-function FieldLabel({ children, htmlFor, optional }: { children: ReactNode; htmlFor: string; optional?: boolean }) {
+function FieldLabel({ action, children, htmlFor, optional }: { action?: ReactNode; children: ReactNode; htmlFor: string; optional?: boolean }) {
   return (
     <div className="mb-2 flex items-center justify-between gap-3">
       <label className="text-[11px] font-bold uppercase tracking-[0.18em] text-stone-700" htmlFor={htmlFor}>
         {children}
       </label>
-      {optional && <span className="text-[10px] uppercase tracking-[0.12em] text-stone-400">Optional</span>}
+      {action ?? (optional && <span className="text-[10px] uppercase tracking-[0.12em] text-stone-400">Optional</span>)}
     </div>
+  );
+}
+
+function PromptLibrary({
+  currentPrompt,
+  currentSettings,
+  disabled,
+  onLoad,
+}: {
+  currentPrompt: string;
+  currentSettings: SavedPromptSettings;
+  disabled: boolean;
+  onLoad: (prompt: SavedPrompt) => string;
+}) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  const [initial] = useState(() => {
+    try {
+      return { prompts: readSavedPrompts(), error: null as string | null };
+    } catch {
+      return { prompts: [] as SavedPrompt[], error: "Browser storage is unavailable, so saved prompts cannot be loaded." };
+    }
+  });
+  const [prompts, setPrompts] = useState(initial.prompts);
+  const [name, setName] = useState("");
+  const [includeSettings, setIncludeSettings] = useState(true);
+  const [status, setStatus] = useState("");
+  const [storageError, setStorageError] = useState(initial.error);
+
+  const save = () => {
+    const trimmedName = name.trim();
+    if (!trimmedName || !currentPrompt.trim()) return;
+    const saved: SavedPrompt = {
+      id: crypto.randomUUID(),
+      name: trimmedName,
+      prompt: currentPrompt,
+      createdAt: new Date().toISOString(),
+      ...(includeSettings ? { settings: currentSettings } : {}),
+    };
+    const next = [saved, ...prompts].slice(0, MAX_SAVED_PROMPTS);
+    try {
+      persistSavedPrompts(next);
+      setPrompts(next);
+      setName("");
+      setStorageError(null);
+      setStatus(`${saved.name} saved${includeSettings ? " with settings" : " as prompt only"}.`);
+    } catch {
+      setStorageError("The browser could not save this prompt. Check its site-storage permissions or available space.");
+    }
+  };
+
+  const remove = (saved: SavedPrompt) => {
+    if (!window.confirm(`Delete the saved prompt "${saved.name}"?`)) return;
+    const next = prompts.filter((prompt) => prompt.id !== saved.id);
+    try {
+      persistSavedPrompts(next);
+      setPrompts(next);
+      setStorageError(null);
+      setStatus(`${saved.name} deleted.`);
+    } catch {
+      setStorageError("The browser could not delete this saved prompt.");
+    }
+  };
+
+  const settingsLabels: Record<SavedPromptSettings["kind"], string> = {
+    image: "OpenRouter image",
+    mflux: "MFLUX image",
+    openrouter: "OpenRouter video",
+    local: "h3.c video",
+  };
+
+  return (
+    <>
+      <button
+        aria-haspopup="dialog"
+        className="border border-black/20 px-2.5 py-1 text-[9px] font-bold uppercase tracking-[0.12em] text-stone-600 transition hover:border-black hover:bg-black hover:text-[#d9ff72] disabled:cursor-not-allowed disabled:opacity-40"
+        disabled={disabled}
+        onClick={() => dialog.current?.showModal()}
+        type="button"
+      >
+        Saved prompts
+      </button>
+      <dialog
+        aria-labelledby="prompt-library-title"
+        className="m-0 h-[100dvh] max-h-none w-full max-w-none bg-transparent p-0 text-[#191b18] backdrop:bg-black/80 sm:m-auto sm:h-auto sm:max-h-[90dvh] sm:w-[min(56rem,calc(100vw-3rem))]"
+        ref={dialog}
+      >
+        <div className="flex h-full max-h-[100dvh] flex-col bg-[#f0efe8] shadow-2xl sm:max-h-[90dvh]">
+          <div className="flex items-start justify-between gap-5 border-b border-black/10 px-5 py-5 sm:px-7">
+            <div>
+              <p className="font-mono text-[9px] uppercase tracking-[0.2em] text-stone-500">Browser library / {prompts.length} saved</p>
+              <h2 className="mt-1 font-display text-xl uppercase" id="prompt-library-title">Saved prompts</h2>
+              <p className="mt-2 max-w-2xl text-xs leading-5 text-stone-600">Save the current prompt alone or keep its model and generation settings with it.</p>
+            </div>
+            <button className="shrink-0 border border-black/20 px-3 py-2 text-[10px] font-bold uppercase tracking-[0.12em] hover:border-black" onClick={() => dialog.current?.close()} type="button">Close</button>
+          </div>
+
+          <fieldset className="grid min-h-0 flex-1 overflow-y-auto border-0 p-0 lg:grid-cols-[0.8fr_1.2fr] lg:overflow-hidden" disabled={disabled}>
+            <section className="border-b border-black/10 p-5 sm:p-7 lg:overflow-y-auto lg:border-b-0 lg:border-r">
+              <FieldLabel htmlFor="saved-prompt-name">Name this prompt</FieldLabel>
+              <input
+                className="h-11 w-full border border-black/15 bg-[#faf9f3] px-3 text-sm outline-none transition focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
+                id="saved-prompt-name"
+                maxLength={100}
+                onChange={(event) => setName(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter") return;
+                  event.preventDefault();
+                  save();
+                }}
+                placeholder="Night market tracking shot"
+                value={name}
+              />
+              <label className="mt-4 flex cursor-pointer items-center gap-2 text-xs text-stone-700">
+                <input checked={includeSettings} onChange={(event) => setIncludeSettings(event.target.checked)} type="checkbox" />
+                Include the current model and settings
+              </label>
+              <button
+                className="mt-5 h-12 w-full bg-black px-5 text-[10px] font-bold uppercase tracking-[0.12em] text-[#d9ff72] disabled:cursor-not-allowed disabled:opacity-40"
+                disabled={!name.trim() || !currentPrompt.trim()}
+                onClick={save}
+                type="button"
+              >
+                Save current prompt
+              </button>
+              <p className="mt-4 text-[10px] leading-4 text-stone-500">Saved in this browser only. API keys, reference images, URLs, and local paths are never saved.</p>
+              <p aria-live="polite" className="mt-2 min-h-4 text-[10px] text-stone-600" role="status">{status}</p>
+              {storageError && <p className="mt-2 border-l-4 border-[#e44d38] bg-[#f9dfd9] px-3 py-2 text-xs text-[#712519]" role="alert">{storageError}</p>}
+            </section>
+
+            <section className="p-5 sm:p-7 lg:overflow-y-auto">
+              <p className="mb-3 text-[11px] font-bold uppercase tracking-[0.18em] text-stone-700">Your prompts</p>
+              {prompts.length > 0 ? (
+                <ul className="space-y-2">
+                  {prompts.map((saved) => (
+                    <li className="border border-black/10 bg-[#faf9f3] p-3" key={saved.id}>
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="truncate text-xs font-bold">{saved.name}</p>
+                          <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-stone-500">{saved.prompt}</p>
+                          <p className="mt-2 font-mono text-[9px] uppercase tracking-[0.1em] text-stone-500">
+                            {saved.settings ? settingsLabels[saved.settings.kind] : "Prompt only"}
+                          </p>
+                        </div>
+                        <div className="flex shrink-0 gap-2">
+                          <button
+                            className="border border-black/20 px-3 py-2 text-[9px] font-bold uppercase tracking-[0.12em] hover:border-black hover:bg-black hover:text-[#d9ff72]"
+                            onClick={() => {
+                              setStatus(onLoad(saved));
+                              dialog.current?.close();
+                            }}
+                            type="button"
+                          >
+                            Load
+                          </button>
+                          <button aria-label={`Delete ${saved.name}`} className="px-2 py-2 text-[9px] font-bold uppercase tracking-[0.12em] text-[#9a3023] hover:text-black" onClick={() => remove(saved)} type="button">Delete</button>
+                        </div>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <div className="flex min-h-48 items-center justify-center border border-dashed border-black/20 px-6 text-center text-xs leading-5 text-stone-500">No saved prompts yet.</div>
+              )}
+            </section>
+          </fieldset>
+        </div>
+      </dialog>
+    </>
   );
 }
 
@@ -954,6 +1123,46 @@ export default function App() {
   const imageExtension = currentImageResult?.mediaType === "image/jpeg"
     ? "jpg"
     : currentImageResult?.mediaType.split("/")[1] || "png";
+  const currentPromptSettings: SavedPromptSettings = currentSubmissionKind === "image"
+    ? {
+        kind: "image",
+        model: selectedOpenRouterImageModel.id,
+        aspectRatio: openRouterImageAspectRatio,
+        resolution: openRouterImageResolution,
+      }
+    : currentSubmissionKind === "mflux"
+      ? {
+          kind: "mflux",
+          model: selectedMfluxModel.id,
+          resolution: mfluxResolution,
+          steps: mfluxSteps,
+          quantization: mfluxQuantization,
+          seed: mfluxSeed,
+          lowRam: mfluxLowRam,
+          vaeTiling: mfluxVaeTiling,
+          vaeTileSize: mfluxVaeTileSize,
+          guidance: mfluxGuidance,
+          referenceFit: imageReferenceFit,
+        }
+      : currentSubmissionKind === "openrouter"
+        ? {
+            kind: "openrouter",
+            model: selectedModel.id,
+            duration: form.duration,
+            aspectRatio: form.aspectRatio,
+            resolution: form.resolution,
+            generateAudio: form.generateAudio,
+          }
+        : {
+            kind: "local",
+            resolution: form.localResolution,
+            frames: form.localFrames,
+            quality: form.localQuality,
+            acceleration: form.localAcceleration,
+            seed: form.localSeed,
+            frameFit: form.localFrameFit,
+            ssdStreaming: form.localSsdStreaming,
+          };
 
   const selectLocalResolution = (localResolution: string) => {
     const resetAcceleration = !isLocalH3AccelerationAvailable(form.localAcceleration, localResolution, form.localQuality);
@@ -1361,6 +1570,115 @@ export default function App() {
     if (otherPath !== previousPath) {
       void deleteLocalReferenceImage(token, localWorkspaceToken.current).catch(() => undefined);
     }
+  };
+
+  const loadSavedPrompt = (saved: SavedPrompt): string => {
+    leaveJobView();
+    setError(null);
+    let status = `${saved.name} loaded.`;
+
+    if (!saved.settings) {
+      if (workflow === "image") setImagePrompt(saved.prompt);
+      else setForm((current) => ({ ...current, prompt: saved.prompt }));
+      setJobAnnouncement(status);
+      return status;
+    }
+
+    const settings = saved.settings;
+    if (settings.kind === "image") {
+      setWorkflow("image");
+      setImageProvider("openrouter");
+      setImagePrompt(saved.prompt);
+      const model = openRouterRegistry.images.find((candidate) => candidate.id === settings.model);
+      if (model) {
+        setOpenRouterImageModelId(model.id);
+        setOpenRouterImageAspectRatio(model.aspectRatios.includes(settings.aspectRatio) ? settings.aspectRatio : model.defaultAspectRatio || "");
+        setOpenRouterImageResolution(model.resolutions.includes(settings.resolution) ? settings.resolution : model.defaultResolution || "");
+        setImageReference(null);
+      } else {
+        status = `${saved.name} loaded, but its saved OpenRouter image model is no longer available.`;
+      }
+    } else if (settings.kind === "mflux") {
+      setWorkflow("image");
+      setImagePrompt(saved.prompt);
+      const model = getMfluxImageModel(settings.model);
+      if (appConfig?.localMflux.supported !== true || !model) {
+        setImageProvider("openrouter");
+        status = `${saved.name} loaded, but its saved MFLUX settings are unavailable here.`;
+      } else {
+        const setup = MFLUX_IMAGE_RECOMMENDED_SETUPS.find((candidate) => (candidate.models as readonly string[]).includes(model.id)) ?? defaultMfluxSetup;
+        setImageProvider("mflux");
+        setMfluxModel(model.id);
+        setMfluxResolution(getMfluxImageResolution(settings.resolution) ? settings.resolution : setup.resolution);
+        setMfluxSteps(model.steps.some((steps) => steps === settings.steps) ? settings.steps : setup.steps);
+        setMfluxQuantization(MFLUX_IMAGE_QUANTIZATIONS.some((value) => value === settings.quantization) ? settings.quantization : setup.quantization);
+        setMfluxSeed(settings.seed);
+        setMfluxLowRam(settings.lowRam);
+        setMfluxVaeTiling(settings.vaeTiling);
+        setMfluxVaeTileSize(MFLUX_VAE_TILE_SIZES.some((size) => size === settings.vaeTileSize) ? settings.vaeTileSize : setup.vaeTileSize);
+        setMfluxGuidance(settings.guidance);
+        setImageReferenceFit(settings.referenceFit);
+        setImageReference(null);
+        setMfluxAdvancedStatus("Saved settings applied.");
+      }
+    } else if (settings.kind === "openrouter") {
+      setWorkflow("video");
+      setForm((current) => ({ ...current, provider: "openrouter", prompt: saved.prompt }));
+      const model = openRouterRegistry.videos.find((candidate) => candidate.id === settings.model);
+      if (model) {
+        setForm((current) => ({
+          ...current,
+          provider: "openrouter",
+          prompt: saved.prompt,
+          model: model.id,
+          duration: model.durations.includes(settings.duration) ? settings.duration : model.defaultDuration,
+          aspectRatio: model.aspectRatios.includes(settings.aspectRatio) ? settings.aspectRatio : model.defaultAspectRatio,
+          resolution: model.resolutions.includes(settings.resolution) ? settings.resolution : model.defaultResolution || "",
+          firstFrameUrl: "",
+          lastFrameUrl: "",
+          generateAudio: model.generateAudio.supported ? settings.generateAudio : model.generateAudio.default,
+        }));
+      } else {
+        status = `${saved.name} loaded, but its saved OpenRouter video model is no longer available.`;
+      }
+    } else {
+      setWorkflow("video");
+      if (appConfig?.localH3.supported !== true) {
+        setForm((current) => ({ ...current, provider: "openrouter", prompt: saved.prompt }));
+        status = `${saved.name} loaded, but its saved h3.c settings are unavailable here.`;
+      } else {
+        const resolution = LOCAL_H3_RESOLUTIONS.some((candidate) => candidate.id === settings.resolution) ? settings.resolution : "512x512";
+        const frames = LOCAL_H3_DURATIONS.some((candidate) => candidate.frames === settings.frames) ? settings.frames : 22;
+        const quality = LOCAL_H3_QUALITY_PRESETS.some((candidate) => candidate.id === settings.quality) ? settings.quality : "balanced";
+        const acceleration = isLocalH3AccelerationAvailable(settings.acceleration, resolution, quality) ? settings.acceleration : "standard";
+        for (const token of new Set(Object.values(referenceUploadTokens))) {
+          if (token) void deleteLocalReferenceImage(token, localWorkspaceToken.current).catch(() => undefined);
+        }
+        setReferenceUploadTokens({});
+        setReferenceUploadStatus("");
+        firstFramePathOnFocus.current = "";
+        lastFramePathOnFocus.current = "";
+        setForm((current) => ({
+          ...current,
+          provider: "local",
+          prompt: saved.prompt,
+          localResolution: resolution,
+          localFrames: frames,
+          localQuality: quality,
+          localAcceleration: acceleration,
+          localSeed: settings.seed,
+          localFirstFramePath: "",
+          localLastFramePath: "",
+          localFrameFit: settings.frameFit,
+          localSsdStreaming: settings.ssdStreaming,
+        }));
+        setLocalAdvancedStatus("Saved settings applied.");
+      }
+    }
+
+    if (status !== `${saved.name} loaded.`) setError(status);
+    setJobAnnouncement(status);
+    return status;
   };
 
   const selectLocalReference = async (
@@ -2095,7 +2413,19 @@ export default function App() {
               </div>
             )}
             <div>
-              <FieldLabel htmlFor="image-prompt">{usesMfluxEdit ? "Edit instruction" : "Image prompt"}</FieldLabel>
+              <FieldLabel
+                action={(
+                  <PromptLibrary
+                    currentPrompt={imagePrompt}
+                    currentSettings={currentPromptSettings}
+                    disabled={readingImageReference || uploadingReference !== null || clearingWorkspace}
+                    onLoad={loadSavedPrompt}
+                  />
+                )}
+                htmlFor="image-prompt"
+              >
+                {usesMfluxEdit ? "Edit instruction" : "Image prompt"}
+              </FieldLabel>
               <div className="relative">
                 <textarea
                   autoFocus
@@ -2505,7 +2835,19 @@ export default function App() {
               </div>
             )}
             <div>
-              <FieldLabel htmlFor="prompt">Prompt</FieldLabel>
+              <FieldLabel
+                action={(
+                  <PromptLibrary
+                    currentPrompt={form.prompt}
+                    currentSettings={currentPromptSettings}
+                    disabled={readingImageReference || uploadingReference !== null || clearingWorkspace}
+                    onLoad={loadSavedPrompt}
+                  />
+                )}
+                htmlFor="prompt"
+              >
+                Prompt
+              </FieldLabel>
               <div className="relative">
               <textarea
                 autoFocus

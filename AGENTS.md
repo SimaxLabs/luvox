@@ -28,7 +28,7 @@
 - Hailuo 3 currently accepts public HTTPS first/last-frame URLs through `frame_images`. Do not add multipart, local-file, or base64 submission unless the dedicated video-generation docs explicitly add support.
 - Provider `pending` and `in_progress` map to local `queued` and `processing`; `failed`, `cancelled`, and `expired` map to local `failed`. Polling transport/auth errors are not proof that provider generation failed.
 - Preview and download must stay behind `/api/video/content/:id`; that server proxy attaches authentication and forwards range headers. Temporary-key jobs use their pinned key, while server-key jobs use an independent volatile per-job capability in `X-Luvox-Video-Token` with a 24-hour idle expiry. The client fetches protected media and creates a revocable `blob:` URL. Never put either credential in media URLs or assume `unsigned_urls` are permanently public.
-- OpenRouter documents no cancellation endpoint. Jobs and prompts are deliberately not persisted; the client clears its workspace when the API stops or its per-boot session ID changes. This does not stop paid provider work already submitted to OpenRouter.
+- OpenRouter documents no cancellation endpoint. Jobs and unsaved prompts are deliberately not persisted; explicit saved prompts use browser local storage and must never include credentials, references, URLs, or local paths. The client clears its workspace when the API stops or its per-boot session ID changes. This does not stop paid provider work already submitted to OpenRouter.
 - Never exercise generation in a smoke test with an inherited shell key. Set `OPENROUTER_API_KEY=` explicitly for local error-path tests; a valid submission can incur cost immediately.
 
 ## Container Runtime
