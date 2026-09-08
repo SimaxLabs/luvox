@@ -261,28 +261,36 @@ function Toggle({ checked, className = "", disabled = false, label, note, noteCl
 }
 
 function FrameFitPicker({ idPrefix, onSelect, selected }: { idPrefix: string; onSelect: (fit: LocalH3FrameFitId) => void; selected: LocalH3FrameFitId }) {
+  const selectedFit = LOCAL_H3_FRAME_FITS.find((fit) => fit.id === selected);
   return (
-    <fieldset className="mt-4 border-t border-black/10 pt-4">
-      <legend className="mb-2 text-[11px] font-bold uppercase tracking-[0.18em] text-stone-700">Reference framing</legend>
-      <div className="grid grid-cols-2 gap-1.5">
-        {LOCAL_H3_FRAME_FITS.map((fit) => (
-          <button
-            aria-describedby={`${idPrefix}-${fit.id}-description`}
-            aria-pressed={selected === fit.id}
-            className={`min-h-11 border px-3 text-xs font-bold transition ${selected === fit.id ? "border-black bg-black text-[#d9ff72]" : "border-black/15 bg-[#faf9f3] hover:border-black/50"}`}
-            key={fit.id}
-            onClick={() => onSelect(fit.id)}
-            type="button"
-          >
-            {fit.label}
-            <span className="sr-only" id={`${idPrefix}-${fit.id}-description`}>{fit.note}</span>
-          </button>
-        ))}
-      </div>
-      <p className="mt-2 text-[11px] leading-4 text-stone-600">
-        {LOCAL_H3_FRAME_FITS.find((fit) => fit.id === selected)?.note}
-      </p>
-    </fieldset>
+    <details className="group mt-4 border-t border-black/10">
+      <summary className="flex cursor-pointer list-none items-center justify-between py-4 text-[11px] font-bold uppercase tracking-[0.18em] text-stone-700 [&::-webkit-details-marker]:hidden">
+        Reference framing
+        <span className="flex items-center gap-2 font-mono text-[9px] font-normal text-stone-500">
+          {selectedFit?.label}
+          <Icon className="size-3 transition group-open:rotate-90" name="arrow" />
+        </span>
+      </summary>
+      <fieldset className="pb-1">
+        <legend className="sr-only">Reference framing</legend>
+        <div className="grid grid-cols-2 gap-1.5">
+          {LOCAL_H3_FRAME_FITS.map((fit) => (
+            <button
+              aria-describedby={`${idPrefix}-${fit.id}-description`}
+              aria-pressed={selected === fit.id}
+              className={`min-h-11 border px-3 text-xs font-bold transition ${selected === fit.id ? "border-black bg-black text-[#d9ff72]" : "border-black/15 bg-[#faf9f3] hover:border-black/50"}`}
+              key={fit.id}
+              onClick={() => onSelect(fit.id)}
+              type="button"
+            >
+              {fit.label}
+              <span className="sr-only" id={`${idPrefix}-${fit.id}-description`}>{fit.note}</span>
+            </button>
+          ))}
+        </div>
+        <p className="mt-2 text-[11px] leading-4 text-stone-600">{selectedFit?.note}</p>
+      </fieldset>
+    </details>
   );
 }
 
@@ -2670,7 +2678,7 @@ export default function App() {
             <div className="mt-6 border border-black/12 bg-[#e7e5dc] p-4 sm:p-5">
               <div className="mb-4 flex items-start gap-3">
                 <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center bg-white/70"><Icon name="image" /></div>
-                <div>
+                <div className="min-w-0 flex-1">
                   <h3 className="text-xs font-bold uppercase tracking-[0.12em]">Reference image</h3>
                   <p className="mt-1 text-[11px] leading-4 text-stone-500">
                     {imageProvider === "mflux" && selectedMfluxModel.requiresReference
@@ -2678,20 +2686,14 @@ export default function App() {
                       : selectedMfluxModel.id === "flux2-klein-4b" && imageProvider === "mflux"
                         ? "Add one optional PNG, JPEG, or WebP image to use FLUX.2's dedicated edit mode."
                         : selectedOpenRouterImageModel.inputReference.required
-                          ? "This model requires one PNG, JPEG, or WebP image up to 10 MB."
-                          : "Add one optional PNG, JPEG, or WebP image up to 10 MB."}
+                           ? "This model requires one PNG, JPEG, or WebP image up to 10 MB."
+                           : "Add one optional PNG, JPEG, or WebP image up to 10 MB."}
                   </p>
                 </div>
+                <span className="shrink-0 border border-black/10 bg-white/50 px-2 py-1 text-[9px] font-bold uppercase tracking-[0.12em] text-stone-500">
+                  {(imageProvider === "mflux" ? selectedMfluxModel.requiresReference : selectedOpenRouterImageModel.inputReference.required) ? "Required" : "Optional"}
+                </span>
               </div>
-              <FieldLabel htmlFor="image-reference" optional={imageProvider === "mflux" ? !selectedMfluxModel.requiresReference : !selectedOpenRouterImageModel.inputReference.required}>Image file</FieldLabel>
-              <input
-                accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp"
-                className="h-11 w-full cursor-pointer text-[0] outline-none file:h-11 file:w-full file:cursor-pointer file:border file:border-black/15 file:bg-[#faf9f3] file:px-3 file:text-[10px] file:font-bold file:uppercase file:tracking-[0.12em] hover:file:border-black focus-visible:ring-2 focus-visible:ring-black"
-                id="image-reference"
-                onChange={(event) => void selectImageReference(event)}
-                aria-required={imageProvider === "mflux" ? selectedMfluxModel.requiresReference : selectedOpenRouterImageModel.inputReference.required}
-                type="file"
-              />
               <p aria-live="polite" className="sr-only" role="status">
                 {readingImageReference
                   ? "Reading reference image."
@@ -2699,22 +2701,59 @@ export default function App() {
                     ? `Reference image ${imageReference.name} is ready.`
                     : ""}
               </p>
-              {imageReference && (
+              {imageReference ? (
                 <>
-                  <div className="mt-3 flex items-center justify-between gap-3 border-t border-black/10 pt-3">
-                    <span className="truncate text-xs text-stone-600">{imageReference.name}</span>
-                    <button
-                      className="shrink-0 text-[10px] font-bold uppercase tracking-[0.12em] text-stone-600 hover:text-black"
-                      onClick={() => setImageReference(null)}
-                      type="button"
-                    >
-                      Remove
-                    </button>
+                  <div className="grid gap-3 border border-black/15 bg-[#faf9f3] p-3 sm:grid-cols-[6rem_1fr]">
+                    <div className="flex h-24 items-center justify-center overflow-hidden bg-[#171917]">
+                      <img alt="Selected reference" className="h-full w-full object-contain" src={imageReference.dataUrl} />
+                    </div>
+                    <div className="flex min-w-0 flex-col justify-between gap-3 py-1">
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-bold" title={imageReference.name}>{imageReference.name}</p>
+                        <p className="mt-1 text-[10px] uppercase tracking-[0.12em] text-stone-500">Ready for generation</p>
+                      </div>
+                      <div className="flex gap-2">
+                        <label className="has-[:focus-visible]:ring-black flex h-9 cursor-pointer items-center border border-black/15 px-3 text-[10px] font-bold uppercase tracking-[0.12em] hover:border-black has-[:focus-visible]:ring-2">
+                          Replace
+                          <input
+                            accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp"
+                            aria-label="Replace reference image"
+                            aria-required={imageProvider === "mflux" ? selectedMfluxModel.requiresReference : selectedOpenRouterImageModel.inputReference.required}
+                            className="sr-only"
+                            id="image-reference"
+                            onChange={(event) => void selectImageReference(event)}
+                            type="file"
+                          />
+                        </label>
+                        <button
+                          className="h-9 border border-[#e44d38]/30 px-3 text-[10px] font-bold uppercase tracking-[0.12em] text-[#a63d2e] hover:border-[#e44d38]"
+                          onClick={() => setImageReference(null)}
+                          type="button"
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    </div>
                   </div>
                   {imageProvider === "mflux" && (
                     <FrameFitPicker idPrefix="image-reference-fit" onSelect={setImageReferenceFit} selected={imageReferenceFit} />
                   )}
                 </>
+              ) : (
+                <label className={`flex min-h-32 flex-col items-center justify-center border border-dashed border-black/25 bg-[#faf9f3] px-6 text-center transition has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-black ${readingImageReference ? "cursor-wait opacity-60" : "cursor-pointer hover:border-black hover:bg-white"}`}>
+                  <input
+                    accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp"
+                    aria-required={imageProvider === "mflux" ? selectedMfluxModel.requiresReference : selectedOpenRouterImageModel.inputReference.required}
+                    className="sr-only"
+                    disabled={readingImageReference}
+                    id="image-reference"
+                    onChange={(event) => void selectImageReference(event)}
+                    type="file"
+                  />
+                  <span className="mb-3 flex size-10 items-center justify-center border border-black/10 bg-[#e7e5dc]"><Icon name="image" /></span>
+                  <span className="text-xs font-bold uppercase tracking-[0.12em]">{readingImageReference ? "Reading image..." : "Choose reference image"}</span>
+                  <span className="mt-1.5 text-[10px] uppercase tracking-[0.1em] text-stone-500">PNG, JPEG or WebP / 10 MB max</span>
+                </label>
               )}
             </div>
             )}
