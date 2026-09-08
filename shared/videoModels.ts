@@ -18,13 +18,11 @@ export interface VideoModelConfig {
   };
 }
 
-export const DEFAULT_MODEL_ID = "minimax/hailuo-3";
-
 // Keep model-specific request controls here. Both the UI and API validation use
 // this data, so adding a model does not require duplicating its capabilities.
 export const VIDEO_MODELS = [
   {
-    id: DEFAULT_MODEL_ID,
+    id: "minimax/hailuo-3",
     name: "MiniMax: Hailuo 3",
     price: "$0.13/sec + $0.04/reference image",
     durations: [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],

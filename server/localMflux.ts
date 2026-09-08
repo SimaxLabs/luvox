@@ -22,7 +22,6 @@ const execFileAsync = promisify(execFile);
 const activeDirectories = new Set<string>();
 const shutdownController = new AbortController();
 let activeChild: ChildProcess | undefined;
-let activeExecution: Promise<void> | undefined;
 let activeCompletion: Promise<void> | undefined;
 let generationReserved = false;
 let stopActive: (() => void) | undefined;
@@ -70,10 +69,6 @@ function resolveMfluxBinary(
     }
   }
   return undefined;
-}
-
-export function isLocalMfluxConfigured(): boolean {
-  return getAvailableLocalMfluxModels().length > 0;
 }
 
 export function getAvailableLocalMfluxModels(): string[] {
@@ -306,6 +301,7 @@ async function frameReferenceImage(
   const round = fit === "cover" ? Math.ceil : Math.floor;
   const scaledWidth = Math.max(1, round(sourceSize.width * scale));
   const scaledHeight = Math.max(1, round(sourceSize.height * scale));
+  const decoded = path.join(directory, "reference-decoded.png");
   const output = path.join(directory, "reference-framed.png");
   const framingArgs = fit === "cover"
     ? ["--cropToHeightWidth", String(target.height), String(target.width)]
@@ -313,18 +309,47 @@ async function frameReferenceImage(
   try {
     await execFileAsync(
       "/usr/bin/sips",
+      ["-s", "format", "png", source, "--out", decoded],
+      { encoding: "utf8", env: childEnvironment(), killSignal: "SIGKILL", maxBuffer: 8_192, signal, timeout: 30_000 },
+    );
+    await execFileAsync(
+      "/usr/bin/sips",
       [
         "--resampleHeightWidth", String(scaledHeight), String(scaledWidth),
         ...framingArgs,
-        source,
+        decoded,
         "--out", output,
       ],
       { encoding: "utf8", env: childEnvironment(), killSignal: "SIGKILL", maxBuffer: 8_192, signal, timeout: 30_000 },
     );
-  } catch {
+  } catch (error) {
     assertMfluxMayContinue(signal);
+    const processError = error as {
+      code?: string | number | null;
+      killed?: boolean;
+      signal?: string | null;
+      stderr?: unknown;
+    };
+    const stderr = typeof processError.stderr === "string"
+      ? processError.stderr
+          .replaceAll(source, "the reference image")
+          .replaceAll(decoded, "the decoded reference image")
+          .replaceAll(output, "the framed image")
+          .replaceAll(directory, "the temporary directory")
+          .replace(/[\u0000-\u001f\u007f]+/g, " ")
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 500)
+      : "";
+    const reason = processError.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"
+      ? "macOS sips produced too much diagnostic output."
+      : processError.killed && processError.signal === "SIGKILL"
+        ? "macOS sips exceeded the 30-second framing timeout."
+        : stderr
+          ? `macOS sips reported: ${stderr}`
+          : `macOS sips exited${processError.code === undefined || processError.code === null ? "" : ` with status ${processError.code}`}.`;
     throw new LocalMfluxError(
-      "The reference image could not be framed for the selected resolution.",
+      `Reference framing failed while converting ${sourceSize.width}x${sourceSize.height} to ${target.width}x${target.height} with ${fit} fit. ${reason}`,
       400,
       "local_mflux_image_error",
       false,
@@ -333,7 +358,7 @@ async function frameReferenceImage(
   const outputSize = await inspectRaster(output, "The framed reference image", undefined, signal);
   if (outputSize.width !== target.width || outputSize.height !== target.height) {
     throw new LocalMfluxError(
-      "The reference image could not be framed for the selected resolution.",
+      `Reference framing produced ${outputSize.width}x${outputSize.height} instead of ${target.width}x${target.height} with ${fit} fit from a ${sourceSize.width}x${sourceSize.height} image.`,
       400,
       "local_mflux_image_error",
       false,
@@ -391,7 +416,6 @@ function runMflux(
           step,
           total,
           percent: Math.min(100, Math.max(0, Number(match[1]))),
-          stepElapsedSeconds: timing ? parseClock(timing[1]) : undefined,
           etaSeconds: timing?.[2] === "?" ? undefined : parseClock(timing?.[2] || ""),
           secondsPerStep: Number.isFinite(rate) && rate > 0 ? timing?.[4] === "it/s" ? 1 / rate : rate : undefined,
         });
@@ -462,13 +486,9 @@ export async function generateLocalMfluxImage(
       true,
     );
   }
-  const model = getMfluxImageModel(input.model);
-  if (!model) {
-    throw new LocalMfluxError("Unsupported MFLUX model.", 400, "local_mflux_model_error", false);
-  }
-  if (model.requiresReference && !input.inputReference) {
-    throw new LocalMfluxError("Qwen Image Edit requires a reference image.", 400, "local_mflux_image_error", false);
-  }
+  // ponytail: generations are created only from route-validated static presets.
+  const model = getMfluxImageModel(input.model)!;
+  const resolution = getMfluxImageResolution(input.resolution)!;
   const executable = input.inputReference && "referenceExecutable" in model
     ? model.referenceExecutable
     : model.executable;
@@ -493,10 +513,6 @@ export async function generateLocalMfluxImage(
     ? AbortSignal.any([signal, shutdownController.signal])
     : shutdownController.signal;
   assertMfluxMayContinue(operationSignal);
-  const resolution = getMfluxImageResolution(input.resolution);
-  if (!resolution) {
-    throw new LocalMfluxError("Unsupported MFLUX resolution preset.", 400, "local_mflux_resolution_error", false);
-  }
   onProgress?.({ phase: "loading", step: 0, total: input.steps, percent: 0 });
 
   generationReserved = true;
@@ -553,7 +569,7 @@ export async function generateLocalMfluxImage(
     }
 
     assertMfluxMayContinue(operationSignal);
-    activeExecution = runMflux(
+    await runMflux(
       binary,
       args,
       directory,
@@ -561,7 +577,6 @@ export async function generateLocalMfluxImage(
       operationSignal,
       onProgress,
     );
-    await activeExecution;
     let outputStats;
     try {
       outputStats = await stat(outputPath);
@@ -583,7 +598,6 @@ export async function generateLocalMfluxImage(
     if (operationSignal.aborted) assertMfluxMayContinue(operationSignal);
     throw error;
   } finally {
-    activeExecution = undefined;
     try {
       if (directory) {
         await rm(directory, { recursive: true, force: true });

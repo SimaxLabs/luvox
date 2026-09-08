@@ -24,7 +24,6 @@ import {
   generateLocalMfluxImage,
   getAvailableLocalMfluxModels,
   initializeLocalMfluxStorage,
-  isLocalMfluxConfigured,
   isLocalMfluxSupported,
   LocalMfluxError,
   shutdownLocalMflux,
@@ -112,12 +111,8 @@ function assertLoopbackRequest(request: Request): void {
 }
 
 function loopbackOnly(request: Request, _response: Response, next: NextFunction): void {
-  try {
-    assertLoopbackRequest(request);
-    next();
-  } catch (error) {
-    next(error);
-  }
+  assertLoopbackRequest(request);
+  next();
 }
 
 app.disable("x-powered-by");
@@ -145,7 +140,6 @@ app.get("/api/config", (_request, response) => {
     },
     localMflux: {
       supported: isLocalMfluxSupported(),
-      configured: isLocalMfluxConfigured(),
       models: getAvailableLocalMfluxModels(),
     },
     openRouter: getOpenRouterModelRegistry(),
@@ -183,12 +177,8 @@ app.get(
 app.put(
   "/api/local/workspace",
   loopbackOnly,
-  (request: Request, response: Response, next: NextFunction) => {
-    try {
-      response.json(renewLocalH3Workspace(getLocalWorkspaceToken(request)));
-    } catch (error) {
-      next(error);
-    }
+  (request: Request, response: Response) => {
+    response.json(renewLocalH3Workspace(getLocalWorkspaceToken(request)));
   },
 );
 
@@ -198,33 +188,29 @@ app.post(
     type: ["image/png", "image/jpeg", "image/webp", "application/octet-stream"],
     limit: "25mb",
   }),
-  async (request: Request, response: Response, next: NextFunction) => {
-    try {
-      assertLoopbackRequest(request);
-      if (!Buffer.isBuffer(request.body)) {
-        throw new LocalH3Error(
-          "Send the reference image as the request body.",
-          415,
-          "local_reference_error",
-          false,
-        );
-      }
-      const uploadToken = localReferenceTokenSchema.parse(
-        request.get("X-Reference-Upload-Token"),
+  async (request: Request, response: Response) => {
+    assertLoopbackRequest(request);
+    if (!Buffer.isBuffer(request.body)) {
+      throw new LocalH3Error(
+        "Send the reference image as the request body.",
+        415,
+        "local_reference_error",
+        false,
       );
-      const previousToken = localReferenceTokenSchema.optional().parse(
-        request.get("X-Previous-Reference-Token"),
-      );
-      const result = await uploadLocalReferenceImage(
-        request.body,
-        uploadToken,
-        getLocalWorkspaceToken(request),
-        previousToken,
-      );
-      response.status(201).json(result);
-    } catch (error) {
-      next(error);
     }
+    const uploadToken = localReferenceTokenSchema.parse(
+      request.get("X-Reference-Upload-Token"),
+    );
+    const previousToken = localReferenceTokenSchema.optional().parse(
+      request.get("X-Previous-Reference-Token"),
+    );
+    const result = await uploadLocalReferenceImage(
+      request.body,
+      uploadToken,
+      getLocalWorkspaceToken(request),
+      previousToken,
+    );
+    response.status(201).json(result);
   },
 );
 
@@ -241,9 +227,7 @@ app.post(
     try {
       const input = validateGenerateImageInput(request.body);
       if (input.provider === "mflux") {
-        response.status(200);
         response.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
-        response.setHeader("X-Content-Type-Options", "nosniff");
         response.flushHeaders();
         const send = (event: unknown) => {
           if (!response.writableEnded) response.write(`${JSON.stringify(event)}\n`);
@@ -281,64 +265,44 @@ app.use(express.json({ limit: "100kb" }));
 app.put(
   "/api/openrouter/models",
   loopbackOnly,
-  async (request: Request, response: Response, next: NextFunction) => {
-    try {
-      response.json(await saveOpenRouterModel(request.body));
-    } catch (error) {
-      next(error);
-    }
+  async (request: Request, response: Response) => {
+    response.json(await saveOpenRouterModel(request.body));
   },
 );
 
 app.delete(
   "/api/openrouter/models",
   loopbackOnly,
-  async (request: Request, response: Response, next: NextFunction) => {
-    try {
-      response.json(await removeOpenRouterModel(request.body));
-    } catch (error) {
-      next(error);
-    }
+  async (request: Request, response: Response) => {
+    response.json(await removeOpenRouterModel(request.body));
   },
 );
 
 app.delete(
   "/api/local/reference-image",
-  async (request: Request, response: Response, next: NextFunction) => {
-    try {
-      assertLoopbackRequest(request);
-      const input = localReferenceDeleteSchema.parse(request.body);
-      const result = await deleteLocalReferenceImage(input.token, getLocalWorkspaceToken(request));
-      response.json(result);
-    } catch (error) {
-      next(error);
-    }
+  async (request: Request, response: Response) => {
+    assertLoopbackRequest(request);
+    const input = localReferenceDeleteSchema.parse(request.body);
+    const result = await deleteLocalReferenceImage(input.token, getLocalWorkspaceToken(request));
+    response.json(result);
   },
 );
 
 app.delete(
   "/api/local/workspace",
-  async (request: Request, response: Response, next: NextFunction) => {
-    try {
-      assertLoopbackRequest(request);
-      const result = await discardLocalH3Workspace(getLocalWorkspaceToken(request));
-      response.json(result);
-    } catch (error) {
-      next(error);
-    }
+  async (request: Request, response: Response) => {
+    assertLoopbackRequest(request);
+    const result = await discardLocalH3Workspace(getLocalWorkspaceToken(request));
+    response.json(result);
   },
 );
 
 app.delete(
   "/api/local/video/:id",
-  async (request: Request, response: Response, next: NextFunction) => {
-    try {
-      assertLoopbackRequest(request);
-      const result = await deleteLocalVideoJob(validateJobId(request.params.id), getLocalWorkspaceToken(request));
-      response.json(result);
-    } catch (error) {
-      next(error);
-    }
+  async (request: Request, response: Response) => {
+    assertLoopbackRequest(request);
+    const result = await deleteLocalVideoJob(validateJobId(request.params.id), getLocalWorkspaceToken(request));
+    response.json(result);
   },
 );
 
@@ -402,24 +366,20 @@ app.head(
   "/api/video/content/:id",
   loopbackOnly,
   async (request: Request, response: Response, next: NextFunction) => {
-    try {
-      const id = validateJobId(request.params.id);
-      if (!isLocalJobId(id)) {
-        response.setHeader("Allow", "GET");
-        response.status(405).end();
-        return;
-      }
-
-      const videoPath = await getLocalVideoPath(id, getLocalWorkspaceToken(request));
-      response.setHeader("Content-Disposition", "inline");
-      response.setHeader("Content-Security-Policy", "default-src 'none'; sandbox");
-      response.setHeader("Content-Type", "video/mp4");
-      response.sendFile(videoPath, { dotfiles: "allow" }, (error) => {
-        if (error) next(error);
-      });
-    } catch (error) {
-      next(error);
+    const id = validateJobId(request.params.id);
+    if (!isLocalJobId(id)) {
+      response.setHeader("Allow", "GET");
+      response.status(405).end();
+      return;
     }
+
+    const videoPath = await getLocalVideoPath(id, getLocalWorkspaceToken(request));
+    response.setHeader("Content-Disposition", "inline");
+    response.setHeader("Content-Security-Policy", "default-src 'none'; sandbox");
+    response.setHeader("Content-Type", "video/mp4");
+    response.sendFile(videoPath, { dotfiles: "allow" }, (error) => {
+      if (error) next(error);
+    });
   },
 );
 
@@ -496,16 +456,12 @@ app.get(
 app.delete(
   "/api/video/:id",
   loopbackOnly,
-  (request: Request, response: Response, next: NextFunction) => {
-    try {
-      const id = validateJobId(request.params.id);
-      if (isLocalJobId(id)) {
-        throw new OpenRouterError("The video generation was not found.", 404, "not_found", false);
-      }
-      response.json(releaseVideoCapability(id, videoCapabilityTokenSchema.parse(request.get("X-Luvox-Video-Token"))));
-    } catch (error) {
-      next(error);
+  (request: Request, response: Response) => {
+    const id = validateJobId(request.params.id);
+    if (isLocalJobId(id)) {
+      throw new OpenRouterError("The video generation was not found.", 404, "not_found", false);
     }
+    response.json(releaseVideoCapability(id, videoCapabilityTokenSchema.parse(request.get("X-Luvox-Video-Token"))));
   },
 );
 

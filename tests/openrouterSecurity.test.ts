@@ -19,15 +19,14 @@ const input: GenerateVideoInput = {
   generateAudio: false,
 };
 
-test("server-key video capabilities isolate status and content access", async () => {
-  const previousFetch = globalThis.fetch;
+test("server-key video capabilities isolate status and content access", async (t) => {
   const previousApiKey = process.env.OPENROUTER_API_KEY;
   const authorizations: string[] = [];
   let contentType = "video/mp4";
   let contentStatus = 200;
   let contentRange: string | undefined;
   let polledStatus = "completed";
-  globalThis.fetch = async (request, init) => {
+  t.mock.method(globalThis, "fetch", async (request, init) => {
     const url = String(request);
     authorizations.push(new Headers(init?.headers).get("authorization") || "");
     if (url.endsWith("/videos") && init?.method === "POST") {
@@ -43,7 +42,7 @@ test("server-key video capabilities isolate status and content access", async ()
       });
     }
     return Response.json({ id: "video-test", polling_url: "/videos/video-test", status: polledStatus });
-  };
+  });
   process.env.OPENROUTER_API_KEY = "server-test-key";
 
   try {
@@ -98,18 +97,13 @@ test("server-key video capabilities isolate status and content access", async ()
     polledStatus = "completed";
 
     const expiring = await generateVideo(input);
-    const realNow = Date.now;
-    Date.now = () => realNow() + 25 * 60 * 60 * 1_000;
-    try {
-      await assert.rejects(
-        getVideoStatus(expiring.id, undefined, undefined, expiring.capabilityToken),
-        (error) => error instanceof OpenRouterError && error.status === 404,
-      );
-    } finally {
-      Date.now = realNow;
-    }
+    const expiredNow = Date.now() + 25 * 60 * 60 * 1_000;
+    t.mock.method(Date, "now", () => expiredNow);
+    await assert.rejects(
+      getVideoStatus(expiring.id, undefined, undefined, expiring.capabilityToken),
+      (error) => error instanceof OpenRouterError && error.status === 404,
+    );
   } finally {
-    globalThis.fetch = previousFetch;
     if (previousApiKey === undefined) delete process.env.OPENROUTER_API_KEY;
     else process.env.OPENROUTER_API_KEY = previousApiKey;
   }

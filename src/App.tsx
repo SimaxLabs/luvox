@@ -72,11 +72,6 @@ interface DisplayJob extends VideoJob {
   pollingStopped?: boolean;
 }
 
-interface ImageTaskModel {
-  id: string;
-  name: string;
-}
-
 type IconName =
   | "arrow"
   | "check"
@@ -165,6 +160,129 @@ function FieldLabel({ action, children, htmlFor, optional }: { action?: ReactNod
       </label>
       {action ?? (optional && <span className="text-[10px] uppercase tracking-[0.12em] text-stone-400">Optional</span>)}
     </div>
+  );
+}
+
+function ResolutionAspectPicker({
+  aspectRatioColumns,
+  idPrefix,
+  layout,
+  onSelect,
+  options,
+  selectedId,
+}: {
+  aspectRatioColumns: string;
+  idPrefix: string;
+  layout: string;
+  onSelect: (id: string) => void;
+  options: readonly { id: string; label: string; aspectRatio: string }[];
+  selectedId: string;
+}) {
+  const selected = options.find((option) => option.id === selectedId) ?? options[0];
+  const resolutions = options.filter((option, index) => options.findIndex((candidate) => candidate.label === option.label) === index);
+  const aspectRatios = options.filter((option, index) => options.findIndex((candidate) => candidate.aspectRatio === option.aspectRatio) === index);
+
+  return (
+    <div className={`mt-6 grid gap-5 ${layout}`}>
+      <div>
+        <FieldLabel htmlFor={`${idPrefix}-resolution`}>Resolution</FieldLabel>
+        <select
+          className="h-12 w-full border border-black/15 bg-[#faf9f3] px-3 text-sm outline-none transition focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
+          id={`${idPrefix}-resolution`}
+          onChange={(event) => {
+            const resolution = resolutions.find((option) => option.label === event.target.value);
+            if (resolution) onSelect(resolution.id);
+          }}
+          value={selected.label}
+        >
+          {resolutions.map((resolution) => (
+            <option key={resolution.label} value={resolution.label}>{resolution.label}</option>
+          ))}
+        </select>
+      </div>
+      <fieldset>
+        <legend className="mb-2 text-[11px] font-bold uppercase tracking-[0.18em] text-stone-700">Aspect ratio</legend>
+        <div className={`grid ${aspectRatioColumns} gap-1.5`}>
+          {aspectRatios.map((option) => {
+            const resolution = options.find((candidate) =>
+              candidate.label === selected.label && candidate.aspectRatio === option.aspectRatio);
+            const tooltipId = `${idPrefix}-${selected.label}-${option.aspectRatio.replace(":", "-")}-unsupported`;
+            return (
+              <div className="group relative" key={option.aspectRatio}>
+                <button
+                  aria-describedby={resolution ? undefined : tooltipId}
+                  aria-disabled={!resolution}
+                  aria-pressed={selectedId === resolution?.id}
+                  className={`h-12 w-full border text-xs font-bold transition ${selectedId === resolution?.id ? "border-black bg-black text-[#d9ff72]" : resolution ? "border-black/15 bg-[#faf9f3] hover:border-black/50" : "cursor-not-allowed border-black/10 bg-black/5 text-stone-400"}`}
+                  onClick={() => { if (resolution) onSelect(resolution.id); }}
+                  type="button"
+                >
+                  {option.aspectRatio}
+                </button>
+                {!resolution && (
+                  <span
+                    className="pointer-events-none absolute bottom-full left-1/2 z-20 mb-2 hidden w-max max-w-44 -translate-x-1/2 bg-black px-2 py-1.5 text-center text-[9px] leading-3 text-white group-focus-within:block group-hover:block"
+                    id={tooltipId}
+                    role="tooltip"
+                  >
+                    {option.aspectRatio} is unavailable at {selected.label}
+                  </span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </fieldset>
+    </div>
+  );
+}
+
+function Toggle({ checked, className = "", disabled = false, label, note, noteClassName = "", onChange }: {
+  checked: boolean; className?: string; disabled?: boolean; label: string; note: string; noteClassName?: string; onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label className={`flex items-center justify-between border-y border-black/10 py-4 ${className} ${disabled ? "cursor-not-allowed" : "cursor-pointer"}`}>
+      <span>
+        <span className="block text-xs font-bold uppercase tracking-[0.12em]">{label}</span>
+        <span className={`mt-1 block text-[11px] text-stone-500 ${noteClassName}`}>{note}</span>
+      </span>
+      <span className={`relative h-7 w-12 shrink-0 rounded-full transition has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-black has-[:focus-visible]:ring-offset-2 ${checked ? "bg-black" : "bg-stone-300"}`}>
+        <input
+          checked={checked}
+          className="sr-only"
+          disabled={disabled}
+          onChange={(event) => onChange(event.target.checked)}
+          type="checkbox"
+        />
+        <span className={`absolute top-1 size-5 rounded-full transition ${checked ? "left-6 bg-[#d9ff72]" : "left-1 bg-white"}`} />
+      </span>
+    </label>
+  );
+}
+
+function FrameFitPicker({ idPrefix, onSelect, selected }: { idPrefix: string; onSelect: (fit: LocalH3FrameFitId) => void; selected: LocalH3FrameFitId }) {
+  return (
+    <fieldset className="mt-4 border-t border-black/10 pt-4">
+      <legend className="mb-2 text-[11px] font-bold uppercase tracking-[0.18em] text-stone-700">Reference framing</legend>
+      <div className="grid grid-cols-2 gap-1.5">
+        {LOCAL_H3_FRAME_FITS.map((fit) => (
+          <button
+            aria-describedby={`${idPrefix}-${fit.id}-description`}
+            aria-pressed={selected === fit.id}
+            className={`min-h-11 border px-3 text-xs font-bold transition ${selected === fit.id ? "border-black bg-black text-[#d9ff72]" : "border-black/15 bg-[#faf9f3] hover:border-black/50"}`}
+            key={fit.id}
+            onClick={() => onSelect(fit.id)}
+            type="button"
+          >
+            {fit.label}
+            <span className="sr-only" id={`${idPrefix}-${fit.id}-description`}>{fit.note}</span>
+          </button>
+        ))}
+      </div>
+      <p className="mt-2 text-[11px] leading-4 text-stone-600">
+        {LOCAL_H3_FRAME_FITS.find((fit) => fit.id === selected)?.note}
+      </p>
+    </fieldset>
   );
 }
 
@@ -368,7 +486,6 @@ function Preview({
   job,
   mediaLoading,
   mediaError,
-  pollingStopped,
   onMediaError,
   onMediaRetry,
   videoSource,
@@ -377,7 +494,6 @@ function Preview({
   job: DisplayJob | null;
   mediaLoading: boolean;
   mediaError: string | null;
-  pollingStopped: boolean;
   onMediaError: () => void;
   onMediaRetry: () => void;
   videoSource?: string;
@@ -446,7 +562,7 @@ function Preview({
             {job.status === "queued" ? "On the reel" : "Rendering motion"}
           </p>
           <p className="mt-2 font-mono text-[10px] uppercase tracking-[0.2em] text-white/45">
-            {job.phase || (pollingStopped ? "Automatic status checks stopped" : "Automatic status checks are active")}
+            {job.phase || (job.pollingStopped ? "Automatic status checks stopped" : "Automatic status checks are active")}
           </p>
           {typeof job.progress === "number" && (
             <div className="mx-auto mt-4 h-1 w-40 overflow-hidden bg-white/10">
@@ -951,7 +1067,7 @@ export default function App() {
   const [openRouterImageModelId, setOpenRouterImageModelId] = useState<string>(MUSE_IMAGE_MODEL.id);
   const [openRouterImageAspectRatio, setOpenRouterImageAspectRatio] = useState("");
   const [openRouterImageResolution, setOpenRouterImageResolution] = useState("");
-  const [openRouterImageTaskModel, setOpenRouterImageTaskModel] = useState<ImageTaskModel | null>(null);
+  const [openRouterImageTaskModelName, setOpenRouterImageTaskModelName] = useState<string | null>(null);
   const [mfluxModel, setMfluxModel] = useState<string>(MFLUX_IMAGE_MODEL.id);
   const [mfluxResolution, setMfluxResolution] = useState<string>(defaultMfluxSetup.resolution);
   const [mfluxSteps, setMfluxSteps] = useState<number>(defaultMfluxSetup.steps);
@@ -980,8 +1096,6 @@ export default function App() {
   const [openRouterSubmitting, setOpenRouterSubmitting] = useState(false);
   const [localSubmitting, setLocalSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [openRouterImageUncertain, setOpenRouterImageUncertain] = useState(false);
-  const [openRouterVideoUncertain, setOpenRouterVideoUncertain] = useState(false);
   const [copied, setCopied] = useState(false);
   const [mediaError, setMediaError] = useState<string | null>(null);
   const [mediaLoading, setMediaLoading] = useState(false);
@@ -1027,18 +1141,10 @@ export default function App() {
   const selectedMfluxModel = getMfluxImageModel(mfluxModel) ?? MFLUX_IMAGE_MODEL;
   const selectedMfluxResolution = getMfluxImageResolution(mfluxResolution) ?? MFLUX_IMAGE_RESOLUTIONS[0];
   const mfluxVaeTilingEnabled = mfluxLowRam || mfluxVaeTiling;
-  const mfluxResolutionOptions = MFLUX_IMAGE_RESOLUTIONS.filter((resolution, index, resolutions) =>
-    resolutions.findIndex((candidate) => candidate.label === resolution.label) === index);
-  const mfluxAspectRatioOptions = MFLUX_IMAGE_RESOLUTIONS.filter((resolution, index, resolutions) =>
-    resolutions.findIndex((candidate) => candidate.aspectRatio === resolution.aspectRatio) === index);
   const mfluxRecommendedSetups = MFLUX_IMAGE_RECOMMENDED_SETUPS.filter((setup) =>
     (setup.models as readonly string[]).includes(selectedMfluxModel.id));
   const selectedLocalQuality = getLocalH3QualityPreset(form.localQuality);
   const selectedLocalResolution = LOCAL_H3_RESOLUTIONS.find((resolution) => resolution.id === form.localResolution) ?? LOCAL_H3_RESOLUTIONS[0];
-  const localResolutionOptions = LOCAL_H3_RESOLUTIONS.filter((resolution, index, resolutions) =>
-    resolutions.findIndex((candidate) => candidate.label === resolution.label) === index);
-  const localAspectRatioOptions = LOCAL_H3_RESOLUTIONS.filter((resolution, index, resolutions) =>
-    resolutions.findIndex((candidate) => candidate.aspectRatio === resolution.aspectRatio) === index);
   const job = jobs.find((candidate) => candidate.id === selectedJobId) ?? null;
   const isActive = job?.status === "queued" || job?.status === "processing";
   const hasActiveOpenRouterJob = jobs.some((candidate) => candidate.provider === "openrouter" && (candidate.status === "queued" || candidate.status === "processing"));
@@ -1046,6 +1152,8 @@ export default function App() {
   const currentSubmissionKind: SubmissionKind = workflow === "image"
     ? imageProvider === "openrouter" ? "image" : "mflux"
     : form.provider;
+  const openRouterImageUncertain = imageFailure === uncertainSubmissionMessage;
+  const openRouterVideoUncertain = openRouterSubmissionFailure === uncertainSubmissionMessage;
   const mfluxSubmissionUncertain = mfluxImageFailure === uncertainMfluxSubmissionMessage;
   const currentSubmissionUncertain = currentSubmissionKind === "image"
     ? openRouterImageUncertain
@@ -1077,9 +1185,9 @@ export default function App() {
   const imageTaskStatus = imageProvider === "openrouter" ? openRouterImageTaskStatus : mfluxImageTaskStatus;
   const currentImageResult = imageProvider === "openrouter" ? imageResult : mfluxImageResult;
   const currentImageFailure = imageProvider === "openrouter" ? imageFailure : mfluxImageFailure;
-  const currentImageModel = imageProvider === "openrouter"
-    ? openRouterImageTaskStatus && openRouterImageTaskModel ? openRouterImageTaskModel : selectedOpenRouterImageModel
-    : selectedMfluxModel;
+  const currentImageModelName = imageProvider === "openrouter"
+    ? openRouterImageTaskStatus && openRouterImageTaskModelName ? openRouterImageTaskModelName : selectedOpenRouterImageModel.name
+    : selectedMfluxModel.name;
   const usesMfluxEdit = imageProvider === "mflux" && (selectedMfluxModel.requiresReference || Boolean(imageReference));
   const selectedMfluxModelAvailable = appConfig?.localMflux.models.includes(selectedMfluxModel.id) === true;
   const openRouterSubmissionStatus = openRouterSubmitting
@@ -1116,7 +1224,6 @@ export default function App() {
   const pollingStopped = Boolean(job?.pollingStopped);
   const usesSessionMedia = Boolean(job && (job.provider === "local" || jobApiKey || jobCapabilityToken));
   const videoSource = usesSessionMedia ? temporaryVideoUrl || undefined : job?.videoUrl;
-  const downloadSource = usesSessionMedia ? temporaryVideoUrl || undefined : job?.downloadUrl;
   const imageSource = currentImageResult
     ? `data:${currentImageResult.mediaType};base64,${currentImageResult.b64Json}`
     : undefined;
@@ -1260,7 +1367,7 @@ export default function App() {
     setOpenRouterImageModelId(MUSE_IMAGE_MODEL.id);
     setOpenRouterImageAspectRatio("");
     setOpenRouterImageResolution("");
-    setOpenRouterImageTaskModel(null);
+    setOpenRouterImageTaskModelName(null);
     setMfluxModel(MFLUX_IMAGE_MODEL.id);
     setMfluxResolution(defaultMfluxSetup.resolution);
     setMfluxSteps(defaultMfluxSetup.steps);
@@ -1288,8 +1395,6 @@ export default function App() {
     setOpenRouterSubmitting(false);
     setLocalSubmitting(false);
     setError(preserveVideoSubmissionLock ? uncertainSubmissionMessage : null);
-    setOpenRouterImageUncertain(preserveImageSubmissionLock);
-    setOpenRouterVideoUncertain(preserveVideoSubmissionLock);
     remoteImageWork.current.clear();
     remoteVideoWork.current.clear();
     if (preserveImageSubmissionLock) remoteImageWork.current.add(untrackedRemoteWork);
@@ -1838,7 +1943,7 @@ export default function App() {
     } else if (submissionKind === "image") {
       setImageSubmitting(true);
       setImageFailure(null);
-      setOpenRouterImageTaskModel({ id: selectedOpenRouterImageModel.id, name: selectedOpenRouterImageModel.name });
+      setOpenRouterImageTaskModelName(selectedOpenRouterImageModel.name);
       setJobAnnouncement(`${selectedOpenRouterImageModel.name} image started.`);
     } else {
       mfluxStartedAt.current = Date.now();
@@ -1966,10 +2071,8 @@ export default function App() {
       const localSubmissionIsUncertain = submissionKind === "local" && outcomeIsUnknown;
       if (submissionIsUncertain) {
         if (submissionKind === "image") {
-          setOpenRouterImageUncertain(true);
           setImageFailure(uncertainSubmissionMessage);
         } else {
-          setOpenRouterVideoUncertain(true);
           setOpenRouterSubmissionFailure(uncertainSubmissionMessage);
         }
         if (currentSubmissionKindRef.current === submissionKind) setError(uncertainSubmissionMessage);
@@ -2028,10 +2131,10 @@ export default function App() {
     } else {
       setImageResult(null);
       setImageFailure(null);
-      setOpenRouterImageTaskModel(null);
+      setOpenRouterImageTaskModelName(null);
     }
     setError(null);
-    setJobAnnouncement(`${imageProvider === "mflux" ? "Local MFLUX" : currentImageModel.name} image deleted.`);
+    setJobAnnouncement(`${imageProvider === "mflux" ? "Local MFLUX" : currentImageModelName} image deleted.`);
   };
 
   const removeVideoJob = async (target: DisplayJob) => {
@@ -2174,7 +2277,7 @@ export default function App() {
                   </div>
                   <div className="max-h-[60vh] overflow-y-auto p-2">
                     {([
-                      ["openrouter", openRouterImageTaskStatus, openRouterImageTaskModel?.name || selectedOpenRouterImageModel.name],
+                      ["openrouter", openRouterImageTaskStatus, openRouterImageTaskModelName || selectedOpenRouterImageModel.name],
                       ["mflux", mfluxImageTaskStatus, "Local MFLUX"],
                     ] as const).map(([provider, status, label]) => status && (
                       <button
@@ -2554,57 +2657,14 @@ export default function App() {
               </div>
             )}
             {imageProvider === "mflux" && (
-              <div className="mt-6 grid gap-5 sm:grid-cols-[0.8fr_1.2fr]">
-                <div>
-                  <FieldLabel htmlFor="mflux-resolution">Resolution</FieldLabel>
-                  <select
-                    className="h-12 w-full border border-black/15 bg-[#faf9f3] px-3 text-sm outline-none transition focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
-                    id="mflux-resolution"
-                    onChange={(event) => {
-                      const resolution = mfluxResolutionOptions.find((option) => option.label === event.target.value);
-                      if (resolution) setMfluxResolution(resolution.id);
-                    }}
-                    value={selectedMfluxResolution.label}
-                  >
-                    {mfluxResolutionOptions.map((resolution) => (
-                      <option key={resolution.label} value={resolution.label}>{resolution.label}</option>
-                    ))}
-                  </select>
-                </div>
-                <fieldset>
-                  <legend className="mb-2 text-[11px] font-bold uppercase tracking-[0.18em] text-stone-700">Aspect ratio</legend>
-                  <div className="grid grid-cols-4 gap-1.5">
-                    {mfluxAspectRatioOptions.map((option) => {
-                      const resolution = MFLUX_IMAGE_RESOLUTIONS.find((candidate) =>
-                        candidate.label === selectedMfluxResolution.label && candidate.aspectRatio === option.aspectRatio);
-                      const tooltipId = `mflux-${selectedMfluxResolution.label}-${option.aspectRatio.replace(":", "-")}-unsupported`;
-                      return (
-                        <div className="group relative" key={option.aspectRatio}>
-                          <button
-                            aria-describedby={resolution ? undefined : tooltipId}
-                            aria-disabled={!resolution}
-                            aria-pressed={selectedMfluxResolution.id === resolution?.id}
-                            className={`h-12 w-full border text-xs font-bold transition ${selectedMfluxResolution.id === resolution?.id ? "border-black bg-black text-[#d9ff72]" : resolution ? "border-black/15 bg-[#faf9f3] hover:border-black/50" : "cursor-not-allowed border-black/10 bg-black/5 text-stone-400"}`}
-                            onClick={() => { if (resolution) setMfluxResolution(resolution.id); }}
-                            type="button"
-                          >
-                            {option.aspectRatio}
-                          </button>
-                          {!resolution && (
-                            <span
-                              className="pointer-events-none absolute bottom-full left-1/2 z-20 mb-2 hidden w-max max-w-44 -translate-x-1/2 bg-black px-2 py-1.5 text-center text-[9px] leading-3 text-white group-focus-within:block group-hover:block"
-                              id={tooltipId}
-                              role="tooltip"
-                            >
-                              {option.aspectRatio} is unavailable at {selectedMfluxResolution.label}
-                            </span>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </fieldset>
-              </div>
+              <ResolutionAspectPicker
+                aspectRatioColumns="grid-cols-4"
+                idPrefix="mflux"
+                layout="sm:grid-cols-[0.8fr_1.2fr]"
+                onSelect={setMfluxResolution}
+                options={MFLUX_IMAGE_RESOLUTIONS}
+                selectedId={selectedMfluxResolution.id}
+              />
             )}
             {(imageProvider === "mflux" || selectedOpenRouterImageModel.inputReference.supported) && (
             <div className="mt-6 border border-black/12 bg-[#e7e5dc] p-4 sm:p-5">
@@ -2652,27 +2712,7 @@ export default function App() {
                     </button>
                   </div>
                   {imageProvider === "mflux" && (
-                    <fieldset className="mt-4 border-t border-black/10 pt-4">
-                      <legend className="mb-2 text-[11px] font-bold uppercase tracking-[0.18em] text-stone-700">Reference framing</legend>
-                      <div className="grid grid-cols-2 gap-1.5">
-                        {LOCAL_H3_FRAME_FITS.map((fit) => (
-                          <button
-                            aria-describedby={`image-reference-fit-${fit.id}-description`}
-                            aria-pressed={imageReferenceFit === fit.id}
-                            className={`min-h-11 border px-3 text-xs font-bold transition ${imageReferenceFit === fit.id ? "border-black bg-black text-[#d9ff72]" : "border-black/15 bg-[#faf9f3] hover:border-black/50"}`}
-                            key={fit.id}
-                            onClick={() => setImageReferenceFit(fit.id)}
-                            type="button"
-                          >
-                            {fit.label}
-                            <span className="sr-only" id={`image-reference-fit-${fit.id}-description`}>{fit.note}</span>
-                          </button>
-                        ))}
-                      </div>
-                      <p className="mt-2 text-[11px] leading-4 text-stone-600">
-                        {LOCAL_H3_FRAME_FITS.find((fit) => fit.id === imageReferenceFit)?.note}
-                      </p>
-                    </fieldset>
+                    <FrameFitPicker idPrefix="image-reference-fit" onSelect={setImageReferenceFit} selected={imageReferenceFit} />
                   )}
                 </>
               )}
@@ -2735,22 +2775,14 @@ export default function App() {
                     )}
 
                     <div className="mt-6 grid gap-5 sm:grid-cols-2">
-                      <label className={`flex items-center justify-between border-y border-black/10 py-4 sm:border-t-0 sm:pt-0 ${mfluxLowRam ? "cursor-not-allowed" : "cursor-pointer"}`}>
-                        <span>
-                          <span className="block text-xs font-bold uppercase tracking-[0.12em]">VAE tiling</span>
-                          <span className="mt-1 block text-[11px] text-stone-500">Use smaller tiles to reduce peak memory.</span>
-                        </span>
-                        <span className={`relative h-7 w-12 shrink-0 rounded-full transition has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-black has-[:focus-visible]:ring-offset-2 ${mfluxVaeTilingEnabled ? "bg-black" : "bg-stone-300"}`}>
-                          <input
-                            checked={mfluxVaeTilingEnabled}
-                            className="sr-only"
-                            disabled={mfluxLowRam}
-                            onChange={(event) => setMfluxVaeTiling(event.target.checked)}
-                            type="checkbox"
-                          />
-                          <span className={`absolute top-1 size-5 rounded-full transition ${mfluxVaeTilingEnabled ? "left-6 bg-[#d9ff72]" : "left-1 bg-white"}`} />
-                        </span>
-                      </label>
+                      <Toggle
+                        checked={mfluxVaeTilingEnabled}
+                        className="sm:border-t-0 sm:pt-0"
+                        disabled={mfluxLowRam}
+                        label="VAE tiling"
+                        note="Use smaller tiles to reduce peak memory."
+                        onChange={setMfluxVaeTiling}
+                      />
                       <div>
                         <FieldLabel htmlFor="mflux-vae-tile-size">VAE tile size</FieldLabel>
                         <select
@@ -2786,21 +2818,13 @@ export default function App() {
                         <p className="mt-1.5 text-[10px] leading-4 text-stone-500">Leave empty for a time-based seed.</p>
                       </div>
 
-                      <label className="flex cursor-pointer items-center justify-between border-y border-black/10 py-4 sm:border-t-0 sm:pt-0">
-                        <span>
-                          <span className="block text-xs font-bold uppercase tracking-[0.12em]">Low RAM</span>
-                          <span className="mt-1 block text-[11px] text-stone-500">Reduce peak memory use and enable VAE tiling.</span>
-                        </span>
-                        <span className={`relative h-7 w-12 shrink-0 rounded-full transition has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-black has-[:focus-visible]:ring-offset-2 ${mfluxLowRam ? "bg-black" : "bg-stone-300"}`}>
-                          <input
-                            checked={mfluxLowRam}
-                            className="sr-only"
-                            onChange={(event) => setMfluxLowRam(event.target.checked)}
-                            type="checkbox"
-                          />
-                          <span className={`absolute top-1 size-5 rounded-full transition ${mfluxLowRam ? "left-6 bg-[#d9ff72]" : "left-1 bg-white"}`} />
-                        </span>
-                      </label>
+                      <Toggle
+                        checked={mfluxLowRam}
+                        className="sm:border-t-0 sm:pt-0"
+                        label="Low RAM"
+                        note="Reduce peak memory use and enable VAE tiling."
+                        onChange={setMfluxLowRam}
+                      />
                     </div>
 
                   </div>
@@ -3002,21 +3026,13 @@ export default function App() {
           )}
 
           {selectedModel.generateAudio.supported && (
-            <label className="mt-5 flex cursor-pointer items-center justify-between border-y border-black/10 py-4">
-              <span>
-                <span className="block text-xs font-bold uppercase tracking-[0.12em]">Generate audio</span>
-                <span className="mt-1 block text-[11px] text-stone-500">Create a matching native soundtrack with the video.</span>
-              </span>
-              <span className={`relative h-7 w-12 rounded-full transition has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-black has-[:focus-visible]:ring-offset-2 ${form.generateAudio ? "bg-black" : "bg-stone-300"}`}>
-                <input
-                  checked={form.generateAudio}
-                  className="sr-only"
-                  onChange={(event) => setForm((current) => ({ ...current, generateAudio: event.target.checked }))}
-                  type="checkbox"
-                />
-                <span className={`absolute top-1 size-5 rounded-full transition ${form.generateAudio ? "left-6 bg-[#d9ff72]" : "left-1 bg-white"}`} />
-              </span>
-            </label>
+            <Toggle
+              checked={form.generateAudio}
+              className="mt-5"
+              label="Generate audio"
+              note="Create a matching native soundtrack with the video."
+              onChange={(checked) => setForm((current) => ({ ...current, generateAudio: checked }))}
+            />
           )}
           </>
           ) : (
@@ -3041,57 +3057,14 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="mt-6 grid gap-5 sm:grid-cols-[0.7fr_1.3fr]">
-                <div>
-                  <FieldLabel htmlFor="local-resolution">Resolution</FieldLabel>
-                  <select
-                    className="h-12 w-full border border-black/15 bg-[#faf9f3] px-3 text-sm outline-none transition focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
-                    id="local-resolution"
-                    onChange={(event) => {
-                      const resolution = localResolutionOptions.find((option) => option.label === event.target.value);
-                      if (resolution) selectLocalResolution(resolution.id);
-                    }}
-                    value={selectedLocalResolution.label}
-                  >
-                    {localResolutionOptions.map((resolution) => (
-                      <option key={resolution.label} value={resolution.label}>{resolution.label}</option>
-                    ))}
-                  </select>
-                </div>
-                <fieldset>
-                  <legend className="mb-2 text-[11px] font-bold uppercase tracking-[0.18em] text-stone-700">Aspect ratio</legend>
-                  <div className="grid grid-cols-3 gap-1.5">
-                    {localAspectRatioOptions.map((option) => {
-                      const resolution = LOCAL_H3_RESOLUTIONS.find((candidate) =>
-                        candidate.label === selectedLocalResolution.label && candidate.aspectRatio === option.aspectRatio);
-                      const tooltipId = `local-${selectedLocalResolution.label}-${option.aspectRatio.replace(":", "-")}-unsupported`;
-                      return (
-                        <div className="group relative" key={option.aspectRatio}>
-                          <button
-                            aria-describedby={resolution ? undefined : tooltipId}
-                            aria-disabled={!resolution}
-                            aria-pressed={form.localResolution === resolution?.id}
-                            className={`h-12 w-full border text-xs font-bold transition ${form.localResolution === resolution?.id ? "border-black bg-black text-[#d9ff72]" : resolution ? "border-black/15 bg-[#faf9f3] hover:border-black/50" : "cursor-not-allowed border-black/10 bg-black/5 text-stone-400"}`}
-                            onClick={() => { if (resolution) selectLocalResolution(resolution.id); }}
-                            type="button"
-                          >
-                            {option.aspectRatio}
-                          </button>
-                          {!resolution && (
-                            <span
-                              className="pointer-events-none absolute bottom-full left-1/2 z-20 mb-2 hidden w-max max-w-44 -translate-x-1/2 bg-black px-2 py-1.5 text-center text-[9px] leading-3 text-white group-focus-within:block group-hover:block"
-                              id={tooltipId}
-                              role="tooltip"
-                            >
-                              {option.aspectRatio} is unavailable at {selectedLocalResolution.label}
-                            </span>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </fieldset>
-              </div>
+              <ResolutionAspectPicker
+                aspectRatioColumns="grid-cols-3"
+                idPrefix="local"
+                layout="sm:grid-cols-[0.7fr_1.3fr]"
+                onSelect={selectLocalResolution}
+                options={LOCAL_H3_RESOLUTIONS}
+                selectedId={form.localResolution}
+              />
 
               <div className="mt-7 border border-black/12 bg-[#e7e5dc] p-4 sm:p-5">
                 <div className="mb-4 flex items-start gap-3">
@@ -3161,27 +3134,11 @@ export default function App() {
                   })}
                 </div>
                 {(form.localFirstFramePath || form.localLastFramePath) && (
-                  <fieldset className="mt-4 border-t border-black/10 pt-4">
-                    <legend className="mb-2 text-[11px] font-bold uppercase tracking-[0.18em] text-stone-700">Reference framing</legend>
-                    <div className="grid grid-cols-2 gap-1.5">
-                      {LOCAL_H3_FRAME_FITS.map((fit) => (
-                        <button
-                          aria-describedby={`local-frame-fit-${fit.id}-description`}
-                          aria-pressed={form.localFrameFit === fit.id}
-                          className={`min-h-11 border px-3 text-xs font-bold transition ${form.localFrameFit === fit.id ? "border-black bg-black text-[#d9ff72]" : "border-black/15 bg-[#faf9f3] hover:border-black/50"}`}
-                          key={fit.id}
-                          onClick={() => setForm((current) => ({ ...current, localFrameFit: fit.id }))}
-                          type="button"
-                        >
-                          {fit.label}
-                          <span className="sr-only" id={`local-frame-fit-${fit.id}-description`}>{fit.note}</span>
-                        </button>
-                      ))}
-                    </div>
-                    <p className="mt-2 text-[11px] leading-4 text-stone-600">
-                      {LOCAL_H3_FRAME_FITS.find((fit) => fit.id === form.localFrameFit)?.note}
-                    </p>
-                  </fieldset>
+                  <FrameFitPicker
+                    idPrefix="local-frame-fit"
+                    onSelect={(fit) => setForm((current) => ({ ...current, localFrameFit: fit }))}
+                    selected={form.localFrameFit}
+                  />
                 )}
               </div>
 
@@ -3270,21 +3227,14 @@ export default function App() {
                       <p className="mt-1.5 text-[10px] leading-4 text-stone-500">Change the seed for another variation.</p>
                     </div>
 
-                    <label className="flex cursor-pointer items-center justify-between border-y border-black/10 py-4 sm:border-t-0 sm:pt-0">
-                      <span>
-                        <span className="block text-xs font-bold uppercase tracking-[0.12em]">SSD streaming</span>
-                        <span className="mt-1 block text-[11px] leading-4 text-stone-500">Lower memory use with slower generation.</span>
-                      </span>
-                      <span className={`relative h-7 w-12 shrink-0 rounded-full transition has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-black has-[:focus-visible]:ring-offset-2 ${form.localSsdStreaming ? "bg-black" : "bg-stone-300"}`}>
-                        <input
-                          checked={form.localSsdStreaming}
-                          className="sr-only"
-                          onChange={(event) => setForm((current) => ({ ...current, localSsdStreaming: event.target.checked }))}
-                          type="checkbox"
-                        />
-                        <span className={`absolute top-1 size-5 rounded-full transition ${form.localSsdStreaming ? "left-6 bg-[#d9ff72]" : "left-1 bg-white"}`} />
-                      </span>
-                    </label>
+                    <Toggle
+                      checked={form.localSsdStreaming}
+                      className="sm:border-t-0 sm:pt-0"
+                      label="SSD streaming"
+                      note="Lower memory use with slower generation."
+                      noteClassName="leading-4"
+                      onChange={(checked) => setForm((current) => ({ ...current, localSsdStreaming: checked }))}
+                    />
                   </div>
                 </div>
               </details>
@@ -3350,7 +3300,7 @@ export default function App() {
             <div>
               <p className="font-mono text-[9px] uppercase tracking-[0.2em] text-white/60">Output monitor</p>
               <h2 className="mt-1 font-display text-lg uppercase">
-                {imageTaskStatus ? currentImageModel.name : "No active reel"}
+                {imageTaskStatus ? currentImageModelName : "No active reel"}
               </h2>
             </div>
             {imageTaskStatus && (
@@ -3379,7 +3329,7 @@ export default function App() {
                         : "Rendering first frame"}
                     </p>
                     <p className="mt-2 font-mono text-[10px] uppercase tracking-[0.2em] text-white/60">
-                      {imageProvider === "mflux" ? "MFLUX is composing the image" : `${currentImageModel.name} is composing the image`}
+                      {imageProvider === "mflux" ? "MFLUX is composing the image" : `${currentImageModelName} is composing the image`}
                     </p>
                     {imageProvider === "mflux" && (
                       <div className="mt-8 border border-white/10 bg-black/20 p-4 text-left">
@@ -3422,6 +3372,16 @@ export default function App() {
                   className="max-h-[760px] w-full object-contain"
                   src={imageSource}
                 />
+              ) : currentImageFailure ? (
+                <div className="flex min-h-72 w-full items-center justify-center bg-[#17100f] px-8 text-center">
+                  <div>
+                    <div className="mx-auto mb-5 flex size-14 items-center justify-center rounded-full border border-[#ff826e]/40 text-2xl text-[#ff826e]">!</div>
+                    <p className="font-display text-2xl uppercase text-white">
+                      {imageTaskStatus === "unknown" ? "Generation status unknown" : "Generation stopped"}
+                    </p>
+                    <p className="mx-auto mt-3 max-w-md text-sm leading-6 text-white/55">{currentImageFailure}</p>
+                  </div>
+                </div>
               ) : (
                 <p className="px-6 text-center font-mono text-[10px] uppercase tracking-[0.15em] text-white/60">
                   Generated image preview will appear here
@@ -3493,7 +3453,6 @@ export default function App() {
                 job={job}
                 mediaLoading={mediaLoading}
                 mediaError={mediaError}
-                pollingStopped={pollingStopped}
                 onMediaError={() => setMediaError("The completed video could not be loaded in the player. Try downloading it instead.")}
                 onMediaRetry={() => {
                   setMediaError(null);
@@ -3513,14 +3472,14 @@ export default function App() {
           <div className="border-t border-white/10 px-5 py-5 sm:px-8">
             {job?.status === "completed" ? (
               <div className="flex flex-col gap-3 sm:flex-row">
-                {downloadSource && (
+                {videoSource && (
                   <>
                     <a
                       className="flex h-12 flex-1 items-center justify-center gap-2 bg-[#d9ff72] text-xs font-bold uppercase tracking-[0.12em] text-black transition hover:bg-white"
                       download={usesSessionMedia
                         ? job.provider === "local" ? "h3-local-video.mp4" : "openrouter-video.mp4"
                         : undefined}
-                      href={downloadSource}
+                      href={videoSource}
                     >
                       <Icon name="download" /> Download video
                     </a>

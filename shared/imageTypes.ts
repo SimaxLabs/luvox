@@ -11,7 +11,6 @@ export interface LocalMfluxProgress {
   step: number;
   total: number;
   percent: number;
-  stepElapsedSeconds?: number;
   etaSeconds?: number;
   secondsPerStep?: number;
 }

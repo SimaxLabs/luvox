@@ -101,10 +101,9 @@ test("custom OpenRouter models persist without replacing built-ins", async () =>
   }
 });
 
-test("OpenRouter discovery maps only Luvox-compatible media models without credentials", async () => {
-  const previousFetch = globalThis.fetch;
+test("OpenRouter discovery maps only Luvox-compatible media models without credentials", async (t) => {
   const requested: string[] = [];
-  globalThis.fetch = async (request, init) => {
+  t.mock.method(globalThis, "fetch", async (request, init) => {
     requested.push(String(request));
     assert.equal(new Headers(init?.headers).has("authorization"), false);
     if (String(request).endsWith("/images/models")) {
@@ -167,47 +166,42 @@ test("OpenRouter discovery maps only Luvox-compatible media models without crede
       },
       { id: "example/upscaler", name: "Upscaler", supported_durations: null, supported_aspect_ratios: null },
     ] });
-  };
-  try {
-    const images = await discoverOpenRouterModels("image");
-    assert.equal(images.models.length, 1);
-    assert.equal(images.omitted, 2);
-    assert.equal(images.models[0].model.defaultAspectRatio, "1:1");
-    assert.deepEqual(images.models[0].providerDefaults, ["quality"]);
+  });
+  const images = await discoverOpenRouterModels("image");
+  assert.equal(images.models.length, 1);
+  assert.equal(images.omitted, 2);
+  assert.equal(images.models[0].model.defaultAspectRatio, "1:1");
+  assert.deepEqual(images.models[0].providerDefaults, ["quality"]);
 
-    const endpoints = await discoverOpenRouterImageEndpoints("example/raster-image");
-    assert.equal(endpoints.models.length, 1);
-    assert.deepEqual(endpoints.models[0].model.provider, { id: "example-provider/global", name: "Example Provider" });
-    assert.equal(endpoints.omitted, 1);
-    assert.equal(endpoints.models[0].model.outputFormat, "png");
-    assert.deepEqual(endpoints.models[0].providerDefaults, ["provider.style"]);
+  const endpoints = await discoverOpenRouterImageEndpoints("example/raster-image");
+  assert.equal(endpoints.models.length, 1);
+  assert.deepEqual(endpoints.models[0].model.provider, { id: "example-provider/global", name: "Example Provider" });
+  assert.equal(endpoints.omitted, 1);
+  assert.equal(endpoints.models[0].model.outputFormat, "png");
+  assert.deepEqual(endpoints.models[0].providerDefaults, ["provider.style"]);
 
-    const videos = await discoverOpenRouterModels("video");
-    assert.equal(videos.models.length, 1);
-    assert.equal(videos.omitted, 1);
-    assert.equal(videos.models[0].model.defaultDuration, 6);
-    assert.equal(videos.models[0].model.defaultResolution, "720p");
-    assert.deepEqual(videos.models[0].providerDefaults, ["seed"]);
-    assert.deepEqual(requested, [
-      "https://openrouter.ai/api/v1/images/models",
-      "https://openrouter.ai/api/v1/images/models/example/raster-image/endpoints",
-      "https://openrouter.ai/api/v1/videos/models",
-    ]);
-  } finally {
-    globalThis.fetch = previousFetch;
-  }
+  const videos = await discoverOpenRouterModels("video");
+  assert.equal(videos.models.length, 1);
+  assert.equal(videos.omitted, 1);
+  assert.equal(videos.models[0].model.defaultDuration, 6);
+  assert.equal(videos.models[0].model.defaultResolution, "720p");
+  assert.deepEqual(videos.models[0].providerDefaults, ["seed"]);
+  assert.deepEqual(requested, [
+    "https://openrouter.ai/api/v1/images/models",
+    "https://openrouter.ai/api/v1/images/models/example/raster-image/endpoints",
+    "https://openrouter.ai/api/v1/videos/models",
+  ]);
 });
 
-test("image generation forwards configured normalized controls", async () => {
-  const previousFetch = globalThis.fetch;
+test("image generation forwards configured normalized controls", async (t) => {
   const previousDirectory = process.env.LUVOX_DATA_DIR;
   const directory = await mkdtemp(path.join(tmpdir(), "luvox-image-request-"));
   process.env.LUVOX_DATA_DIR = directory;
   let requestBody: Record<string, unknown> = {};
-  globalThis.fetch = async (_request, init) => {
+  t.mock.method(globalThis, "fetch", async (_request, init) => {
     requestBody = JSON.parse(String(init?.body));
     return Response.json({ data: [{ b64_json: "iVBORw0KGgo=" }] });
-  };
+  });
   try {
     await initializeOpenRouterModels();
     await saveOpenRouterModel({ kind: "image", model: imageModel });
@@ -223,7 +217,6 @@ test("image generation forwards configured normalized controls", async () => {
     assert.equal(requestBody.output_format, "png");
     assert.deepEqual(requestBody.provider, { only: ["example-provider/global"], allow_fallbacks: false });
   } finally {
-    globalThis.fetch = previousFetch;
     if (previousDirectory === undefined) delete process.env.LUVOX_DATA_DIR;
     else process.env.LUVOX_DATA_DIR = previousDirectory;
     await rm(directory, { recursive: true, force: true });

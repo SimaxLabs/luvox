@@ -9,7 +9,7 @@ import {
   LOCAL_H3_DURATIONS,
   LOCAL_H3_FRAME_FIT_IDS,
 } from "../shared/localH3.js";
-import { getMfluxImageModel, getMfluxImageResolution, MFLUX_IMAGE_STEPS, MFLUX_VAE_TILE_SIZES } from "../shared/imageModels.js";
+import { getMfluxImageModel, getMfluxImageResolution, MFLUX_IMAGE_MODELS, MFLUX_VAE_TILE_SIZES } from "../shared/imageModels.js";
 import type { ImageMediaType } from "../shared/imageTypes.js";
 import { getOpenRouterImageModel, getOpenRouterVideoModel } from "./openrouterModels.js";
 
@@ -131,7 +131,7 @@ const localMfluxGenerateImageSchema = z
     prompt: promptSchema,
     model: z.string().trim().min(1, "Model is required."),
     resolution: z.string().trim().min(1, "Resolution is required."),
-    steps: z.number().int().refine((value) => (MFLUX_IMAGE_STEPS as readonly number[]).includes(value), "Unsupported MFLUX step count."),
+    steps: z.number().int().refine((value) => MFLUX_IMAGE_MODELS.some((model) => (model.steps as readonly number[]).includes(value)), "Unsupported MFLUX step count."),
     quantization: z.union([z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(8)]).nullable(),
     seed: z.number().int().min(0).max(4_294_967_295).optional(),
     lowRam: z.boolean(),

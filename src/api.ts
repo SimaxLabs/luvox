@@ -52,7 +52,6 @@ export interface AppConfig {
   };
   localMflux: {
     supported: boolean;
-    configured: boolean;
     models: string[];
   };
   openRouter: OpenRouterModelRegistry;

@@ -7,7 +7,6 @@ export interface VideoStatusResponse {
   capabilityToken?: string;
   error?: string;
   videoUrl?: string;
-  downloadUrl?: string;
   cost?: number;
   phase?: string;
   progress?: number;

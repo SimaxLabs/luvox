@@ -19,7 +19,6 @@ import type { LocalGenerateVideoInput } from "./validation.js";
 import type { GenerationStatus, VideoStatusResponse } from "../shared/videoTypes.js";
 
 const LOCAL_JOB_ID = /^local_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-const TERMINAL_MARKER = "terminal-status";
 const STORAGE_LOCK = ".luvox.lock";
 const STORAGE_LOCK_OWNER = "owner.json";
 const STORAGE_LOCK_TOMBSTONE = /^\.luvox\.lock\.stale-\d+-\d+$/;
@@ -415,10 +414,6 @@ function assertLocalWorkspaceActive(workspaceToken: string): void {
     "local_workspace_cleared",
     false,
   );
-}
-
-function retireLocalWorkspace(workspaceToken: string): void {
-  discardedWorkspaces.add(workspaceToken);
 }
 
 function clearLocalH3WorkspaceLease(workspaceToken: string): void {
@@ -827,92 +822,62 @@ function serializeReferenceProcessing<T>(work: () => Promise<T>): Promise<T> {
   return operation;
 }
 
-async function inspectReferenceImage(filePath: string): Promise<void> {
+async function runReferenceTool(
+  command: string,
+  args: string[],
+  timeoutMs: number,
+  messages: { timeout: string; unavailable: string; supervision: string },
+  stdoutLimit = 0,
+): Promise<{ code: number | null; stdout: string }> {
   assertLocalOperationMayContinue();
-  const command = process.env.H3_FFPROBE?.trim() || "ffprobe";
   let child: ChildProcess | undefined;
   let activation: Promise<void> | undefined;
   try {
-    await new Promise<void>((resolve, reject) => {
-      child = spawn(command, [
-        "-v",
-        "error",
-        "-select_streams",
-        "v:0",
-        "-show_entries",
-        "stream=width,height",
-        "-of",
-        "csv=p=0:s=x",
-        filePath,
-      ], {
+    return await new Promise<{ code: number | null; stdout: string }>((resolve, reject) => {
+      child = spawn(command, args, {
         detached: true,
         env: localProcessEnvironment(),
         shell: false,
-        stdio: ["ignore", "pipe", "ignore"],
+        stdio: ["ignore", stdoutLimit ? "pipe" : "ignore", "ignore"],
       });
       trackChildProcess(child);
-      let output = "";
+      let stdout = "";
       let settled = false;
       let terminationError: LocalH3Error | undefined;
-      const finish = (error?: LocalH3Error) => {
+      const finish = (error?: LocalH3Error, code: number | null = null) => {
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
         if (error) reject(error);
-        else resolve();
+        else resolve({ code, stdout });
       };
       const timeout = setTimeout(() => {
         terminationError = new LocalH3Error(
-          "The reference image could not be inspected within 15 seconds.",
+          messages.timeout,
           400,
           "local_reference_error",
           false,
         );
         signalProcessGroup(child!, "SIGKILL");
-      }, 15_000);
+      }, timeoutMs);
       timeout.unref();
 
-      child.stdout!.on("data", (chunk: Buffer) => {
-        output = `${output}${chunk.toString("utf8")}`.slice(-1_024);
+      child.stdout?.on("data", (chunk: Buffer) => {
+        stdout = `${stdout}${chunk.toString("utf8")}`.slice(-stdoutLimit);
       });
       child.once("error", () => finish(new LocalH3Error(
-        "FFprobe is required to inspect local reference images.",
+        messages.unavailable,
         503,
         "local_configuration_error",
         false,
       )));
       child.once("close", (code) => {
-        if (terminationError) {
-          finish(terminationError);
-          return;
-        }
-        const match = output.trim().match(/^(\d+)x(\d+)$/);
-        const width = Number(match?.[1]);
-        const height = Number(match?.[2]);
-        const aspect = Math.max(width / height, height / width);
-        if (
-          code === 0 &&
-          Number.isInteger(width) &&
-          Number.isInteger(height) &&
-          width > 0 &&
-          height > 0 &&
-          width * height <= MAX_REFERENCE_IMAGE_PIXELS &&
-          aspect <= MAX_REFERENCE_ASPECT_RATIO
-        ) {
-          finish();
-          return;
-        }
-        finish(new LocalH3Error(
-          "Reference images must be decodable, at most 50 megapixels, and no more extreme than a 16:1 aspect ratio.",
-          400,
-          "local_reference_error",
-          false,
-        ));
+        finish(terminationError, code);
       });
       activation = activateProcessGroup(child, command);
       void activation.catch((error) => {
         terminationError = new LocalH3Error(
-          error instanceof Error ? error.message : "The FFprobe process could not be supervised.",
+          error instanceof Error ? error.message : messages.supervision,
           503,
           "local_storage_error",
           true,
@@ -929,91 +894,81 @@ async function inspectReferenceImage(filePath: string): Promise<void> {
   }
 }
 
+async function inspectReferenceImage(filePath: string): Promise<void> {
+  const command = process.env.H3_FFPROBE?.trim() || "ffprobe";
+  const { code, stdout } = await runReferenceTool(
+    command,
+    [
+      "-v",
+      "error",
+      "-select_streams",
+      "v:0",
+      "-show_entries",
+      "stream=width,height",
+      "-of",
+      "csv=p=0:s=x",
+      filePath,
+    ],
+    15_000,
+    {
+      timeout: "The reference image could not be inspected within 15 seconds.",
+      unavailable: "FFprobe is required to inspect local reference images.",
+      supervision: "The FFprobe process could not be supervised.",
+    },
+    1_024,
+  );
+  const match = stdout.trim().match(/^(\d+)x(\d+)$/);
+  const width = Number(match?.[1]);
+  const height = Number(match?.[2]);
+  const aspect = Math.max(width / height, height / width);
+  if (
+    code === 0 &&
+    Number.isInteger(width) &&
+    Number.isInteger(height) &&
+    width > 0 &&
+    height > 0 &&
+    width * height <= MAX_REFERENCE_IMAGE_PIXELS &&
+    aspect <= MAX_REFERENCE_ASPECT_RATIO
+  ) return;
+  throw new LocalH3Error(
+    "Reference images must be decodable, at most 50 megapixels, and no more extreme than a 16:1 aspect ratio.",
+    400,
+    "local_reference_error",
+    false,
+  );
+}
+
 async function probeReferenceImage(filePath: string): Promise<void> {
   await inspectReferenceImage(filePath);
-  assertLocalOperationMayContinue();
   const command = process.env.H3_FFMPEG?.trim() || "ffmpeg";
-  let child: ChildProcess | undefined;
-  let activation: Promise<void> | undefined;
-  try {
-    await new Promise<void>((resolve, reject) => {
-      child = spawn(command, [
-        "-v",
-        "error",
-        "-nostdin",
-        "-i",
-        filePath,
-        "-frames:v",
-        "1",
-        "-f",
-        "null",
-        "-",
-      ], {
-        detached: true,
-        env: localProcessEnvironment(),
-        shell: false,
-        stdio: ["ignore", "ignore", "ignore"],
-      });
-      trackChildProcess(child);
-      let settled = false;
-      let terminationError: LocalH3Error | undefined;
-      const finish = (error?: LocalH3Error) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timeout);
-        if (error) reject(error);
-        else resolve();
-      };
-      const timeout = setTimeout(() => {
-        terminationError = new LocalH3Error(
-          "The reference image could not be decoded within 15 seconds.",
-          400,
-          "local_reference_error",
-          false,
-        );
-        signalProcessGroup(child!, "SIGKILL");
-      }, 15_000);
-      timeout.unref();
-
-      child.once("error", () => finish(new LocalH3Error(
-        "FFmpeg is required to validate local reference images.",
-        503,
-        "local_configuration_error",
-        false,
-      )));
-      child.once("close", (code) => {
-        if (terminationError) {
-          finish(terminationError);
-          return;
-        }
-        if (code === 0) {
-          finish();
-          return;
-        }
-        finish(new LocalH3Error(
-          "Reference images must contain decodable PNG, JPEG, or WebP data.",
-          400,
-          "local_reference_error",
-          false,
-        ));
-      });
-      activation = activateProcessGroup(child, command);
-      void activation.catch((error) => {
-        terminationError = new LocalH3Error(
-          error instanceof Error ? error.message : "The FFmpeg process could not be supervised.",
-          503,
-          "local_storage_error",
-          true,
-        );
-        signalProcessGroup(child!, "SIGKILL");
-      });
-    });
-  } finally {
-    try {
-      await activation;
-    } finally {
-      if (child) deactivateProcessGroup(child);
-    }
+  const { code } = await runReferenceTool(
+    command,
+    [
+      "-v",
+      "error",
+      "-nostdin",
+      "-i",
+      filePath,
+      "-frames:v",
+      "1",
+      "-f",
+      "null",
+      "-",
+    ],
+    15_000,
+    {
+      timeout: "The reference image could not be decoded within 15 seconds.",
+      unavailable: "FFmpeg is required to validate local reference images.",
+      supervision: "The FFmpeg process could not be supervised.",
+    },
+  );
+  if (code !== 0) {
+    throw new LocalH3Error(
+      "Reference images must contain decodable PNG, JPEG, or WebP data.",
+      400,
+      "local_reference_error",
+      false,
+    );
   }
 }
 
@@ -1025,98 +980,44 @@ async function processReferenceImage(
   height: number,
   fit: LocalH3FrameFitId,
 ): Promise<string> {
-  assertLocalOperationMayContinue();
   const command = process.env.H3_FFMPEG?.trim() || "ffmpeg";
   const output = path.join(directory, `${name}-framed.png`);
   const filter = fit === "cover"
     ? `setsar=1,crop='if(gt(iw/ih,${width}/${height}),ih*${width}/${height},iw)':'if(gt(iw/ih,${width}/${height}),ih,iw*${height}/${width})',scale=${width}:${height},setsar=1`
     : `setsar=1,scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1`;
 
-  let child: ChildProcess | undefined;
-  let activation: Promise<void> | undefined;
-  try {
-    await new Promise<void>((resolve, reject) => {
-      child = spawn(command, [
-        "-v",
-        "error",
-        "-nostdin",
-        "-i",
-        source,
-        "-vf",
-        filter,
-        "-frames:v",
-        "1",
-        "-an",
-        "-sn",
-        "-pix_fmt",
-        "rgb24",
-        output,
-      ], {
-        detached: true,
-        env: localProcessEnvironment(),
-        shell: false,
-        stdio: ["ignore", "ignore", "ignore"],
-      });
-      trackChildProcess(child);
-      let settled = false;
-      let terminationError: LocalH3Error | undefined;
-      const finish = (error?: LocalH3Error) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timeout);
-        if (error) reject(error);
-        else resolve();
-      };
-      const timeout = setTimeout(() => {
-        terminationError = new LocalH3Error(
-          "Reference-image framing exceeded 30 seconds.",
-          400,
-          "local_reference_error",
-          false,
-        );
-        signalProcessGroup(child!, "SIGKILL");
-      }, 30_000);
-      timeout.unref();
-
-      child.once("error", () => finish(new LocalH3Error(
-        "FFmpeg is required to frame local reference images.",
-        503,
-        "local_configuration_error",
-        false,
-      )));
-      child.once("close", (code) => {
-        if (terminationError) {
-          finish(terminationError);
-          return;
-        }
-        if (code === 0) {
-          finish();
-          return;
-        }
-        finish(new LocalH3Error(
-          "The reference image could not be framed for the selected resolution.",
-          400,
-          "local_reference_error",
-          false,
-        ));
-      });
-      activation = activateProcessGroup(child, command);
-      void activation.catch((error) => {
-        terminationError = new LocalH3Error(
-          error instanceof Error ? error.message : "The FFmpeg process could not be supervised.",
-          503,
-          "local_storage_error",
-          true,
-        );
-        signalProcessGroup(child!, "SIGKILL");
-      });
-    });
-  } finally {
-    try {
-      await activation;
-    } finally {
-      if (child) deactivateProcessGroup(child);
-    }
+  const { code } = await runReferenceTool(
+    command,
+    [
+      "-v",
+      "error",
+      "-nostdin",
+      "-i",
+      source,
+      "-vf",
+      filter,
+      "-frames:v",
+      "1",
+      "-an",
+      "-sn",
+      "-pix_fmt",
+      "rgb24",
+      output,
+    ],
+    30_000,
+    {
+      timeout: "Reference-image framing exceeded 30 seconds.",
+      unavailable: "FFmpeg is required to frame local reference images.",
+      supervision: "The FFmpeg process could not be supervised.",
+    },
+  );
+  if (code !== 0) {
+    throw new LocalH3Error(
+      "The reference image could not be framed for the selected resolution.",
+      400,
+      "local_reference_error",
+      false,
+    );
   }
 
   const framed = await stat(output).catch(() => undefined);
@@ -1291,7 +1192,7 @@ export function discardLocalH3Workspace(workspaceToken: string): Promise<{ clear
   if (!isLocalH3Supported()) return Promise.resolve({ cleared: true });
   clearLocalH3WorkspaceLease(workspaceToken);
   const release = beginLocalOperation();
-  retireLocalWorkspace(workspaceToken);
+  discardedWorkspaces.add(workspaceToken);
   const activeJob = activeJobId ? jobs.get(activeJobId) : undefined;
   const discardedActiveExecution = activeJob?.workspaceToken === workspaceToken ? activeExecution : undefined;
   for (const job of jobs.values()) {
@@ -1480,7 +1381,6 @@ function toResponse(job: LocalJob): VideoStatusResponse {
   if (job.status === "completed") {
     const id = encodeURIComponent(job.id);
     response.videoUrl = `/api/video/content/${id}`;
-    response.downloadUrl = `/api/video/content/${id}?download=1`;
   }
   return response;
 }
@@ -1510,13 +1410,6 @@ function publicExecutionError(error: unknown): string {
     /^h3\.c exceeded the \d+-minute generation timeout\.$/.test(message)
     ? message
     : "Local h3.c generation failed.";
-}
-
-async function writeTerminalMarker(job: LocalJob, status: "completed" | "failed"): Promise<void> {
-  const temporary = path.join(job.directory, `${TERMINAL_MARKER}.tmp`);
-  const marker = path.join(job.directory, TERMINAL_MARKER);
-  await writeFile(temporary, `${status}\n`, { flag: "w", mode: 0o600 });
-  await rename(temporary, marker);
 }
 
 async function executeJob(job: LocalJob): Promise<void> {
@@ -1652,13 +1545,11 @@ async function executeJob(job: LocalJob): Promise<void> {
     job.status = "completed";
     job.phase = "Completed";
     job.progress = 100;
-    await writeTerminalMarker(job, "completed").catch(() => undefined);
   } catch (error) {
     await rm(job.temporaryOutput, { force: true }).catch(() => undefined);
     job.status = "failed";
     job.phase = "Failed";
     job.error = publicExecutionError(error);
-    await writeTerminalMarker(job, "failed").catch(() => undefined);
   }
 }
 
@@ -1793,14 +1684,12 @@ async function generateLocalVideoOperation(
 
 export function generateLocalVideo(input: LocalGenerateVideoInput, workspaceToken: string): Promise<VideoStatusResponse> {
   renewLocalH3Workspace(workspaceToken);
-  assertLocalWorkspaceActive(workspaceToken);
   const release = beginLocalOperation();
   return generateLocalVideoOperation(input, workspaceToken).finally(release);
 }
 
-export function getLocalVideoStatus(id: string, workspaceToken: string): VideoStatusResponse {
+function getOwnedLocalJob(id: string, workspaceToken: string): LocalJob {
   renewLocalH3Workspace(workspaceToken);
-  assertLocalWorkspaceActive(workspaceToken);
   const job = jobs.get(id);
   if (!job || job.workspaceToken !== workspaceToken) {
     throw new LocalH3Error(
@@ -1810,22 +1699,16 @@ export function getLocalVideoStatus(id: string, workspaceToken: string): VideoSt
       false,
     );
   }
-  return toResponse(job);
+  return job;
+}
+
+export function getLocalVideoStatus(id: string, workspaceToken: string): VideoStatusResponse {
+  return toResponse(getOwnedLocalJob(id, workspaceToken));
 }
 
 export async function getLocalVideoPath(id: string, workspaceToken: string): Promise<string> {
-  renewLocalH3Workspace(workspaceToken);
-  assertLocalWorkspaceActive(workspaceToken);
-  const job = jobs.get(id);
-  if (!job || job.workspaceToken !== workspaceToken) {
-    throw new LocalH3Error(
-      "The local generation job was not found. Local jobs are lost when the server restarts.",
-      404,
-      "local_job_not_found",
-      false,
-    );
-  }
-  if (job && job.status !== "completed") {
+  const job = getOwnedLocalJob(id, workspaceToken);
+  if (job.status !== "completed") {
     throw new LocalH3Error(
       "The local video is not ready yet.",
       409,

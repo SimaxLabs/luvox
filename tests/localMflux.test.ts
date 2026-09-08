@@ -5,10 +5,24 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { generateLocalMfluxImage, initializeLocalMfluxStorage, LocalMfluxError } from "../server/localMflux.js";
-import { validateGenerateImageInput } from "../server/validation.js";
+import { validateGenerateImageInput, type LocalMfluxGenerateImageInput } from "../server/validation.js";
 import type { LocalMfluxProgress } from "../shared/imageTypes.js";
 
 const referenceImage = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+const webpReferenceImage = "data:image/webp;base64,UklGRlAAAABXRUJQVlA4WAoAAAAQAAAAAAAAAAAAQUxQSAIAAAAASFZQOCAoAAAAcAEAnQEqAQABAAIANCWgAnQBQAAA/vgyy/9ej//zK//+ZX/Fz0IAAA==";
+const input = (overrides: Partial<LocalMfluxGenerateImageInput> = {}): LocalMfluxGenerateImageInput => ({
+  provider: "mflux",
+  model: "flux2-klein-4b",
+  prompt: "test image",
+  resolution: "1024x1024",
+  steps: 4,
+  quantization: 8,
+  lowRam: false,
+  vaeTiling: false,
+  vaeTileSize: 512,
+  referenceFit: "contain",
+  ...overrides,
+});
 
 test("MFLUX startup removes only stale owner-marked directories", {
   skip: process.platform !== "darwin" || process.arch !== "arm64",
@@ -40,18 +54,11 @@ test("MFLUX startup removes only stale owner-marked directories", {
     await initializeLocalMfluxStorage();
     assert.deepEqual((await readdir(temporaryRoot)).sort(), ["luvox-mflux-live", "luvox-mflux-unmarked"]);
     await assert.rejects(
-      generateLocalMfluxImage({
-        provider: "mflux",
-        model: "flux2-klein-4b",
-        prompt: "test image",
+      generateLocalMfluxImage(input({
         resolution: "1280x720",
         steps: 3,
         quantization: null,
-        lowRam: false,
-        vaeTiling: false,
-        vaeTileSize: 512,
-        referenceFit: "contain",
-      }),
+      })),
       (error) => error instanceof LocalMfluxError && error.type === "local_mflux_unavailable",
     );
   } finally {
@@ -72,87 +79,37 @@ test("MFLUX startup removes only stale owner-marked directories", {
 });
 
 test("MFLUX validation enforces shared presets and advanced ranges", () => {
-  assert.throws(() => validateGenerateImageInput({
-    provider: "mflux",
-    model: "flux2-klein-4b",
-    prompt: "test image",
+  assert.throws(() => validateGenerateImageInput(input({
     resolution: "1920x1080",
-    steps: 4,
-    quantization: 8,
-    lowRam: false,
-    vaeTiling: false,
-    vaeTileSize: 512,
-  }));
-  assert.throws(() => validateGenerateImageInput({
-    provider: "mflux",
+  })));
+  assert.throws(() => validateGenerateImageInput(input({
     model: "schnell",
-    prompt: "test image",
-    resolution: "1024x1024",
-    steps: 4,
-    quantization: 8,
-    lowRam: false,
-    vaeTiling: false,
-    vaeTileSize: 512,
-  }));
-  assert.throws(() => validateGenerateImageInput({
-    provider: "mflux",
-    model: "flux2-klein-4b",
-    prompt: "test image",
-    resolution: "1024x1024",
+  })));
+  assert.throws(() => validateGenerateImageInput(input({
     steps: 5,
-    quantization: 8,
-    lowRam: false,
-    vaeTiling: false,
-    vaeTileSize: 512,
-  }));
-  assert.throws(() => validateGenerateImageInput({
-    provider: "mflux",
-    model: "flux2-klein-4b",
-    prompt: "test image",
-    resolution: "1024x1024",
-    steps: 4,
-    quantization: 8,
-    lowRam: false,
+  })));
+  assert.throws(() => validateGenerateImageInput(input({
     vaeTiling: true,
     vaeTileSize: 1024,
-  }));
-  assert.throws(() => validateGenerateImageInput({
-    provider: "mflux",
+  })));
+  assert.throws(() => validateGenerateImageInput(input({
     model: "qwen-image-edit",
     prompt: "edit image",
-    resolution: "1024x1024",
-    steps: 4,
-    quantization: 8,
-    lowRam: false,
-    vaeTiling: false,
-    vaeTileSize: 512,
     guidance: 2.5,
     inputReference: referenceImage,
-  }));
-  assert.throws(() => validateGenerateImageInput({
-    provider: "mflux",
+  })));
+  assert.throws(() => validateGenerateImageInput(input({
     model: "qwen-image-edit",
     prompt: "edit image",
-    resolution: "1024x1024",
     steps: 20,
-    quantization: 8,
-    lowRam: false,
-    vaeTiling: false,
-    vaeTileSize: 512,
-  }));
-  assert.doesNotThrow(() => validateGenerateImageInput({
-    provider: "mflux",
+  })));
+  assert.doesNotThrow(() => validateGenerateImageInput(input({
     model: "qwen-image-edit",
     prompt: "edit image",
-    resolution: "1024x1024",
     steps: 20,
-    quantization: 8,
-    lowRam: false,
-    vaeTiling: false,
-    vaeTileSize: 512,
     guidance: 2.5,
     inputReference: referenceImage,
-  }));
+  })));
 });
 
 test("MFLUX adapter returns and cleans a generated raster", {
@@ -206,7 +163,7 @@ if (prompt === "edit image") {
   }
   if (process.argv.includes("--image-path") || process.argv.includes("--image-strength")) process.exit(2);
 }
-if ((prompt === "wait" || prompt === "invalid output") && basename(process.argv[1]) !== "mflux-generate-flux2") process.exit(2);
+if (prompt === "invalid output" && basename(process.argv[1]) !== "mflux-generate-flux2") process.exit(2);
 const width = process.argv[process.argv.indexOf("--width") + 1];
 const height = process.argv[process.argv.indexOf("--height") + 1];
 writeFileSync(output, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"));
@@ -224,54 +181,42 @@ process.exit(resizeStatus);
   process.env.PATH = `${editDirectory}${path.delimiter}${previousPath || ""}`;
 
   try {
-    const result = await generateLocalMfluxImage({
-      provider: "mflux",
-      model: "flux2-klein-4b",
-      prompt: "test image",
+    const result = await generateLocalMfluxImage(input({
       resolution: "1280x720",
       steps: 3,
       quantization: null,
       seed: 42,
       lowRam: true,
-      vaeTiling: false,
       vaeTileSize: 256,
       referenceFit: "cover",
       inputReference: referenceImage,
-    });
+    }));
     assert.equal(result.mediaType, "image/png");
     assert.ok(result.b64Json.startsWith("iVBOR"));
     const progress: LocalMfluxProgress[] = [];
-    const editResult = await generateLocalMfluxImage({
-      provider: "mflux",
+    const editResult = await generateLocalMfluxImage(input({
       model: "qwen-image-edit",
       prompt: "edit image",
       resolution: "1280x720",
       steps: 20,
-      quantization: 8,
-      lowRam: false,
-      vaeTiling: false,
-      vaeTileSize: 512,
       guidance: 2.5,
-      referenceFit: "contain",
       inputReference: referenceImage,
-    }, undefined, (update) => progress.push(update));
+    }), undefined, (update) => progress.push(update));
     assert.equal(editResult.mediaType, "image/png");
     assert.ok(progress.some((update) => update.phase === "generating" && update.step === 10 && update.etaSeconds === 20 && update.secondsPerStep === 2));
     assert.equal(progress.at(-1)?.phase, "decoding");
+    const webpResult = await generateLocalMfluxImage(input({
+      prompt: "webp reference",
+      inputReference: webpReferenceImage,
+    }));
+    assert.equal(webpResult.mediaType, "image/png");
     const preprocessingController = new AbortController();
-    const preprocessing = generateLocalMfluxImage({
-      provider: "mflux",
-      model: "flux2-klein-4b",
-      prompt: "test image",
+    const preprocessing = generateLocalMfluxImage(input({
       resolution: "1280x720",
       steps: 3,
       quantization: null,
-      lowRam: false,
-      vaeTiling: false,
-      vaeTileSize: 512,
-      referenceFit: "contain",
       inputReference: referenceImage,
-    }, preprocessingController.signal);
+    }), preprocessingController.signal);
     setTimeout(() => preprocessingController.abort(), 1);
     await assert.rejects(
       preprocessing,
@@ -281,18 +226,9 @@ process.exit(resizeStatus);
     const controller = new AbortController();
     let markStarted!: () => void;
     const started = new Promise<void>((resolve) => { markStarted = resolve; });
-    const pending = generateLocalMfluxImage({
-      provider: "mflux",
-      model: "flux2-klein-4b",
+    const pending = generateLocalMfluxImage(input({
       prompt: "wait",
-      resolution: "1024x1024",
-      steps: 4,
-      quantization: 8,
-      lowRam: false,
-      vaeTiling: false,
-      vaeTileSize: 512,
-      referenceFit: "contain",
-    }, controller.signal, (update) => {
+    }), controller.signal, (update) => {
       if (update.phase === "generating") markStarted();
     });
     await started;
@@ -303,18 +239,9 @@ process.exit(resizeStatus);
     );
     assert.deepEqual(await readdir(temporaryRoot), []);
     await assert.rejects(
-      generateLocalMfluxImage({
-        provider: "mflux",
-        model: "flux2-klein-4b",
+      generateLocalMfluxImage(input({
         prompt: "invalid output",
-        resolution: "1024x1024",
-        steps: 4,
-        quantization: 8,
-        lowRam: false,
-        vaeTiling: false,
-        vaeTileSize: 512,
-        referenceFit: "contain",
-      }),
+      })),
       (error) => error instanceof LocalMfluxError && error.type === "local_mflux_output_error",
     );
     assert.deepEqual(await readdir(temporaryRoot), []);

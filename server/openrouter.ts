@@ -48,16 +48,6 @@ interface OpenRouterVideoResponse {
   };
 }
 
-interface OpenRouterImageResponse {
-  data: Array<{
-    b64_json: string;
-    media_type?: string;
-  }>;
-  usage?: {
-    cost?: number | null;
-  };
-}
-
 export class OpenRouterError extends Error {
   constructor(
     message: string,
@@ -477,12 +467,11 @@ function parseImageResponse(value: unknown): ImageGenerationResponse {
     );
   }
 
-  const response = value as unknown as OpenRouterImageResponse;
   const result: ImageGenerationResponse = {
     b64Json: image.b64_json,
     mediaType,
   };
-  if (typeof response.usage?.cost === "number") result.cost = response.usage.cost;
+  if (isRecord(value.usage) && typeof value.usage.cost === "number") result.cost = value.usage.cost;
   return result;
 }
 
@@ -532,9 +521,7 @@ function publicStatus(response: OpenRouterVideoResponse): VideoStatusResponse {
   }
 
   if (status === "completed") {
-    const encodedId = encodeURIComponent(response.id);
-    result.videoUrl = `/api/video/content/${encodedId}`;
-    result.downloadUrl = `/api/video/content/${encodedId}?download=1`;
+    result.videoUrl = `/api/video/content/${encodeURIComponent(response.id)}`;
   }
 
   if (typeof response.usage?.cost === "number") {
