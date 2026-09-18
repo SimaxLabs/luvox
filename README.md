@@ -59,7 +59,7 @@ Built-in models cannot be replaced or removed. Custom definitions may use only c
 
 ### Persistence and manual configuration
 
-Host runs store custom models in `.luvox/openrouter-models.json`. Set `LUVOX_DATA_DIR` to an absolute directory to keep the file elsewhere. Docker Compose stores the same file in the persistent `luvox-data` volume; `docker compose down -v` deliberately removes that volume and its model configuration.
+Host runs store persistent data in `.luvox`: custom models in `openrouter-models.json` and saved prompts in `saved-prompts.json`. Set `LUVOX_DATA_DIR` to an absolute directory to keep these files elsewhere. Docker Compose stores both files in the persistent `luvox-data` volume; `docker compose down -v` deliberately removes that volume and its data.
 
 The file can also be edited by hand while Luvox is stopped:
 
@@ -75,7 +75,7 @@ Invalid definitions stop server startup rather than silently weakening request v
 
 ## Saved prompts
 
-Choose **Saved prompts** beside the prompt field to open the prompt library, name and save the current prompt. You can save the prompt alone or include its current model and scalar generation settings, then load it later with one click. Saved prompts stay in this browser's local storage and are limited to 100 entries; API keys, reference images, reference URLs, and local file paths are never included.
+Choose **Saved prompts** beside the prompt field to open the prompt library, name and save the current prompt. You can save the prompt alone or include its current model and scalar generation settings, then load it later with one click. Saved prompts are stored on the Luvox PC in `.luvox/saved-prompts.json` and are limited to 100 entries; API keys, reference images, reference URLs, and local file paths are never included. Existing browser-local prompts are moved into this file the next time their original browser origin opens Luvox.
 
 ## Local image generation with MFLUX
 
@@ -117,7 +117,7 @@ Each generation type has one slot: OpenRouter image, local MFLUX image, OpenRout
 
 ## Privacy
 
-Luvox uses volatile session state instead of accounts or a generation database. Custom model definitions are persisted by the server, and prompts are persisted only when you explicitly add them to the browser-local **Saved prompts** list. Saved entries may include model and scalar settings, but never credentials, references, jobs, or results. API responses are marked `private, no-store`, and credentials are kept out of payloads and URLs.
+Luvox uses volatile session state instead of accounts or a generation database. Custom model definitions and prompts explicitly added to **Saved prompts** are persisted by the server under `LUVOX_DATA_DIR`. Saved entries may include model and scalar settings, but never credentials, references, jobs, or results. API responses are marked `private, no-store`, and credentials are kept out of payloads and URLs.
 
 When using OpenRouter, Luvox creates no local generation files. Except for prompts you explicitly save, UI-entered keys, prompts, results, and job records stay in tab or transit memory and are not persisted by Luvox. Keys travel only in request headers, remain pinned to submitted jobs in tab memory, and disappear on workspace reset, reload, or tab close. Videos are streamed through an authenticated proxy rather than saved to disk; temporary-key media uses revocable browser `blob:` URLs. Server-key video access uses a per-job capability kept only in tab and server memory, never in a URL, and expires after 24 hours without use. A server-configured `OPENROUTER_API_KEY` never reaches the browser.
 

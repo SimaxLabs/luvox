@@ -9,6 +9,7 @@ import type {
   OpenRouterModelsFile,
 } from "../shared/openrouterModels.js";
 import { VIDEO_MODELS, type VideoModelConfig } from "../shared/videoModels.js";
+import { getLuvoxDataDirectory } from "./dataDirectory.js";
 
 const MAX_CONFIG_BYTES = 256 * 1024;
 const modelIdSchema = z.string().trim().min(3).max(200).regex(
@@ -144,16 +145,8 @@ export class OpenRouterModelConfigError extends Error {
   }
 }
 
-function dataDirectory(): string {
-  const configured = process.env.LUVOX_DATA_DIR?.trim();
-  if (configured && !path.isAbsolute(configured)) {
-    throw new Error("LUVOX_DATA_DIR must be an absolute path.");
-  }
-  return configured || path.resolve(process.cwd(), ".luvox");
-}
-
 export function getOpenRouterModelsFilePath(): string {
-  return path.join(dataDirectory(), "openrouter-models.json");
+  return path.join(getLuvoxDataDirectory(), "openrouter-models.json");
 }
 
 function assertUniqueIds(models: OpenRouterModelsFile): void {

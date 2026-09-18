@@ -46,6 +46,12 @@ import {
   saveOpenRouterModel,
 } from "./openrouterModels.js";
 import {
+  getSavedPrompts,
+  initializeSavedPrompts,
+  removeSavedPrompt,
+  saveSavedPrompt,
+} from "./savedPrompts.js";
+import {
   validateGenerateImageInput,
   validateGenerateVideoInput,
   validateJobId,
@@ -261,6 +267,30 @@ app.post(
 );
 
 app.use(express.json({ limit: "100kb" }));
+
+app.get(
+  "/api/saved-prompts",
+  loopbackOnly,
+  (_request: Request, response: Response) => {
+    response.json(getSavedPrompts());
+  },
+);
+
+app.put(
+  "/api/saved-prompts",
+  loopbackOnly,
+  async (request: Request, response: Response) => {
+    response.json(await saveSavedPrompt(request.body));
+  },
+);
+
+app.delete(
+  "/api/saved-prompts",
+  loopbackOnly,
+  async (request: Request, response: Response) => {
+    response.json(await removeSavedPrompt(request.body));
+  },
+);
 
 app.put(
   "/api/openrouter/models",
@@ -584,6 +614,7 @@ if (!Number.isInteger(port) || port < 1 || port > 65_535) {
 }
 
 await initializeOpenRouterModels();
+await initializeSavedPrompts();
 await initializeLocalMfluxStorage();
 await initializeLocalH3Storage();
 

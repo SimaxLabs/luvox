@@ -6,6 +6,7 @@ import type {
   OpenRouterModelDefinition,
   OpenRouterModelRegistry,
 } from "../shared/openrouterModels";
+import type { SavedPrompt, SavedPromptsFile } from "../shared/savedPrompts";
 
 export type { GenerationStatus, VideoStatusResponse as VideoJob } from "../shared/videoTypes";
 export type { ImageGenerationResponse, LocalMfluxProgress } from "../shared/imageTypes";
@@ -278,6 +279,27 @@ export function removeOpenRouterModel(kind: "image" | "video", id: string): Prom
     method: "DELETE",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ kind, id }),
+  });
+}
+
+export function getSavedPrompts(signal?: AbortSignal): Promise<SavedPromptsFile> {
+  return request<SavedPromptsFile>("/api/saved-prompts", { signal });
+}
+
+export function saveSavedPrompt(prompt: SavedPrompt, signal?: AbortSignal): Promise<SavedPromptsFile> {
+  return request<SavedPromptsFile>("/api/saved-prompts", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(prompt),
+    signal,
+  });
+}
+
+export function removeSavedPrompt(id: string): Promise<SavedPromptsFile> {
+  return request<SavedPromptsFile>("/api/saved-prompts", {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id }),
   });
 }
 
