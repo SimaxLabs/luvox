@@ -3070,7 +3070,10 @@ export default function App() {
                 <div>
                   <h3 className="text-xs font-bold uppercase tracking-[0.12em]">Reference frames</h3>
                   <p className="mt-1 text-[11px] leading-4 text-stone-500">
-                    Reference images must use public HTTPS URLs that the model provider can access.
+                    Reference images must use public HTTPS URLs that the model provider can access. Upload with{" "}
+                    <a className="underline hover:text-black" href="https://litterbox.catbox.moe/?utm_source" rel="noreferrer" target="_blank">Litterbox</a>
+                    {" "}or{" "}
+                    <a className="underline hover:text-black" href="https://uguu.se/?utm_source" rel="noreferrer" target="_blank">Uguu</a>, then paste the direct image link below.
                   </p>
                 </div>
               </div>
