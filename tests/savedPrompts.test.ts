@@ -123,6 +123,10 @@ test("saved prompts persist on disk and update by id", async () => {
     assert.deepEqual(getSavedPrompts().prompts[0], legacy);
 
     assert.throws(() => saveSavedPrompt({ ...prompts[0], secret: "not allowed" }));
+    assert.throws(() => saveSavedPrompt({
+      ...prompts[2],
+      settings: { ...prompts[2].settings, loras: [{ source: "/private/adapter.safetensors", scale: 1 }] },
+    }));
     await writeFile(getSavedPromptsFilePath(), "{bad json", "utf8");
     await assert.rejects(initializeSavedPrompts(), /not valid JSON/);
   } finally {

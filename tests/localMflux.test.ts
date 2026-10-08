@@ -9,6 +9,7 @@ import { generateLocalMfluxImage, initializeLocalMfluxStorage, LocalMfluxError, 
 import { MFLUX_WORKER_SOURCE } from "../server/mfluxWorker.js";
 import { validateGenerateImageInput, type LocalMfluxGenerateImageInput } from "../server/validation.js";
 import type { LocalMfluxProgress } from "../shared/imageTypes.js";
+import { getMfluxInferenceSteps } from "../shared/imageModels.js";
 
 const referenceImage = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 const webpReferenceImage = "data:image/webp;base64,UklGRlAAAABXRUJQVlA4WAoAAAAQAAAAAAAAAAAAQUxQSAIAAAAASFZQOCAoAAAAcAEAnQEqAQABAAIANCWgAnQBQAAA/vgyy/9ej//zK//+ZX/Fz0IAAA==";
@@ -118,6 +119,26 @@ test("MFLUX validation enforces shared presets and advanced ranges", () => {
       assert.doesNotThrow(() => validateGenerateImageInput(input({ model: "z-image-turbo", steps, inputReference: reference })));
     }
   }
+  const loraInput = (source: string, scale = 1) => input({ model: "z-image-turbo", steps: 9, loras: [{ source, scale }] });
+  for (const source of ["/Models/My adapter.safetensors", "example/style", "example/styles:film.safetensors"]) {
+    for (const scale of [-2, 0, 0.7, 2]) assert.doesNotThrow(() => validateGenerateImageInput(loraInput(source, scale)));
+  }
+  for (const source of ["", "--model", "relative.safetensors", "../style.safetensors", "https://example.com/adapter.safetensors", "/Models/adapter.bin", "example/styles:../adapter.safetensors", "example/styles:*.safetensors", "example/style?token=secret", "/Models/bad\0.safetensors"]) {
+    assert.throws(() => validateGenerateImageInput(loraInput(source)));
+  }
+  for (const scale of [NaN, Infinity, -2.1, 2.1]) assert.throws(() => validateGenerateImageInput(loraInput("example/style", scale)));
+  assert.throws(() => validateGenerateImageInput(input({ loras: [{ source: "example/style", scale: 1 }] })));
+  assert.throws(() => validateGenerateImageInput({ ...loraInput("example/style"), loras: Array(5).fill({ source: "example/style", scale: 1 }) }));
+  const normalized = validateGenerateImageInput(loraInput("  example/style  "));
+  assert.equal(normalized.provider === "mflux" && normalized.loras?.[0].source, "example/style");
+});
+
+test("MFLUX counts the denoising steps for each selected schedule", () => {
+  assert.deepEqual([4, 6, 9].map((steps) => getMfluxInferenceSteps("z-image-turbo", steps, true)), [3, 4, 6]);
+  assert.deepEqual([4, 6, 9].map((steps) => getMfluxInferenceSteps("z-image-turbo", steps, false)), [4, 6, 9]);
+  for (const hasReference of [false, true]) {
+    assert.deepEqual([1, 2, 3, 4].map((steps) => getMfluxInferenceSteps("flux2-klein-4b", steps, hasReference)), [1, 2, 3, 4]);
+  }
 });
 
 test("MFLUX adapter returns and cleans a generated raster", {
@@ -152,6 +173,11 @@ if (model === "z-image-turbo") {
     if (process.argv[process.argv.indexOf("--image-strength") + 1] !== "0.4") process.exit(2);
     steps -= Math.max(1, Math.floor(steps * 0.4));
   } else if (process.argv.includes("--image-strength")) process.exit(2);
+}
+if (prompt === "lora image") {
+  const start = process.argv.indexOf("--lora-paths");
+  const scales = process.argv.indexOf("--lora-scales");
+  if (start < 0 || scales !== start + 3 || basename(process.argv[start + 1]) !== "test adapter.safetensors" || process.argv[start + 2] !== "example/style:adapter.safetensors" || process.argv[scales + 1] !== "0" || process.argv[scales + 2] !== "-0.5") process.exit(2);
 }
 if (referenceIndex >= 0) {
   if (readdirSync(dirname(process.argv[referenceIndex + 1])).some((name) => /^reference\\.(?:jpg|png|webp)$/.test(name))) process.exit(2);
@@ -223,8 +249,11 @@ process.exit(resizeStatus);
       }), undefined, (update) => progress.push(update));
       assert.equal(zImageResult.mediaType, "image/png");
       const total = reference ? 6 : 9;
+      assert.equal(progress[0]?.phase, "loading");
+      assert.ok(progress.every((update) => update.total === total), "The total must stay consistent from loading to decoding");
       assert.ok(progress.some((update) => update.phase === "generating" && update.step === Math.floor(total / 2) && update.total === total && update.etaSeconds === 20 && update.secondsPerStep === 2));
       assert.equal(progress.at(-1)?.phase, "decoding");
+      assert.equal(progress.at(-1)?.step, total);
       assert.deepEqual(await readdir(temporaryRoot), []);
     }
     const webpResult = await generateLocalMfluxImage(input({
@@ -232,6 +261,17 @@ process.exit(resizeStatus);
       inputReference: webpReferenceImage,
     }));
     assert.equal(webpResult.mediaType, "image/png");
+    const adapter = path.join(directory, "test adapter.safetensors");
+    await writeFile(adapter, "fake adapter");
+    await generateLocalMfluxImage(input({
+      model: "z-image-turbo", steps: 9, prompt: "lora image",
+      loras: [{ source: adapter, scale: 0 }, { source: "example/style:adapter.safetensors", scale: -0.5 }],
+    }));
+    assert.equal(await readFile(adapter, "utf8"), "fake adapter");
+    await assert.rejects(generateLocalMfluxImage(input({
+      model: "z-image-turbo", steps: 9, loras: [{ source: path.join(directory, "missing.safetensors"), scale: 1 }],
+    })), (error) => error instanceof LocalMfluxError && error.type === "local_mflux_lora_error");
+    assert.deepEqual(await readdir(temporaryRoot), []);
     const downloadProgress: LocalMfluxProgress[] = [];
     await generateLocalMfluxImage(input({ prompt: "download" }), undefined, (progress) => downloadProgress.push(progress));
     assert.ok(downloadProgress.some((progress) => progress.phase === "downloading" && progress.download?.completed === 2));
@@ -361,6 +401,49 @@ test("MFLUX warm worker reuses weights, isolates requests, and releases memory o
     assert.equal(history.at(-1)?.num_inference_steps, 6);
     assert.equal(history.at(-1)?.scheduler, "linear");
     await assertIdleFiles();
+
+    const adapter = path.join(directory, "local adapter.safetensors");
+    await writeFile(adapter, "fake adapter");
+    const loras = [{ source: adapter, scale: 0.7 }, { source: "example/style:adapter.safetensors", scale: 0 }];
+    const loraProgress: LocalMfluxProgress[] = [];
+    await generateLocalMfluxImage(input({ model: "z-image-turbo", steps: 9, prompt: "first", loras }), undefined, (progress) => loraProgress.push(progress));
+    history = await events();
+    const adaptedLoad = history.filter((event) => event.event === "load").at(-1)!;
+    assert.notEqual(adaptedLoad.pid, zImagePid);
+    assert.throws(() => process.kill(zImagePid, 0), { code: "ESRCH" });
+    assert.equal(adaptedLoad.lora_paths[0], adapter);
+    assert.ok(adaptedLoad.lora_paths[1].includes("python3.cache"));
+    assert.deepEqual(adaptedLoad.lora_scales, [0.7, 0]);
+    assert.ok(loraProgress.some((progress) => progress.phase === "downloading"));
+    assert.ok(!JSON.stringify(loraProgress).includes(adapter));
+    await request({ model: "z-image-turbo", steps: 9, prompt: "second", loras });
+    assert.equal((await events()).at(-1)?.pid, adaptedLoad.pid);
+
+    const stronger = loras.map((lora, index) => ({ ...lora, scale: index === 0 ? 1 : -0.5 }));
+    await request({ model: "z-image-turbo", steps: 9, loras: stronger });
+    history = await events();
+    const strongerLoad = history.filter((event) => event.event === "load").at(-1)!;
+    assert.notEqual(strongerLoad.pid, adaptedLoad.pid);
+    assert.deepEqual(strongerLoad.lora_scales, [1, -0.5]);
+    await request({ model: "z-image-turbo", steps: 9, loras: [stronger[0], { source: "another/style:adapter.safetensors", scale: -0.5 }] });
+    const differentLoad = (await events()).filter((event) => event.event === "load").at(-1)!;
+    assert.notEqual(differentLoad.pid, strongerLoad.pid);
+    assert.notEqual(differentLoad.lora_paths[1], strongerLoad.lora_paths[1]);
+    await request({ model: "z-image-turbo", steps: 9, loras: [] });
+    const plainLoad = (await events()).filter((event) => event.event === "load").at(-1)!;
+    assert.notEqual(plainLoad.pid, differentLoad.pid);
+    assert.equal(plainLoad.lora_paths, undefined);
+
+    await request({ model: "z-image-turbo", steps: 9, lowRam: true, loras });
+    history = await events();
+    assert.equal(history.at(-1)?.low_ram, true);
+    assert.deepEqual(history.filter((event) => event.event === "load").at(-1)?.lora_scales, [0.7, 0]);
+    assert.deepEqual(await readdir(temporaryRoot), []);
+    await writeFile(adapter, "invalid adapter");
+    await assert.rejects(request({ model: "z-image-turbo", steps: 9, loras }), (error) =>
+      error instanceof LocalMfluxError && !error.message.includes(adapter));
+    assert.deepEqual(await readdir(temporaryRoot), []);
+    assert.equal(await readFile(adapter, "utf8"), "invalid adapter");
 
     process.env.MFLUX_FLUX2_BINARY = cliBinary;
     await request({ lowRam: true });

@@ -116,6 +116,8 @@ threading.Thread(target=watch_parent, daemon=True).start()
 
 def main():
     observe_downloads()
+    import huggingface_hub as hub
+    from huggingface_hub.errors import LocalEntryNotFoundError
     import mlx.core as mx
     from mflux.callbacks.instances.battery_saver import BatterySaver
     from mflux.models.common.resolution.config_resolution import ConfigResolution
@@ -134,6 +136,16 @@ def main():
         global resource_error
         nonlocal model
         resource_error = None
+        if "--lora-paths" in arguments:
+            for index in range(arguments.index("--lora-paths") + 1, arguments.index("--lora-scales")):
+                source = arguments[index]
+                if not Path(source).is_absolute() and ":" in source:
+                    # Use the exact Hub file: older MFLUX collection aliases cache by basename across repos.
+                    repo, filename = source.split(":", 1)
+                    try:
+                        arguments[index] = hub.hf_hub_download(repo_id=repo, filename=filename, local_files_only=True)
+                    except LocalEntryNotFoundError:
+                        arguments[index] = hub.hf_hub_download(repo_id=repo, filename=filename)
         sys.argv = [binary, *arguments]
         if one_shot:
             # Keep the CLI's Low RAM callbacks and encoder cleanup in one-shot mode.
@@ -145,6 +157,8 @@ def main():
                 "quantize": args.quantize,
                 "model_config": ConfigResolution.resolve_restricted(args.model, "z-image-turbo" if pipeline == "z-image-turbo" else "flux2-klein-4b"),
             }
+            if args.lora_paths:
+                options.update(lora_paths=args.lora_paths, lora_scales=args.lora_scales, bake_lora=True)
             model = getattr(command, class_name)(**options)
             model.callbacks.register(BatterySaver(args.battery_percentage_stop_limit))
             # ponytail: one model per worker; Node restarts it when load settings change.

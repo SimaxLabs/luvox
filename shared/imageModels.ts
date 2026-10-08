@@ -45,6 +45,8 @@ export const MFLUX_IMAGE_RESOLUTIONS = [
 
 export const MFLUX_IMAGE_QUANTIZATIONS = [null, 8, 6, 5, 4, 3] as const;
 export const MFLUX_VAE_TILE_SIZES = [128, 256, 512] as const;
+export const MFLUX_Z_IMAGE_REFERENCE_STRENGTH = 0.4;
+export const MFLUX_LORA_LIMITS = { count: 4, sourceLength: 1_024, minScale: -2, maxScale: 2, defaultScale: 1 } as const;
 
 export const MFLUX_IMAGE_MODEL = {
   id: "z-image-turbo",
@@ -118,4 +120,11 @@ export function getMfluxImageModel(id: string) {
 
 export function getMfluxImageResolution(id: string) {
   return MFLUX_IMAGE_RESOLUTIONS.find((resolution) => resolution.id === id);
+}
+
+export function getMfluxInferenceSteps(model: string, steps: number, hasReference: boolean): number {
+  // MFLUX starts image-to-image partway through the selected schedule.
+  return model === "z-image-turbo" && hasReference
+    ? steps - Math.max(1, Math.floor(steps * MFLUX_Z_IMAGE_REFERENCE_STRENGTH))
+    : steps;
 }

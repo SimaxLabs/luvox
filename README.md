@@ -65,6 +65,8 @@ MFLUX_Z_IMAGE_TURBO_BINARY=/absolute/path/to/mflux-generate-z-image-turbo
 
 FLUX.2 editing also requires `mflux-generate-flux2-edit` beside the main executable or on `PATH`.
 
+For Z-Image Turbo, open **Advanced → LoRA adapters** to add up to four compatible adapters. Enter an absolute `.safetensors` path or Hugging Face `owner/repo[:file.safetensors]`; strength defaults to `1` and accepts `-2` to `2`. Include any required trigger words in your prompt. LoRA selections are session-only and are not saved with prompts.
+
 Missing model resources download automatically on first generation, with progress shown in the app. Stopping keeps cached resources for retry. Gated models may require accepting their terms and running `hf auth login` on the host. MFLUX and its dependencies must be installed separately.
 
 Use **Fast** for lower-memory quantization or **Low RAM** to reduce peak memory and unload the model after each image. Otherwise, model reuse speeds up repeat generations while keeping memory occupied.

@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
-import { getMfluxImageModel, getMfluxImageResolution, MFLUX_IMAGE_MODELS } from "../shared/imageModels.js";
+import { getMfluxImageModel, getMfluxImageResolution, getMfluxInferenceSteps, MFLUX_IMAGE_MODELS, MFLUX_Z_IMAGE_REFERENCE_STRENGTH } from "../shared/imageModels.js";
 import type { ImageGenerationResponse, LocalMfluxProgress } from "../shared/imageTypes.js";
 import type { LocalH3FrameFitId } from "../shared/localH3.js";
 import type { LocalMfluxGenerateImageInput } from "./validation.js";
@@ -20,7 +20,6 @@ const MFLUX_OWNER_FILE = ".luvox-owned";
 const MFLUX_OWNER_KIND = "luvox-mflux-request";
 const MFLUX_WORKER_KIND = "luvox-mflux-worker";
 const MFLUX_OWNER_MAX_BYTES = 4_096;
-const Z_IMAGE_REFERENCE_STRENGTH = 0.4;
 const execFileAsync = promisify(execFile);
 const activeDirectories = new Set<string>();
 const shutdownController = new AbortController();
@@ -526,7 +525,7 @@ async function runMflux(
   const keepAlive = input.lowRam ? 0 : keepAliveMilliseconds();
   const pipeline = input.model === "z-image-turbo" ? "z-image-turbo" : input.inputReference ? "flux2-edit" : "flux2";
   const python = await mfluxPython(binary, pipeline);
-  const key = JSON.stringify([binary, pipeline, input.model, input.quantization, input.vaeTiling ? input.vaeTileSize : null]);
+  const key = JSON.stringify([binary, pipeline, input.model, input.quantization, input.vaeTiling ? input.vaeTileSize : null, input.loras ?? []]);
   if (warmWorker && (!keepAlive || !python || warmWorker.key !== key)) await stopWarmWorker();
   assertMfluxMayContinue(signal);
   const worker = python ? warmWorker ?? await startWarmWorker(python, binary, pipeline, key, !keepAlive) : undefined;
@@ -535,10 +534,7 @@ async function runMflux(
     await stopWarmWorker();
     assertMfluxMayContinue(signal);
   }
-  // Z-Image starts partway through the denoising loop when an initial image is supplied.
-  const totalSteps = input.model === "z-image-turbo" && input.inputReference
-    ? input.steps - Math.max(1, Math.floor(input.steps * Z_IMAGE_REFERENCE_STRENGTH))
-    : input.steps;
+  const totalSteps = getMfluxInferenceSteps(input.model, input.steps, Boolean(input.inputReference));
   return new Promise((resolve, reject) => {
     let generationRemaining = timeoutMilliseconds();
     let downloadRemaining = timeoutMilliseconds("MFLUX_DOWNLOAD_TIMEOUT_MINUTES", 120);
@@ -607,7 +603,7 @@ async function runMflux(
           else if (/PermissionError|Read-only file system/.test(line)) reportedError = mfluxEngineError("cache_permission");
           else if (/ModuleNotFoundError|ImportError/.test(line)) reportedError = mfluxEngineError("dependencies");
           else if (/ConnectError|ConnectionError|ReadTimeout|LocalEntryNotFoundError/.test(line)) reportedError = mfluxEngineError("network");
-          if (/Downloading model from HuggingFace:|^\s*Fetching \d+ files:/.test(line)) {
+          if (/Downloading (?:model|LoRA) from HuggingFace:|Downloading LoRA '.+' from |^\s*Fetching \d+ files:/.test(line)) {
             const files = /\|\s*(\d+)\/(\d+)\s*\[/.exec(line);
             resourceProgress("downloading", files ? { completed: Number(files[1]), total: Number(files[2]), unit: "files" } : undefined);
             if (files && Number(files[2]) > 0 && files[1] === files[2]) resourceProgress("loading");
@@ -772,7 +768,7 @@ export async function generateLocalMfluxImage(
     ? AbortSignal.any([signal, shutdownController.signal])
     : shutdownController.signal;
   assertMfluxMayContinue(operationSignal);
-  onProgress?.({ phase: "loading", step: 0, total: input.steps, percent: 0 });
+  onProgress?.({ phase: "loading", step: 0, total: getMfluxInferenceSteps(input.model, input.steps, Boolean(input.inputReference)), percent: 0 });
 
   generationReserved = true;
   let finishCompletion: (() => void) | undefined;
@@ -781,6 +777,16 @@ export async function generateLocalMfluxImage(
   });
   let directory: string | undefined;
   try {
+    for (const lora of input.loras ?? []) {
+      if (!path.isAbsolute(lora.source)) continue;
+      try {
+        const info = await stat(lora.source);
+        if (!info.isFile() || info.size === 0) throw new Error("Invalid adapter file");
+        accessSync(lora.source, fsConstants.R_OK);
+      } catch {
+        throw new LocalMfluxError("A selected LoRA file is missing, empty, or unreadable on the Luvox host.", 400, "local_mflux_lora_error", false);
+      }
+    }
     directory = await createMfluxDirectory(binary, MFLUX_OWNER_KIND);
     const promptPath = path.join(directory, "prompt.txt");
     const outputPath = path.join(directory, "output.png");
@@ -795,6 +801,10 @@ export async function generateLocalMfluxImage(
     ];
     if (input.quantization !== null) args.push("--quantize", String(input.quantization));
     if (input.seed !== undefined) args.push("--seed", String(input.seed));
+    if (input.loras?.length) {
+      args.push("--lora-paths", ...input.loras.map((lora) => lora.source));
+      args.push("--lora-scales", ...input.loras.map((lora) => String(lora.scale)));
+    }
     if (input.lowRam) args.push("--low-ram");
     if (input.vaeTiling || input.lowRam) args.push("--vae-tiling", "--vae-tile-size", String(input.vaeTileSize));
     if (input.inputReference) {
@@ -810,7 +820,7 @@ export async function generateLocalMfluxImage(
           input.referenceFit,
           operationSignal,
         ));
-        if (model.id === "z-image-turbo") args.push("--image-strength", String(Z_IMAGE_REFERENCE_STRENGTH));
+        if (model.id === "z-image-turbo") args.push("--image-strength", String(MFLUX_Z_IMAGE_REFERENCE_STRENGTH));
       } finally {
         await rm(referencePath, { force: true });
       }

@@ -44,6 +44,8 @@ def build_parser():
     parser.add_argument("--seed", type=int, nargs="+", default=[123])
     parser.add_argument("--guidance", type=float)
     parser.add_argument("--image-strength", type=float, default=0.4)
+    parser.add_argument("--lora-paths", nargs="*")
+    parser.add_argument("--lora-scales", nargs="*", type=float)
     parser.add_argument("--low-ram", action="store_true")
     parser.add_argument("--vae-tiling", action="store_true")
     parser.set_defaults(battery_percentage_stop_limit=10, scheduler="linear")
@@ -53,6 +55,19 @@ def build_parser():
         args = original_parse()
         if args.image_paths:
             args.image_paths = [args.image_paths]
+        if args.lora_paths:
+            import huggingface_hub as hub
+            resolved = []
+            for source in args.lora_paths:
+                if Path(source).is_absolute():
+                    resolved.append(source)
+                else:
+                    resource = "lora-" + source.replace("/", "-").replace(":", "-")
+                    try:
+                        resolved.append(hub.snapshot_download(resource, local_files_only=True))
+                    except LocalEntryNotFoundError:
+                        resolved.append(hub.snapshot_download(resource))
+            args.lora_paths = resolved
         return args
 
     parser.parse_args = parse_args
@@ -86,6 +101,13 @@ class Model:
         self.callbacks = types.SimpleNamespace(register=lambda callback: self.registered.append(callback))
         self.registered = []
         self.tiling_config = None
+        if options.get("lora_paths"):
+            assert type(self).__name__ == "ZImage"
+            assert options["bake_lora"] is True
+            assert len(options["lora_paths"]) == len(options["lora_scales"])
+            for file in options["lora_paths"]:
+                if Path(file).read_text() == "invalid adapter":
+                    raise ValueError("private adapter path must not escape: " + file)
         record("load", pipeline=type(self).__name__, **options)
 
     def generate_image(self, **options):
@@ -139,7 +161,8 @@ class FakeProgress:
         self.display()
 
 
-def snapshot_download(repo_id, *, local_files_only=False, tqdm_class=FakeProgress):
+def snapshot_download(repo_id, *, filename=None, local_files_only=False, tqdm_class=FakeProgress):
+    repo_id = repo_id.replace("/", "-") + ("-" + filename if filename else "")
     resource = cache / repo_id
     if resource.exists():
         record("cached", resource=repo_id)
@@ -178,7 +201,8 @@ def snapshot_download(repo_id, *, local_files_only=False, tqdm_class=FakeProgres
 
 def cli(model_class):
     args = build_parser().parse_args()
-    model = model_class(quantize=args.quantize, model_config=args.model)
+    loras = dict(lora_paths=args.lora_paths, lora_scales=args.lora_scales, bake_lora=True) if args.lora_paths else {}
+    model = model_class(quantize=args.quantize, model_config=args.model, **loras)
     model.callbacks.register(5)
     options = dict(seed=args.seed[0], prompt=Path(args.prompt_file).read_text(), width=args.width,
                    height=args.height, num_inference_steps=args.steps,
@@ -192,6 +216,7 @@ def cli(model_class):
 
 
 module("huggingface_hub", snapshot_download=snapshot_download, hf_hub_download=snapshot_download)
+module("huggingface_hub.errors", LocalEntryNotFoundError=LocalEntryNotFoundError)
 module("tqdm.auto", tqdm=FakeProgress)
 module("mlx.core", clear_cache=lambda: None)
 module("mflux.callbacks.instances.battery_saver", BatterySaver=lambda limit: limit)
