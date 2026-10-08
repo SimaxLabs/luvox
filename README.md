@@ -92,6 +92,10 @@ FLUX.2 defaults to the Fast setup with 1024p / 1:1, four steps, and 4-bit quanti
 
 Before using a model in Luvox, run its MFLUX executable successfully once in Terminal so its weights are downloaded and cached. Luvox does not download or bundle weights, keeps prompts and references in a private temporary directory, allows only one MFLUX generation at a time, and removes temporary files after each request. MFLUX and model weights have separate licenses; review them before use.
 
+With standard pip/uv MFLUX executables, Luvox reuses one Python worker and its loaded model between images. Repeated requests with the same model, generation/edit pipeline, quantization, and VAE tiling settings avoid interpreter startup and model loading. Changing the prompt, seed, steps, guidance, or resolution does not reload the model. The worker uses the Python interpreter from the installed MFLUX executable; custom executable wrappers retain the one-shot CLI behavior.
+
+The model and its text encoder stay in memory, increasing RAM usage during and between generations. Luvox releases them after **five idle minutes**, on a model/configuration switch, cancellation, failure, or server shutdown. Set `MFLUX_KEEP_ALIVE_MINUTES` in `.env` to change the idle period (0–240 minutes); `0` disables reuse. **Low RAM** always uses the one-shot CLI and releases memory after each image. Prompts, references, and outputs are still removed after every request; only the worker bootstrap script and ownership marker remain until the worker exits.
+
 During local generation, the preview monitor streams MFLUX's inference steps, elapsed time, step ETA, and seconds per step. The ETA covers the remaining inference loop; final image decoding can add time.
 
 ## Local generation with h3.c
@@ -123,7 +127,7 @@ When using OpenRouter, Luvox creates no local generation files. Except for promp
 
 OpenRouter and model providers have separate data practices. Review OpenRouter's [privacy policy](https://openrouter.ai/privacy) and [provider logging documentation](https://openrouter.ai/docs/features/privacy-and-logging). Closing Luvox does not cancel provider work already submitted.
 
-Local MFLUX and h3.c run only on a compatible Mac. MFLUX uses an owner-marked private system temporary directory for each request, removes it when the request finishes or stops, and removes stale owned directories at startup after an abrupt server exit. h3.c temporarily stores app-owned jobs, outputs, and uploaded references under `.h3-jobs` or `H3_JOBS_DIR`; per-tab tokens isolate them. Luvox cleans h3.c files when a job is deleted or aborted, on Clear, reload/close cleanup, startup, graceful shutdown, or after a browser workspace misses its five-minute lease.
+Local MFLUX and h3.c run only on a compatible Mac. MFLUX uses an owner-marked private system temporary directory for each request, removes it when the request finishes or stops, and removes stale owned directories at startup after an abrupt server exit. Its reusable worker retains model weights, with a separate owner-marked directory containing only bootstrap code and an ownership marker; this directory is removed when the worker exits. The worker also exits if its Luvox parent process disappears. h3.c temporarily stores app-owned jobs, outputs, and uploaded references under `.h3-jobs` or `H3_JOBS_DIR`; per-tab tokens isolate them. Luvox cleans h3.c files when a job is deleted or aborted, on Clear, reload/close cleanup, startup, graceful shutdown, or after a browser workspace misses its five-minute lease.
 
 ## License
 

@@ -1,6 +1,6 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { constants as fsConstants, accessSync, rmSync, statSync } from "node:fs";
-import { chmod, lstat, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -10,6 +10,7 @@ import type { ImageGenerationResponse, LocalMfluxProgress } from "../shared/imag
 import type { LocalH3FrameFitId } from "../shared/localH3.js";
 import type { LocalMfluxGenerateImageInput } from "./validation.js";
 import { rasterMediaType } from "./validation.js";
+import { MFLUX_WORKER_SOURCE } from "./mfluxWorker.js";
 
 const MAX_OUTPUT_BYTES = 50 * 1024 * 1024;
 const MAX_REFERENCE_PIXELS = 4_096 * 4_096;
@@ -17,6 +18,7 @@ const MAX_REFERENCE_ASPECT_RATIO = 16;
 const MFLUX_TEMP_PREFIX = "luvox-mflux-";
 const MFLUX_OWNER_FILE = ".luvox-owned";
 const MFLUX_OWNER_KIND = "luvox-mflux-request";
+const MFLUX_WORKER_KIND = "luvox-mflux-worker";
 const MFLUX_OWNER_MAX_BYTES = 4_096;
 const execFileAsync = promisify(execFile);
 const activeDirectories = new Set<string>();
@@ -27,6 +29,12 @@ let generationReserved = false;
 let stopActive: (() => void) | undefined;
 let shuttingDown = false;
 let storageBlocked = false;
+let warmWorker: {
+  child: ChildProcess;
+  key: string;
+  closed: Promise<void>;
+  idleTimer?: ReturnType<typeof setTimeout>;
+} | undefined;
 
 export class LocalMfluxError extends Error {
   constructor(
@@ -75,6 +83,7 @@ export function getAvailableLocalMfluxModels(): string[] {
   if (!isLocalMfluxSupported() || storageBlocked) return [];
   try {
     timeoutMilliseconds();
+    keepAliveMilliseconds();
   } catch {
     return [];
   }
@@ -86,6 +95,19 @@ function timeoutMilliseconds(): number {
   if (!Number.isFinite(minutes) || minutes < 1 || minutes > 240) {
     throw new LocalMfluxError(
       "MFLUX_TIMEOUT_MINUTES must be between 1 and 240.",
+      503,
+      "local_mflux_configuration_error",
+      false,
+    );
+  }
+  return minutes * 60_000;
+}
+
+function keepAliveMilliseconds(): number {
+  const minutes = Number(process.env.MFLUX_KEEP_ALIVE_MINUTES ?? 5);
+  if (!Number.isFinite(minutes) || minutes < 0 || minutes > 240) {
+    throw new LocalMfluxError(
+      "MFLUX_KEEP_ALIVE_MINUTES must be between 0 and 240.",
       503,
       "local_mflux_configuration_error",
       false,
@@ -138,6 +160,7 @@ function processGroupExists(pid: number): boolean {
 async function stopOwnedProcessGroup(
   directory: string,
   binary: string | undefined,
+  worker = false,
 ): Promise<boolean> {
   if (!binary) return false;
   const { stdout } = await execFileAsync(
@@ -145,7 +168,7 @@ async function stopOwnedProcessGroup(
     ["-axo", "pgid=,command="],
     { encoding: "utf8", env: childEnvironment(), maxBuffer: 1024 * 1024, timeout: 5_000 },
   );
-  const promptPath = path.join(directory, "prompt.txt");
+  const promptPath = path.join(directory, worker ? "worker.py" : "prompt.txt");
   const processGroups = new Set(stdout.split("\n").flatMap((line) => {
     const match = /^\s*(\d+)\s+(.+)$/.exec(line);
     return match && match[2].includes(binary) && match[2].includes(promptPath) ? [Number(match[1])] : [];
@@ -203,7 +226,7 @@ export async function initializeLocalMfluxStorage(): Promise<void> {
         binary?: unknown;
       };
       if (
-        owner.kind !== MFLUX_OWNER_KIND ||
+        (owner.kind !== MFLUX_OWNER_KIND && owner.kind !== MFLUX_WORKER_KIND) ||
         owner.version !== 1 ||
         typeof owner.pid !== "number"
       ) {
@@ -214,7 +237,7 @@ export async function initializeLocalMfluxStorage(): Promise<void> {
         storageBlocked = true;
         continue;
       }
-      if (!await stopOwnedProcessGroup(candidate, typeof owner.binary === "string" ? owner.binary : undefined)) {
+      if (!await stopOwnedProcessGroup(candidate, typeof owner.binary === "string" ? owner.binary : undefined, owner.kind === MFLUX_WORKER_KIND)) {
         storageBlocked = true;
         continue;
       }
@@ -372,22 +395,132 @@ function parseClock(value: string): number | undefined {
   return value.split(":").reduce((seconds, part) => seconds * 60 + Number(part), 0);
 }
 
-function runMflux(
+async function createMfluxDirectory(binary: string, kind: string): Promise<string> {
+  const directory = await mkdtemp(path.join(os.tmpdir(), MFLUX_TEMP_PREFIX));
+  activeDirectories.add(directory);
+  try {
+    await chmod(directory, 0o700);
+    const owner = `${JSON.stringify({ kind, version: 1, pid: process.pid, binary })}\n`;
+    if (Buffer.byteLength(owner) > MFLUX_OWNER_MAX_BYTES) {
+      throw new LocalMfluxError("The configured MFLUX executable path is too long.", 503, "local_mflux_configuration_error", false);
+    }
+    await writeFile(path.join(directory, MFLUX_OWNER_FILE), owner, { flag: "wx", mode: 0o600 });
+    return directory;
+  } catch (error) {
+    await rm(directory, { recursive: true, force: true });
+    activeDirectories.delete(directory);
+    throw error;
+  }
+}
+
+async function mfluxPython(binary: string, pipeline: string): Promise<string | undefined> {
+  // Standard pip/uv entry points name their own interpreter. Custom wrappers keep using the CLI.
+  const file = await open(binary, "r").catch(() => undefined);
+  if (!file) return undefined;
+  try {
+    const buffer = Buffer.alloc(4_096);
+    const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
+    if (bytesRead === buffer.length) return undefined;
+    const source = buffer.toString("utf8", 0, bytesRead).replaceAll("\r\n", "\n");
+    const header = /^#!(\/[^\n]+\/python(?:\d+(?:\.\d+)*)?)\n(?:# -\*- coding: utf-8 -\*-\n)?(?:import re\n)?import sys\nfrom (mflux\.[\w.]+) import main\nif __name__ == ["']__main__["']:\n/.exec(source);
+    if (!header) return undefined;
+    const module = pipeline === "qwen-edit" ? "mflux.models.qwen.cli.qwen_image_edit_generate"
+      : pipeline === "flux2-edit" ? "mflux.models.flux2.cli.flux2_edit_generate" : "mflux.models.flux2.cli.flux2_generate";
+    const body = source.slice(header[0].length).trimEnd().replaceAll("'", '"');
+    if (header[2] !== module || ![
+      "    sys.exit(main())",
+      '    sys.argv[0] = re.sub(r"(-script\\.pyw|\\.exe)?$", "", sys.argv[0])\n    sys.exit(main())',
+      '    if sys.argv[0].endswith("-script.pyw"):\n        sys.argv[0] = sys.argv[0][:-11]\n    elif sys.argv[0].endswith(".exe"):\n        sys.argv[0] = sys.argv[0][:-4]\n    sys.exit(main())',
+    ].includes(body)) return undefined;
+    accessSync(header[1], fsConstants.X_OK);
+    return header[1];
+  } catch {
+    return undefined;
+  } finally {
+    await file.close();
+  }
+}
+
+async function stopWarmWorker(): Promise<void> {
+  const worker = warmWorker;
+  if (!worker) return;
+  worker.key = "";
+  clearTimeout(worker.idleTimer);
+  signalChild(worker.child, "SIGTERM");
+  const killTimer = setTimeout(() => signalChild(worker.child, "SIGKILL"), 5_000);
+  killTimer.unref();
+  await worker.closed;
+  clearTimeout(killTimer);
+}
+
+async function startWarmWorker(python: string, binary: string, pipeline: string, key: string): Promise<NonNullable<typeof warmWorker>> {
+  const directory = await createMfluxDirectory(python, MFLUX_WORKER_KIND);
+  try {
+    const script = path.join(directory, "worker.py");
+    await writeFile(script, MFLUX_WORKER_SOURCE, { mode: 0o600 });
+    assertMfluxMayContinue();
+    const child = spawn(python, ["-u", "-B", script, binary, pipeline, String(process.pid)], {
+      cwd: directory,
+      detached: true,
+      env: childEnvironment(),
+      shell: false,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const worker: NonNullable<typeof warmWorker> = {
+      child,
+      key,
+      closed: new Promise<void>((resolve) => {
+        child.once("close", () => {
+          worker.key = "";
+          clearTimeout(worker.idleTimer);
+          void rm(directory, { recursive: true, force: true }).then(() => {
+            activeDirectories.delete(directory);
+          }).catch(() => {
+            storageBlocked = true;
+          }).finally(() => {
+            if (warmWorker === worker) warmWorker = undefined;
+            resolve();
+          });
+        });
+      }),
+    };
+    // Errors also cause close; never leave an idle pipe error unhandled.
+    child.on("error", () => {});
+    child.once("exit", () => { worker.key = ""; });
+    child.stdin?.on("error", () => signalChild(child, "SIGKILL"));
+    warmWorker = worker;
+    return worker;
+  } catch (error) {
+    await rm(directory, { recursive: true, force: true });
+    activeDirectories.delete(directory);
+    throw error;
+  }
+}
+
+async function runMflux(
   binary: string,
   args: string[],
   directory: string,
-  totalSteps: number,
+  input: LocalMfluxGenerateImageInput,
   signal?: AbortSignal,
   onProgress?: (progress: LocalMfluxProgress) => void,
 ): Promise<void> {
+  const keepAlive = input.lowRam ? 0 : keepAliveMilliseconds();
+  const pipeline = input.model === "qwen-image-edit" ? "qwen-edit" : input.inputReference ? "flux2-edit" : "flux2";
+  const python = keepAlive ? await mfluxPython(binary, pipeline) : undefined;
+  const key = JSON.stringify([binary, pipeline, input.model, input.quantization, input.vaeTiling ? input.vaeTileSize : null]);
+  if (warmWorker && (!python || warmWorker.key !== key)) await stopWarmWorker();
+  assertMfluxMayContinue(signal);
+  const worker = python ? warmWorker ?? await startWarmWorker(python, binary, pipeline, key) : undefined;
+  if (worker) clearTimeout(worker.idleTimer);
+  if (signal?.aborted) {
+    await stopWarmWorker();
+    assertMfluxMayContinue(signal);
+  }
+  const totalSteps = input.steps;
   return new Promise((resolve, reject) => {
-    if (signal?.aborted) {
-      reject(new LocalMfluxError("MFLUX generation was stopped.", 499, "local_mflux_aborted", false));
-      return;
-    }
-
     const timeoutMs = timeoutMilliseconds();
-    const child = spawn(binary, args, {
+    const child = worker?.child ?? spawn(binary, args, {
       cwd: directory,
       detached: true,
       env: childEnvironment(),
@@ -399,6 +532,7 @@ function runMflux(
     let stopError: LocalMfluxError | undefined;
     let killTimer: ReturnType<typeof setTimeout> | undefined;
     let progressBuffer = "";
+    let controlBuffer = "";
     let lastStep = -1;
 
     const appendDiagnostics = (chunk: Buffer) => {
@@ -421,7 +555,37 @@ function runMflux(
         });
       }
     };
-    child.stdout?.on("data", appendDiagnostics);
+    const finish = (error?: LocalMfluxError) => {
+      if (settled) return;
+      settled = true;
+      if (activeChild === child) activeChild = undefined;
+      stopActive = undefined;
+      clearTimeout(timeout);
+      if (killTimer) clearTimeout(killTimer);
+      signal?.removeEventListener("abort", abort);
+      child.stdout?.off("data", worker ? appendControl : appendDiagnostics);
+      child.stderr?.off("data", appendDiagnostics);
+      child.off("error", onError);
+      child.off("close", onClose);
+      if (error) reject(error);
+      else {
+        if (worker) {
+          worker.idleTimer = setTimeout(() => { void stopWarmWorker(); }, keepAlive);
+          worker.idleTimer.unref();
+        }
+        resolve();
+      }
+    };
+    const appendControl = (chunk: Buffer) => {
+      if (stopError) return;
+      controlBuffer = (controlBuffer + chunk.toString("utf8")).slice(0, 129);
+      if (controlBuffer === "done\n") {
+        if (!stopError) finish();
+      } else if (controlBuffer.length > 128 || controlBuffer.includes("\n")) {
+        stop(new LocalMfluxError("MFLUX generation failed.", 500, "local_mflux_error", false));
+      }
+    };
+    child.stdout?.on("data", worker ? appendControl : appendDiagnostics);
     child.stderr?.on("data", appendDiagnostics);
 
     const stop = (error: LocalMfluxError) => {
@@ -440,28 +604,16 @@ function runMflux(
     }, timeoutMs);
     timeout.unref();
 
-    child.once("error", () => {
-      if (settled) return;
-      settled = true;
-      if (activeChild === child) activeChild = undefined;
-      stopActive = undefined;
-      clearTimeout(timeout);
-      if (killTimer) clearTimeout(killTimer);
-      signal?.removeEventListener("abort", abort);
-      reject(new LocalMfluxError("MFLUX could not start.", 503, "local_mflux_spawn_error", false));
-    });
-    child.once("close", (code) => {
-      if (activeChild === child) activeChild = undefined;
-      stopActive = undefined;
-      clearTimeout(timeout);
-      if (killTimer) clearTimeout(killTimer);
-      signal?.removeEventListener("abort", abort);
-      if (settled) return;
-      settled = true;
-      if (stopError) reject(stopError);
-      else if (code === 0) resolve();
-      else reject(new LocalMfluxError("MFLUX generation failed.", 500, "local_mflux_error", false));
-    });
+    const onError = () => {
+      stopError ??= new LocalMfluxError("MFLUX could not start.", 503, "local_mflux_spawn_error", false);
+    };
+    const onClose = async (code: number | null) => {
+      if (worker) await worker.closed;
+      finish(stopError ?? (code === 0 && !worker ? undefined : new LocalMfluxError("MFLUX generation failed.", 500, "local_mflux_error", false)));
+    };
+    child.once("error", onError);
+    child.once("close", onClose);
+    if (worker) child.stdin!.write(`${JSON.stringify(args)}\n`);
   });
 }
 
@@ -522,18 +674,7 @@ export async function generateLocalMfluxImage(
   });
   let directory: string | undefined;
   try {
-    directory = await mkdtemp(path.join(os.tmpdir(), MFLUX_TEMP_PREFIX));
-    activeDirectories.add(directory);
-    await chmod(directory, 0o700);
-    const owner = `${JSON.stringify({ kind: MFLUX_OWNER_KIND, version: 1, pid: process.pid, binary })}\n`;
-    if (Buffer.byteLength(owner) > MFLUX_OWNER_MAX_BYTES) {
-      throw new LocalMfluxError("The configured MFLUX executable path is too long.", 503, "local_mflux_configuration_error", false);
-    }
-    await writeFile(
-      path.join(directory, MFLUX_OWNER_FILE),
-      owner,
-      { flag: "wx", mode: 0o600, signal: operationSignal },
-    );
+    directory = await createMfluxDirectory(binary, MFLUX_OWNER_KIND);
     const promptPath = path.join(directory, "prompt.txt");
     const outputPath = path.join(directory, "output.png");
     await writeFile(promptPath, input.prompt, { mode: 0o600, signal: operationSignal });
@@ -573,7 +714,7 @@ export async function generateLocalMfluxImage(
       binary,
       args,
       directory,
-      input.steps,
+      input,
       operationSignal,
       onProgress,
     );
@@ -595,6 +736,7 @@ export async function generateLocalMfluxImage(
     }
     return { b64Json: output.toString("base64"), mediaType };
   } catch (error) {
+    await stopWarmWorker();
     if (operationSignal.aborted) assertMfluxMayContinue(operationSignal);
     throw error;
   } finally {
@@ -615,16 +757,19 @@ export function beginLocalMfluxShutdown(): void {
   shuttingDown = true;
   shutdownController.abort();
   stopActive?.();
+  void stopWarmWorker();
 }
 
 export async function shutdownLocalMflux(): Promise<void> {
   beginLocalMfluxShutdown();
   await activeCompletion;
+  await stopWarmWorker();
 }
 
 process.once("exit", () => {
   shutdownController.abort();
   if (activeChild) signalChild(activeChild, "SIGKILL");
+  if (warmWorker) signalChild(warmWorker.child, "SIGKILL");
   for (const directory of activeDirectories) {
     try {
       rmSync(directory, { recursive: true, force: true });
