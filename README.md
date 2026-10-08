@@ -79,16 +79,16 @@ Choose **Saved prompts** beside the prompt field to open the prompt library, nam
 
 ## Local image generation with MFLUX
 
-Install and verify [MFLUX](https://github.com/mflux-community/mflux) on a Mac with Apple Silicon. Luvox automatically finds `mflux-generate-flux2`, its `mflux-generate-flux2-edit` companion, and `mflux-generate-qwen-edit` on the server process's `PATH`; set absolute paths in `.env` when the primary executables are not detected:
+Install and verify [MFLUX](https://github.com/mflux-community/mflux) on a Mac with Apple Silicon. Luvox automatically finds `mflux-generate-flux2`, its `mflux-generate-flux2-edit` companion, and `mflux-generate-z-image-turbo` on the server process's `PATH`; set absolute paths in `.env` when the primary executables are not detected:
 
 ```bash
 MFLUX_FLUX2_BINARY=/absolute/path/to/mflux-generate-flux2
-MFLUX_QWEN_EDIT_BINARY=/absolute/path/to/mflux-generate-qwen-edit
+MFLUX_Z_IMAGE_TURBO_BINARY=/absolute/path/to/mflux-generate-z-image-turbo
 ```
 
-Run `npm run dev`, choose **Text to image**, then select **Local MFLUX**. Luvox supports FLUX.2 Klein 4B generation and Qwen Image Edit with common 1:1, 16:9, 9:16, 4:3, 3:4, 3:2, and 2:3 resolution presets. FLUX.2 uses normal text-to-image generation without a reference and its dedicated edit pipeline when one reference is supplied. Uploaded references can preserve the full image with padding or crop to fill the selected output canvas. Qwen requires one reference image; the MFLUX CLI's multi-image and LoRA options are not exposed.
+Run `npm run dev`, choose **Text to image**, then select **Local MFLUX**. Luvox supports Z-Image Turbo and FLUX.2 Klein 4B with common 1:1, 16:9, 9:16, 4:3, 3:4, 3:2, and 2:3 resolution presets. Both generate from text without a reference. Z-Image Turbo accepts one optional reference for image-to-image variations at MFLUX's default 0.4 reference strength; describe the desired result in the prompt. FLUX.2 uses its dedicated instruction-based edit pipeline when a reference is supplied. Uploaded references can preserve the full image with padding or crop to fill the selected output canvas. The MFLUX CLI's multi-image and LoRA options are not exposed.
 
-FLUX.2 defaults to the Fast setup with 1024p / 1:1, four steps, and 4-bit quantization; Quality switches to 8-bit. Qwen defaults to 20 steps, 8-bit quantization, and guidance 2.5, with a 30-step Quality setup. Advanced controls expose each model's allowlisted steps, quantization, seed, Low RAM mode, VAE tiling at 128, 256, or 512 pixels, and Qwen guidance. Low RAM automatically enables VAE tiling.
+Z-Image Turbo is the default local model, with a Standard setup of 1024p / 1:1, nine steps, and 8-bit quantization; Fast switches to 4-bit. Advanced steps are 4, 6, or 9, and reference images use a shorter denoising loop. FLUX.2 offers four-step Quality (8-bit) and Fast (4-bit) setups. Advanced controls expose each model's allowlisted steps, quantization, seed, Low RAM mode, and VAE tiling at 128, 256, or 512 pixels. Low RAM automatically enables VAE tiling. Guidance is fixed by each distilled model and has no user control.
 
 Before using a model in Luvox, run its MFLUX executable successfully once in Terminal so its weights are downloaded and cached. Luvox does not download or bundle weights, keeps prompts and references in a private temporary directory, allows only one MFLUX generation at a time, and removes temporary files after each request. MFLUX and model weights have separate licenses; review them before use.
 

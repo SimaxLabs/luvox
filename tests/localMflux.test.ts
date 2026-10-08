@@ -104,22 +104,20 @@ test("MFLUX validation enforces shared presets and advanced ranges", () => {
   })));
   assert.throws(() => validateGenerateImageInput(input({
     model: "qwen-image-edit",
-    prompt: "edit image",
-    guidance: 2.5,
+    steps: 20,
     inputReference: referenceImage,
   })));
   assert.throws(() => validateGenerateImageInput(input({
-    model: "qwen-image-edit",
-    prompt: "edit image",
+    model: "z-image-turbo",
     steps: 20,
   })));
-  assert.doesNotThrow(() => validateGenerateImageInput(input({
-    model: "qwen-image-edit",
-    prompt: "edit image",
-    steps: 20,
-    guidance: 2.5,
-    inputReference: referenceImage,
-  })));
+  assert.throws(() => validateGenerateImageInput({ ...input({ model: "z-image-turbo", steps: 9 }), guidance: 3 }));
+  assert.throws(() => validateGenerateImageInput(input({ steps: 9 })));
+  for (const steps of [4, 6, 9]) {
+    for (const reference of [undefined, referenceImage]) {
+      assert.doesNotThrow(() => validateGenerateImageInput(input({ model: "z-image-turbo", steps, inputReference: reference })));
+    }
+  }
 });
 
 test("MFLUX adapter returns and cleans a generated raster", {
@@ -128,10 +126,11 @@ test("MFLUX adapter returns and cleans a generated raster", {
   const directory = await mkdtemp(path.join(os.tmpdir(), "luvox-mflux-test-"));
   const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "luvox-mflux-output-test-"));
   const binary = path.join(directory, "mflux-generate-flux2");
+  const zImageBinary = path.join(directory, "mflux-generate-z-image-turbo");
   const editDirectory = path.join(directory, "bin");
   const editBinary = path.join(editDirectory, "mflux-generate-flux2-edit");
   const previousFlux2Binary = process.env.MFLUX_FLUX2_BINARY;
-  const previousQwenEditBinary = process.env.MFLUX_QWEN_EDIT_BINARY;
+  const previousZImageBinary = process.env.MFLUX_Z_IMAGE_TURBO_BINARY;
   const previousTemporaryDirectory = process.env.TMPDIR;
   const previousPath = process.env.PATH;
   const fakeBinary = `#!/usr/bin/env node
@@ -144,9 +143,16 @@ for (const argument of ["--model", "--prompt-file", "--steps", "--width", "--hei
   if (!process.argv.includes(argument)) process.exit(2);
 }
 const model = process.argv[process.argv.indexOf("--model") + 1];
-if (model !== "flux2-klein-4b" && model !== "qwen-image-edit") process.exit(2);
-const steps = Number(process.argv[process.argv.indexOf("--steps") + 1]);
-const referenceIndex = process.argv.indexOf("--image-paths");
+if (model !== "flux2-klein-4b" && model !== "z-image-turbo") process.exit(2);
+let steps = Number(process.argv[process.argv.indexOf("--steps") + 1]);
+const referenceIndex = process.argv.indexOf(model === "z-image-turbo" ? "--image-path" : "--image-paths");
+if (model === "z-image-turbo") {
+  if (basename(process.argv[1]) !== "mflux-generate-z-image-turbo" || process.argv.includes("--guidance") || process.argv.includes("--image-paths")) process.exit(2);
+  if (referenceIndex >= 0) {
+    if (process.argv[process.argv.indexOf("--image-strength") + 1] !== "0.4") process.exit(2);
+    steps -= Math.max(1, Math.floor(steps * 0.4));
+  } else if (process.argv.includes("--image-strength")) process.exit(2);
+}
 if (referenceIndex >= 0) {
   if (readdirSync(dirname(process.argv[referenceIndex + 1])).some((name) => /^reference\\.(?:jpg|png|webp)$/.test(name))) process.exit(2);
   const referenceInfo = spawnSync("/usr/bin/sips", ["-g", "pixelWidth", "-g", "pixelHeight", process.argv[referenceIndex + 1]], { encoding: "utf8" });
@@ -167,12 +173,6 @@ if (prompt === "test image") {
   }
   if (basename(process.argv[1]) !== "mflux-generate-flux2-edit" || process.argv.includes("--quantize") || process.argv.includes("--image-strength")) process.exit(2);
 }
-if (prompt === "edit image") {
-  for (const argument of ["20", "--quantize", "8", "--guidance", "2.5", "--image-paths"]) {
-    if (!process.argv.includes(argument)) process.exit(2);
-  }
-  if (process.argv.includes("--image-path") || process.argv.includes("--image-strength")) process.exit(2);
-}
 if (prompt === "invalid output" && basename(process.argv[1]) !== "mflux-generate-flux2") process.exit(2);
 const width = process.argv[process.argv.indexOf("--width") + 1];
 const height = process.argv[process.argv.indexOf("--height") + 1];
@@ -183,10 +183,10 @@ process.exit(resizeStatus);
 }
 `;
   await mkdir(editDirectory);
-  await Promise.all([writeFile(binary, fakeBinary), writeFile(editBinary, fakeBinary)]);
-  await Promise.all([chmod(binary, 0o700), chmod(editBinary, 0o700)]);
+  await Promise.all([binary, editBinary, zImageBinary].map((file) => writeFile(file, fakeBinary)));
+  await Promise.all([binary, editBinary, zImageBinary].map((file) => chmod(file, 0o700)));
   process.env.MFLUX_FLUX2_BINARY = binary;
-  process.env.MFLUX_QWEN_EDIT_BINARY = binary;
+  process.env.MFLUX_Z_IMAGE_TURBO_BINARY = zImageBinary;
   process.env.TMPDIR = temporaryRoot;
   process.env.PATH = `${editDirectory}${path.delimiter}${previousPath || ""}`;
 
@@ -203,18 +203,21 @@ process.exit(resizeStatus);
     }));
     assert.equal(result.mediaType, "image/png");
     assert.ok(result.b64Json.startsWith("iVBOR"));
-    const progress: LocalMfluxProgress[] = [];
-    const editResult = await generateLocalMfluxImage(input({
-      model: "qwen-image-edit",
-      prompt: "edit image",
-      resolution: "1280x720",
-      steps: 20,
-      guidance: 2.5,
-      inputReference: referenceImage,
-    }), undefined, (update) => progress.push(update));
-    assert.equal(editResult.mediaType, "image/png");
-    assert.ok(progress.some((update) => update.phase === "generating" && update.step === 10 && update.etaSeconds === 20 && update.secondsPerStep === 2));
-    assert.equal(progress.at(-1)?.phase, "decoding");
+    for (const reference of [undefined, referenceImage, webpReferenceImage]) {
+      const progress: LocalMfluxProgress[] = [];
+      const zImageResult = await generateLocalMfluxImage(input({
+        model: "z-image-turbo",
+        prompt: "image variation",
+        resolution: "1280x720",
+        steps: 9,
+        inputReference: reference,
+      }), undefined, (update) => progress.push(update));
+      assert.equal(zImageResult.mediaType, "image/png");
+      const total = reference ? 6 : 9;
+      assert.ok(progress.some((update) => update.phase === "generating" && update.step === Math.floor(total / 2) && update.total === total && update.etaSeconds === 20 && update.secondsPerStep === 2));
+      assert.equal(progress.at(-1)?.phase, "decoding");
+      assert.deepEqual(await readdir(temporaryRoot), []);
+    }
     const webpResult = await generateLocalMfluxImage(input({
       prompt: "webp reference",
       inputReference: webpReferenceImage,
@@ -258,8 +261,8 @@ process.exit(resizeStatus);
   } finally {
     if (previousFlux2Binary === undefined) delete process.env.MFLUX_FLUX2_BINARY;
     else process.env.MFLUX_FLUX2_BINARY = previousFlux2Binary;
-    if (previousQwenEditBinary === undefined) delete process.env.MFLUX_QWEN_EDIT_BINARY;
-    else process.env.MFLUX_QWEN_EDIT_BINARY = previousQwenEditBinary;
+    if (previousZImageBinary === undefined) delete process.env.MFLUX_Z_IMAGE_TURBO_BINARY;
+    else process.env.MFLUX_Z_IMAGE_TURBO_BINARY = previousZImageBinary;
     if (previousTemporaryDirectory === undefined) delete process.env.TMPDIR;
     else process.env.TMPDIR = previousTemporaryDirectory;
     if (previousPath === undefined) delete process.env.PATH;
@@ -279,8 +282,8 @@ test("MFLUX warm worker reuses weights, isolates requests, and releases memory o
   const cliBinary = path.join(directory, "mflux-cli");
   const binary = path.join(directory, "mflux-generate-flux2");
   const editBinary = path.join(directory, "mflux-generate-flux2-edit");
-  const qwenBinary = path.join(directory, "mflux-generate-qwen-edit");
-  const names = ["MFLUX_FLUX2_BINARY", "MFLUX_QWEN_EDIT_BINARY", "MFLUX_KEEP_ALIVE_MINUTES", "TMPDIR", "OPENROUTER_API_KEY"];
+  const zImageBinary = path.join(directory, "mflux-generate-z-image-turbo");
+  const names = ["MFLUX_FLUX2_BINARY", "MFLUX_Z_IMAGE_TURBO_BINARY", "MFLUX_KEEP_ALIVE_MINUTES", "TMPDIR", "OPENROUTER_API_KEY"];
   const previous = names.map((name) => process.env[name]);
   const events = async (): Promise<Array<Record<string, any>>> => (await readFile(path.join(directory, "python3.events"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
   const request = (overrides: Partial<LocalMfluxGenerateImageInput> = {}) => generateLocalMfluxImage(input({ prompt: "first", seed: 42, ...overrides }));
@@ -297,12 +300,12 @@ test("MFLUX warm worker reuses weights, isolates requests, and releases memory o
     await Promise.all([
       [binary, "flux2.cli.flux2_generate"],
       [editBinary, "flux2.cli.flux2_edit_generate"],
-      [qwenBinary, "qwen.cli.qwen_image_edit_generate"],
+      [zImageBinary, "z_image.cli.z_image_turbo_generate"],
     ].map(([file, module]) => writeFile(file, `#!${python}\nimport sys\nfrom mflux.models.${module} import main\nif __name__ == "__main__":\n    sys.exit(main())\n`, { mode: 0o700 })));
     await writeFile(binary, `#!${python}\n# -*- coding: utf-8 -*-\nimport sys\nfrom mflux.models.flux2.cli.flux2_generate import main\nif __name__ == "__main__":\n    if sys.argv[0].endswith("-script.pyw"):\n        sys.argv[0] = sys.argv[0][:-11]\n    elif sys.argv[0].endswith(".exe"):\n        sys.argv[0] = sys.argv[0][:-4]\n    sys.exit(main())\n`);
     await writeFile(editBinary, `#!${python}\n# -*- coding: utf-8 -*-\nimport re\nimport sys\nfrom mflux.models.flux2.cli.flux2_edit_generate import main\nif __name__ == '__main__':\n    sys.argv[0] = re.sub(r'(-script\\.pyw|\\.exe)?$', '', sys.argv[0])\n    sys.exit(main())\n`);
     process.env.MFLUX_FLUX2_BINARY = binary;
-    process.env.MFLUX_QWEN_EDIT_BINARY = qwenBinary;
+    process.env.MFLUX_Z_IMAGE_TURBO_BINARY = zImageBinary;
     process.env.MFLUX_KEEP_ALIVE_MINUTES = "5";
     process.env.TMPDIR = temporaryRoot;
     process.env.OPENROUTER_API_KEY = "must-not-reach-worker";
@@ -326,10 +329,21 @@ test("MFLUX warm worker reuses weights, isolates requests, and releases memory o
 
     await request({ inputReference: referenceImage });
     assert.equal((await events()).filter((event) => event.event === "load").at(-1)?.pipeline, "Flux2KleinEdit");
-    await request({ model: "qwen-image-edit", steps: 20, guidance: 3, inputReference: referenceImage });
+    await request({ model: "z-image-turbo", steps: 9, inputReference: referenceImage });
     history = await events();
-    assert.equal(history.filter((event) => event.event === "load").at(-1)?.pipeline, "QwenImageEdit");
-    assert.equal(history.at(-1)?.guidance, 3);
+    assert.equal(history.filter((event) => event.event === "load").at(-1)?.pipeline, "ZImage");
+    assert.equal(history.filter((event) => event.event === "load").at(-1)?.model_config, "z-image-turbo");
+    assert.equal(history.at(-1)?.guidance, 0);
+    assert.equal(history.at(-1)?.image_strength, 0.4);
+    assert.ok(history.at(-1)?.image_path.endsWith("reference-framed.png"));
+    const zImagePid = history.at(-1)?.pid;
+    const loadCount = history.filter((event) => event.event === "load").length;
+    await request({ model: "z-image-turbo", steps: 6, prompt: "another image" });
+    history = await events();
+    assert.equal(history.at(-1)?.pid, zImagePid);
+    assert.equal(history.filter((event) => event.event === "load").length, loadCount);
+    assert.equal(history.at(-1)?.image_path, null);
+    assert.equal(history.at(-1)?.num_inference_steps, 6);
     assert.equal(history.at(-1)?.scheduler, "linear");
     await assertIdleFiles();
 

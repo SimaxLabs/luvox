@@ -20,6 +20,7 @@ const MFLUX_OWNER_FILE = ".luvox-owned";
 const MFLUX_OWNER_KIND = "luvox-mflux-request";
 const MFLUX_WORKER_KIND = "luvox-mflux-worker";
 const MFLUX_OWNER_MAX_BYTES = 4_096;
+const Z_IMAGE_REFERENCE_STRENGTH = 0.4;
 const execFileAsync = promisify(execFile);
 const activeDirectories = new Set<string>();
 const shutdownController = new AbortController();
@@ -424,7 +425,7 @@ async function mfluxPython(binary: string, pipeline: string): Promise<string | u
     const source = buffer.toString("utf8", 0, bytesRead).replaceAll("\r\n", "\n");
     const header = /^#!(\/[^\n]+\/python(?:\d+(?:\.\d+)*)?)\n(?:# -\*- coding: utf-8 -\*-\n)?(?:import re\n)?import sys\nfrom (mflux\.[\w.]+) import main\nif __name__ == ["']__main__["']:\n/.exec(source);
     if (!header) return undefined;
-    const module = pipeline === "qwen-edit" ? "mflux.models.qwen.cli.qwen_image_edit_generate"
+    const module = pipeline === "z-image-turbo" ? "mflux.models.z_image.cli.z_image_turbo_generate"
       : pipeline === "flux2-edit" ? "mflux.models.flux2.cli.flux2_edit_generate" : "mflux.models.flux2.cli.flux2_generate";
     const body = source.slice(header[0].length).trimEnd().replaceAll("'", '"');
     if (header[2] !== module || ![
@@ -506,7 +507,7 @@ async function runMflux(
   onProgress?: (progress: LocalMfluxProgress) => void,
 ): Promise<void> {
   const keepAlive = input.lowRam ? 0 : keepAliveMilliseconds();
-  const pipeline = input.model === "qwen-image-edit" ? "qwen-edit" : input.inputReference ? "flux2-edit" : "flux2";
+  const pipeline = input.model === "z-image-turbo" ? "z-image-turbo" : input.inputReference ? "flux2-edit" : "flux2";
   const python = keepAlive ? await mfluxPython(binary, pipeline) : undefined;
   const key = JSON.stringify([binary, pipeline, input.model, input.quantization, input.vaeTiling ? input.vaeTileSize : null]);
   if (warmWorker && (!python || warmWorker.key !== key)) await stopWarmWorker();
@@ -517,7 +518,10 @@ async function runMflux(
     await stopWarmWorker();
     assertMfluxMayContinue(signal);
   }
-  const totalSteps = input.steps;
+  // Z-Image starts partway through the denoising loop when an initial image is supplied.
+  const totalSteps = input.model === "z-image-turbo" && input.inputReference
+    ? input.steps - Math.max(1, Math.floor(input.steps * Z_IMAGE_REFERENCE_STRENGTH))
+    : input.steps;
   return new Promise((resolve, reject) => {
     const timeoutMs = timeoutMilliseconds();
     const child = worker?.child ?? spawn(binary, args, {
@@ -688,7 +692,6 @@ export async function generateLocalMfluxImage(
     ];
     if (input.quantization !== null) args.push("--quantize", String(input.quantization));
     if (input.seed !== undefined) args.push("--seed", String(input.seed));
-    if (model.id === "qwen-image-edit" && input.guidance !== undefined) args.push("--guidance", String(input.guidance));
     if (input.lowRam) args.push("--low-ram");
     if (input.vaeTiling || input.lowRam) args.push("--vae-tiling", "--vae-tile-size", String(input.vaeTileSize));
     if (input.inputReference) {
@@ -697,13 +700,14 @@ export async function generateLocalMfluxImage(
       const referencePath = path.join(directory, `reference.${extension}`);
       await writeFile(referencePath, Buffer.from(base64, "base64"), { mode: 0o600, signal: operationSignal });
       try {
-        args.push("--image-paths", await frameReferenceImage(
+        args.push(model.id === "z-image-turbo" ? "--image-path" : "--image-paths", await frameReferenceImage(
           referencePath,
           directory,
           resolution,
           input.referenceFit,
           operationSignal,
         ));
+        if (model.id === "z-image-turbo") args.push("--image-strength", String(Z_IMAGE_REFERENCE_STRENGTH));
       } finally {
         await rm(referencePath, { force: true });
       }

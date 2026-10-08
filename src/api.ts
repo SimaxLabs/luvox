@@ -159,7 +159,6 @@ export function generateImage(
         lowRam: boolean;
         vaeTiling: boolean;
         vaeTileSize: number;
-        guidance?: number;
         referenceFit?: LocalH3FrameFitId;
         inputReference?: string;
       },

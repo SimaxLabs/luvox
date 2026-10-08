@@ -32,7 +32,7 @@ def main():
     module_name, class_name = {
         "flux2": ("mflux.models.flux2.cli.flux2_generate", "Flux2Klein"),
         "flux2-edit": ("mflux.models.flux2.cli.flux2_edit_generate", "Flux2KleinEdit"),
-        "qwen-edit": ("mflux.models.qwen.cli.qwen_image_edit_generate", "QwenImageEdit"),
+        "z-image-turbo": ("mflux.models.z_image.cli.z_image_turbo_generate", "ZImage"),
     }[pipeline]
     command = importlib.import_module(module_name)
     model = None
@@ -42,9 +42,10 @@ def main():
         sys.argv = [binary, *arguments]
         args = command.build_parser().parse_args()
         if model is None:
-            options = {"quantize": args.quantize}
-            if pipeline != "qwen-edit":
-                options["model_config"] = ConfigResolution.resolve_restricted(args.model, "flux2-klein-4b")
+            options = {
+                "quantize": args.quantize,
+                "model_config": ConfigResolution.resolve_restricted(args.model, "z-image-turbo" if pipeline == "z-image-turbo" else "flux2-klein-4b"),
+            }
             model = getattr(command, class_name)(**options)
             model.callbacks.register(BatterySaver(args.battery_percentage_stop_limit))
             # ponytail: one model per worker; Node restarts it when load settings change.
@@ -57,12 +58,12 @@ def main():
             "width": args.width,
             "height": args.height,
             "num_inference_steps": args.steps,
-            "guidance": args.guidance if args.guidance is not None else (2.5 if pipeline == "qwen-edit" else 1.0),
-            "scheduler": args.scheduler if pipeline == "qwen-edit" else "flow_match_euler_discrete",
+            "guidance": 0.0 if pipeline == "z-image-turbo" else 1.0,
+            "scheduler": args.scheduler if pipeline == "z-image-turbo" else "flow_match_euler_discrete",
         }
-        if pipeline == "qwen-edit":
-            options["image_paths"] = [str(p) for p in args.image_paths]
-            options["image_path"] = options["image_paths"][0]
+        if pipeline == "z-image-turbo":
+            options["image_path"] = args.image_path
+            options["image_strength"] = args.image_strength
         elif pipeline == "flux2-edit":
             options["image_paths"] = [Path(p) for p in args.image_paths]
         image = model.generate_image(**options)

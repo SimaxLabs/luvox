@@ -45,15 +45,13 @@ export const MFLUX_IMAGE_RESOLUTIONS = [
 
 export const MFLUX_IMAGE_QUANTIZATIONS = [null, 8, 6, 5, 4, 3] as const;
 export const MFLUX_VAE_TILE_SIZES = [128, 256, 512] as const;
-export const MFLUX_QWEN_EDIT_GUIDANCE = 2.5;
 
 export const MFLUX_IMAGE_MODEL = {
-  id: "qwen-image-edit",
-  name: "Qwen Image Edit",
-  executable: "mflux-generate-qwen-edit",
-  environmentVariable: "MFLUX_QWEN_EDIT_BINARY",
-  steps: [20, 30],
-  requiresReference: true,
+  id: "z-image-turbo",
+  name: "Z-Image Turbo",
+  executable: "mflux-generate-z-image-turbo",
+  environmentVariable: "MFLUX_Z_IMAGE_TURBO_BINARY",
+  steps: [4, 6, 9],
 } as const;
 
 export const MFLUX_IMAGE_MODELS = [
@@ -65,7 +63,6 @@ export const MFLUX_IMAGE_MODELS = [
     referenceExecutable: "mflux-generate-flux2-edit",
     environmentVariable: "MFLUX_FLUX2_BINARY",
     steps: [1, 2, 3, 4],
-    requiresReference: false,
   },
 ] as const;
 
@@ -74,17 +71,16 @@ const recommendedDefaults = {
   lowRam: false,
   vaeTiling: false,
   vaeTileSize: 512,
-  guidance: MFLUX_QWEN_EDIT_GUIDANCE,
 } as const;
 
 export const MFLUX_IMAGE_RECOMMENDED_SETUPS = [
   {
     ...recommendedDefaults,
-    id: "qwen-standard",
+    id: "z-image-standard",
     label: "Standard",
-    note: "1024p / 1:1, 20 steps, 8-bit",
-    models: ["qwen-image-edit"],
-    steps: 20,
+    note: "1024p / 1:1, 9 steps, 8-bit",
+    models: ["z-image-turbo"],
+    steps: 9,
     quantization: 8,
   },
   {
@@ -107,12 +103,12 @@ export const MFLUX_IMAGE_RECOMMENDED_SETUPS = [
   },
   {
     ...recommendedDefaults,
-    id: "qwen-quality",
-    label: "Quality",
-    note: "1024p / 1:1, 30 steps, 8-bit",
-    models: ["qwen-image-edit"],
-    steps: 30,
-    quantization: 8,
+    id: "z-image-fast",
+    label: "Fast",
+    note: "1024p / 1:1, 9 steps, 4-bit",
+    models: ["z-image-turbo"],
+    steps: 9,
+    quantization: 4,
   },
 ] as const;
 

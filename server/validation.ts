@@ -137,7 +137,6 @@ const localMfluxGenerateImageSchema = z
     lowRam: z.boolean(),
     vaeTiling: z.boolean(),
     vaeTileSize: z.number().int().refine((value) => (MFLUX_VAE_TILE_SIZES as readonly number[]).includes(value), "Unsupported MFLUX VAE tile size."),
-    guidance: z.number().finite().min(0).max(20).optional(),
     referenceFit: z.enum(LOCAL_H3_FRAME_FIT_IDS).default("contain"),
     inputReference: imageReferenceDataUrl,
   })
@@ -180,7 +179,6 @@ export function validateGenerateImageInput(value: unknown): ImageGenerateInput {
     if (!model) issues.push(customIssue("model", "Unsupported MFLUX model."));
     else {
       if (!(model.steps as readonly number[]).includes(input.steps)) issues.push(customIssue("steps", "Unsupported step count for this MFLUX model."));
-      if (model.requiresReference && !input.inputReference) issues.push(customIssue("inputReference", "Qwen Image Edit requires a reference image."));
     }
     if (!getMfluxImageResolution(input.resolution)) issues.push(customIssue("resolution", "Unsupported MFLUX resolution preset."));
     if (issues.length > 0) throw new z.ZodError(issues);

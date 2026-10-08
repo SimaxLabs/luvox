@@ -1118,7 +1118,6 @@ export default function App() {
   const [mfluxLowRam, setMfluxLowRam] = useState<boolean>(defaultMfluxSetup.lowRam);
   const [mfluxVaeTiling, setMfluxVaeTiling] = useState<boolean>(defaultMfluxSetup.vaeTiling);
   const [mfluxVaeTileSize, setMfluxVaeTileSize] = useState<number>(defaultMfluxSetup.vaeTileSize);
-  const [mfluxGuidance, setMfluxGuidance] = useState<number>(defaultMfluxSetup.guidance);
   const [imageReferenceFit, setImageReferenceFit] = useState<LocalH3FrameFitId>("contain");
   const [imagePrompt, setImagePrompt] = useState("");
   const [imageReference, setImageReference] = useState<{ name: string; dataUrl: string } | null>(null);
@@ -1230,7 +1229,7 @@ export default function App() {
   const currentImageModelName = imageProvider === "openrouter"
     ? openRouterImageTaskStatus && openRouterImageTaskModelName ? openRouterImageTaskModelName : selectedOpenRouterImageModel.name
     : selectedMfluxModel.name;
-  const usesMfluxEdit = imageProvider === "mflux" && (selectedMfluxModel.requiresReference || Boolean(imageReference));
+  const usesMfluxEdit = imageProvider === "mflux" && selectedMfluxModel.id === "flux2-klein-4b" && Boolean(imageReference);
   const selectedMfluxModelAvailable = appConfig?.localMflux.models.includes(selectedMfluxModel.id) === true;
   const openRouterSubmissionStatus = openRouterSubmitting
     ? "submitting"
@@ -1290,7 +1289,6 @@ export default function App() {
           lowRam: mfluxLowRam,
           vaeTiling: mfluxVaeTiling,
           vaeTileSize: mfluxVaeTileSize,
-          guidance: mfluxGuidance,
           referenceFit: imageReferenceFit,
         }
       : currentSubmissionKind === "openrouter"
@@ -1356,7 +1354,6 @@ export default function App() {
     setMfluxLowRam(setup.lowRam);
     setMfluxVaeTiling(setup.vaeTiling);
     setMfluxVaeTileSize(setup.vaeTileSize);
-    setMfluxGuidance(setup.guidance);
     setMfluxAdvancedStatus(`${setup.label} setup applied.`);
   };
 
@@ -1418,7 +1415,6 @@ export default function App() {
     setMfluxLowRam(defaultMfluxSetup.lowRam);
     setMfluxVaeTiling(defaultMfluxSetup.vaeTiling);
     setMfluxVaeTileSize(defaultMfluxSetup.vaeTileSize);
-    setMfluxGuidance(defaultMfluxSetup.guidance);
     setImageReferenceFit("contain");
     setImagePrompt("");
     setImageReference(null);
@@ -1763,7 +1759,6 @@ export default function App() {
         setMfluxLowRam(settings.lowRam);
         setMfluxVaeTiling(settings.vaeTiling);
         setMfluxVaeTileSize(MFLUX_VAE_TILE_SIZES.some((size) => size === settings.vaeTileSize) ? settings.vaeTileSize : setup.vaeTileSize);
-        setMfluxGuidance(settings.guidance);
         setImageReferenceFit(settings.referenceFit);
         setImageReference(null);
         setMfluxAdvancedStatus("Saved settings applied.");
@@ -1958,7 +1953,6 @@ export default function App() {
       currentSubmissionUncertain ||
       readingImageReference ||
       (workflow === "image" && imageProvider === "openrouter" && selectedOpenRouterImageModel.inputReference.required && !imageReference) ||
-      (workflow === "image" && imageProvider === "mflux" && selectedMfluxModel.requiresReference && !imageReference) ||
       (clearingWorkspace && workflow === "video" && form.provider === "local") ||
       (localCleanupFailed && workflow === "video" && form.provider === "local") ||
       (workflow === "video" && currentVideoLocked)
@@ -2015,7 +2009,6 @@ export default function App() {
               lowRam: mfluxLowRam,
               vaeTiling: mfluxVaeTiling,
               vaeTileSize: mfluxVaeTileSize,
-              guidance: selectedMfluxModel.id === "qwen-image-edit" ? mfluxGuidance : undefined,
               referenceFit: imageReference ? imageReferenceFit : undefined,
               inputReference: imageReference?.dataUrl,
             }, undefined, requestController.signal, (progress) => {
@@ -2599,8 +2592,7 @@ export default function App() {
                       mfluxSeed === "" &&
                       mfluxLowRam === setup.lowRam &&
                       mfluxVaeTiling === setup.vaeTiling &&
-                      mfluxVaeTileSize === setup.vaeTileSize &&
-                      mfluxGuidance === setup.guidance;
+                      mfluxVaeTileSize === setup.vaeTileSize;
                     return (
                       <button
                         aria-pressed={selected}
@@ -2715,17 +2707,17 @@ export default function App() {
                 <div className="min-w-0 flex-1">
                   <h3 className="text-xs font-bold uppercase tracking-[0.12em]">Reference image</h3>
                   <p className="mt-1 text-[11px] leading-4 text-stone-500">
-                    {imageProvider === "mflux" && selectedMfluxModel.requiresReference
-                      ? "Qwen Image Edit requires one PNG, JPEG, or WebP image up to 10 MB."
-                      : selectedMfluxModel.id === "flux2-klein-4b" && imageProvider === "mflux"
+                    {imageProvider === "mflux"
+                      ? selectedMfluxModel.id === "flux2-klein-4b"
                         ? "Add one optional PNG, JPEG, or WebP image to use FLUX.2's dedicated edit mode."
-                        : selectedOpenRouterImageModel.inputReference.required
-                           ? "This model requires one PNG, JPEG, or WebP image up to 10 MB."
-                           : "Add one optional PNG, JPEG, or WebP image up to 10 MB."}
+                        : "Add one optional PNG, JPEG, or WebP image for an image-to-image variation at 0.4 reference strength. Describe the desired result in the prompt."
+                      : selectedOpenRouterImageModel.inputReference.required
+                        ? "This model requires one PNG, JPEG, or WebP image up to 10 MB."
+                        : "Add one optional PNG, JPEG, or WebP image up to 10 MB."}
                   </p>
                 </div>
                 <span className="shrink-0 border border-black/10 bg-white/50 px-2 py-1 text-[9px] font-bold uppercase tracking-[0.12em] text-stone-500">
-                  {(imageProvider === "mflux" ? selectedMfluxModel.requiresReference : selectedOpenRouterImageModel.inputReference.required) ? "Required" : "Optional"}
+                  {imageProvider === "openrouter" && selectedOpenRouterImageModel.inputReference.required ? "Required" : "Optional"}
                 </span>
               </div>
               <p aria-live="polite" className="sr-only" role="status">
@@ -2752,7 +2744,7 @@ export default function App() {
                           <input
                             accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp"
                             aria-label="Replace reference image"
-                            aria-required={imageProvider === "mflux" ? selectedMfluxModel.requiresReference : selectedOpenRouterImageModel.inputReference.required}
+                            aria-required={imageProvider === "openrouter" && selectedOpenRouterImageModel.inputReference.required}
                             className="sr-only"
                             id="image-reference"
                             onChange={(event) => void selectImageReference(event)}
@@ -2777,7 +2769,7 @@ export default function App() {
                 <label className={`flex min-h-32 flex-col items-center justify-center border border-dashed border-black/25 bg-[#faf9f3] px-6 text-center transition has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-black ${readingImageReference ? "cursor-wait opacity-60" : "cursor-pointer hover:border-black hover:bg-white"}`}>
                   <input
                     accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp"
-                    aria-required={imageProvider === "mflux" ? selectedMfluxModel.requiresReference : selectedOpenRouterImageModel.inputReference.required}
+                    aria-required={imageProvider === "openrouter" && selectedOpenRouterImageModel.inputReference.required}
                     className="sr-only"
                     disabled={readingImageReference}
                     id="image-reference"
@@ -2814,7 +2806,7 @@ export default function App() {
                         >
                           {selectedMfluxModel.steps.map((steps) => <option key={steps} value={steps}>{steps}</option>)}
                         </select>
-                        <p className="mt-1.5 text-[10px] leading-4 text-stone-500">{selectedMfluxModel.id === "qwen-image-edit" ? "Twenty is the MFLUX default." : "Four is recommended."}</p>
+                        <p className="mt-1.5 text-[10px] leading-4 text-stone-500">{selectedMfluxModel.id === "z-image-turbo" ? "Nine is recommended. Reference images use a shorter denoising loop." : "Four is recommended."}</p>
                       </div>
                       <div>
                         <FieldLabel htmlFor="mflux-quantization">Quantization</FieldLabel>
@@ -2826,26 +2818,9 @@ export default function App() {
                         >
                           {MFLUX_IMAGE_QUANTIZATIONS.map((quantization) => <option key={quantization ?? "off"} value={quantization ?? "off"}>{quantization === null ? "Off" : `${quantization}-bit`}</option>)}
                         </select>
-                        <p className="mt-1.5 text-[10px] leading-4 text-stone-500">{selectedMfluxModel.id === "qwen-image-edit" ? "Six-bit or lower can noticeably degrade edits." : "Lower bits use less memory."}</p>
+                        <p className="mt-1.5 text-[10px] leading-4 text-stone-500">Lower bits use less memory.</p>
                       </div>
                     </div>
-
-                    {selectedMfluxModel.id === "qwen-image-edit" && (
-                      <div className="mt-6">
-                        <FieldLabel htmlFor="mflux-guidance">Guidance</FieldLabel>
-                        <input
-                          className="h-12 w-full border border-black/15 bg-[#faf9f3] px-3 font-mono text-sm outline-none transition focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
-                          id="mflux-guidance"
-                          max={20}
-                          min={0}
-                          onChange={(event) => setMfluxGuidance(Number(event.target.value))}
-                          step={0.1}
-                          type="number"
-                          value={mfluxGuidance}
-                        />
-                        <p className="mt-1.5 text-[10px] leading-4 text-stone-500">Controls how strongly the result follows the edit instruction; higher values push harder toward the prompt. 2.5 is the MFLUX default.</p>
-                      </div>
-                    )}
 
                     <div className="mt-6 grid gap-5 sm:grid-cols-2">
                       <Toggle
@@ -2869,7 +2844,7 @@ export default function App() {
                         </select>
                       </div>
                       <p className="text-[10px] leading-4 text-stone-500 sm:col-span-2">
-                        {selectedMfluxModel.id === "qwen-image-edit"
+                        {selectedMfluxModel.id === "z-image-turbo"
                           ? "VAE tiling reduces peak memory during final decoding."
                           : "MFLUX 0.19.1 applies VAE tiling to reference encoding, not final decoding."}
                       </p>
@@ -3337,7 +3312,7 @@ export default function App() {
                 currentSubmissionUncertain ||
                 ((clearingWorkspace || localCleanupFailed) && workflow === "video" && form.provider === "local") ||
                 (workflow === "video" && (currentVideoLocked || uploadingReference !== null || !form.prompt.trim())) ||
-                (workflow === "image" && (!imagePrompt.trim() || (imageProvider === "openrouter" && selectedOpenRouterImageModel.inputReference.required && !imageReference) || (imageProvider === "mflux" && (!selectedMfluxModelAvailable || (selectedMfluxModel.requiresReference && !imageReference)))))
+                (workflow === "image" && (!imagePrompt.trim() || (imageProvider === "openrouter" && selectedOpenRouterImageModel.inputReference.required && !imageReference) || (imageProvider === "mflux" && !selectedMfluxModelAvailable)))
               }
               type="submit"
             >

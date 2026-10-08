@@ -35,15 +35,14 @@ const prompts: SavedPrompt[] = [
     createdAt,
     settings: {
       kind: "mflux",
-      model: "qwen-image-edit",
+      model: "z-image-turbo",
       resolution: "1024x1024",
-      steps: 20,
+      steps: 9,
       quantization: 8,
       seed: "42",
       lowRam: false,
       vaeTiling: true,
       vaeTileSize: 512,
-      guidance: 2.5,
       referenceFit: "contain",
     },
   },
@@ -111,6 +110,17 @@ test("saved prompts persist on disk and update by id", async () => {
     await removeSavedPrompt({ id: prompts[0].id });
     await initializeSavedPrompts();
     assert.deepEqual(getSavedPrompts().prompts, [prompts[1]]);
+
+    await saveSavedPrompt(prompts[2]);
+    const legacy = {
+      ...prompts[2],
+      settings: { ...prompts[2].settings, model: "qwen-image-edit", steps: 20, guidance: 2.5 },
+    };
+    await initializeSavedPrompts();
+    assert.deepEqual(getSavedPrompts().prompts[0], prompts[2]);
+    await saveSavedPrompt(legacy);
+    await initializeSavedPrompts();
+    assert.deepEqual(getSavedPrompts().prompts[0], legacy);
 
     assert.throws(() => saveSavedPrompt({ ...prompts[0], secret: "not allowed" }));
     await writeFile(getSavedPromptsFilePath(), "{bad json", "utf8");

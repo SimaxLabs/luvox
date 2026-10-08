@@ -21,7 +21,8 @@ export const savedPromptSettingsSchema = z.discriminatedUnion("kind", [
     lowRam: z.boolean(),
     vaeTiling: z.boolean(),
     vaeTileSize: z.number().int().min(64).max(4_096),
-    guidance: z.number().min(0).max(20),
+    // Read legacy settings without invalidating existing saved prompt files.
+    guidance: z.number().min(0).max(20).optional(),
     referenceFit: frameFit,
   }).strict(),
   z.object({

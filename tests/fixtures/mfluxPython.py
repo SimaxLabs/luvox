@@ -33,12 +33,13 @@ def module(name, **values):
 
 def build_parser():
     parser = argparse.ArgumentParser()
-    for name in ["model", "prompt-file", "output", "image-paths"]:
+    for name in ["model", "prompt-file", "output", "image-paths", "image-path"]:
         parser.add_argument("--" + name)
     for name in ["steps", "width", "height", "quantize", "vae-tile-size"]:
         parser.add_argument("--" + name, type=int)
     parser.add_argument("--seed", type=int, nargs="+", default=[123])
     parser.add_argument("--guidance", type=float)
+    parser.add_argument("--image-strength", type=float, default=0.4)
     parser.add_argument("--low-ram", action="store_true")
     parser.add_argument("--vae-tiling", action="store_true")
     parser.set_defaults(battery_percentage_stop_limit=10, scheduler="linear")
@@ -78,7 +79,8 @@ class Model:
     def generate_image(self, **options):
         assert "OPENROUTER_API_KEY" not in os.environ
         assert len(self.registered) == 1
-        for reference in options.get("image_paths", []):
+        references = options.get("image_paths", []) + ([options["image_path"]] if options.get("image_path") else [])
+        for reference in references:
             assert Path(reference).is_file()
             assert not any(Path(reference).parent.glob("reference.*"))
         record("generate", tile=self.tiling_config, **{key: [str(p) for p in value] if key == "image_paths" else value for key, value in options.items()})
@@ -87,6 +89,11 @@ class Model:
         if options["prompt"] == "exit":
             os._exit(0)
         steps = options["num_inference_steps"]
+        if type(self).__name__ == "ZImage":
+            assert options["guidance"] == 0
+            assert "image_paths" not in options
+            if options["image_path"]:
+                steps -= max(1, int(steps * options["image_strength"]))
         sys.stderr.write(" 50%%|#####     | %d/%d [00:20<00:20, 2.00s/it]\r" % (steps // 2, steps))
         sys.stderr.flush()
         while options["prompt"] == "wait":
@@ -104,7 +111,7 @@ module("mflux.utils.prompt_util", PromptUtil=types.SimpleNamespace(read_prompt=l
 for name, class_name in [
     ("flux2.cli.flux2_generate", "Flux2Klein"),
     ("flux2.cli.flux2_edit_generate", "Flux2KleinEdit"),
-    ("qwen.cli.qwen_image_edit_generate", "QwenImageEdit"),
+    ("z_image.cli.z_image_turbo_generate", "ZImage"),
 ]:
     module("mflux.models." + name, build_parser=build_parser, **{class_name: type(class_name, (Model,), {})})
 
