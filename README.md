@@ -4,21 +4,15 @@
 
 **Start with an idea or a frame. Choose how it runs. Set it in motion.**
 
-Luvox is a local studio for shaping prompts, reference frames, and model-specific controls without changing tools every time the backend changes.
-
-Luvox is designed for non-professional users who want to turn a prompt into an image or video without managing node graphs, templates, or other complex workflow tools. The goal is a small, approachable interface that can grow with new generation models while keeping credentials and local files behind your own server.
-
-Generate videos remotely through [OpenRouter](https://openrouter.ai/docs/guides/overview/multimodal/video-generation), create images through OpenRouter or local [MFLUX](https://github.com/mflux-community/mflux), or run [h3.c](https://github.com/antirez/h3.c) directly on a compatible Mac.
+Luvox is a simple local studio for generating images and videos from prompts and reference images, without node graphs or complex workflows. Use [OpenRouter](https://openrouter.ai/docs/guides/overview/multimodal/video-generation) for remote generation, [MFLUX](https://github.com/mflux-community/mflux) for local images, or [h3.c](https://github.com/antirez/h3.c) for local videos on Apple Silicon.
 
 ## AI Development Disclosure
 
-Luvox is built with substantial assistance from GPT 5.6 and Claude Fable.
-
-AI output is treated as a draft, not proof that the software works. Humans decide the behavior and own the testing, debugging, and review.
+Built with substantial assistance from GPT 5.6 and Claude Fable, with human testing and review.
 
 ## Run with Docker
 
-Docker is the quickest way to use Luvox with OpenRouter. It builds the app and installs Node.js dependencies inside the image, so npm is not needed on your host.
+The quickest setup for OpenRouter. Local MFLUX and h3.c require the npm setup below.
 
 ```bash
 cp .env.example .env
@@ -26,17 +20,11 @@ cp .env.example .env
 docker compose up --build
 ```
 
-Open [http://localhost:3000](http://localhost:3000).
-
-Compose intentionally publishes Luvox only on `127.0.0.1`. Keep that host binding so paid generation routes are not exposed to the network.
-
-Local MFLUX and h3.c generation are not available in Docker because the Linux container cannot access macOS Metal or host model files, so the Docker UI hides the provider selectors and uses OpenRouter only.
+Open [http://localhost:3000](http://localhost:3000). Keep Compose's `127.0.0.1` binding so paid generation routes remain accessible only from your computer.
 
 ## Run with npm
 
-Use npm when developing Luvox or running MFLUX or h3.c locally. Luvox has a React client and an Express server; npm installs and builds both. Host mode gives local engines the macOS Metal and filesystem access they need.
-
-Requires Node.js 22.12 or newer.
+Requires **Node.js 22.12+**. Use this setup for development or local engines. Add `OPENROUTER_API_KEY` to `.env` if using OpenRouter.
 
 ```bash
 cp .env.example .env
@@ -53,82 +41,67 @@ NODE_ENV=production npm start
 
 ## Personalize OpenRouter models
 
-Luvox includes a model library so users can extend the tool without changing its source code. Choose **Manage models** beside the OpenRouter key field to search OpenRouter's dedicated [image](https://openrouter.ai/docs/api/api-reference/images/list-image-generation-models) and [video](https://openrouter.ai/docs/api/api-reference/video-generation/list-all-video-generation-models) catalogs. Luvox creates a compatible JSON definition from the published capabilities, lets you choose defaults, and saves it for immediate use. Discovery does not submit a generation or spend credits.
-
-Built-in models cannot be replaced or removed. Custom definitions may use only controls Luvox understands: image resolution, image aspect ratio, one optional or required image reference, video duration, video resolution, video aspect ratio, public first/last-frame URLs, and generated audio. Models requiring vector output, multiple mandatory references, or unsupported workflows are omitted. Provider-specific parameters continue to use provider defaults.
-
-### Persistence and manual configuration
-
-Host runs store persistent data in `.luvox`: custom models in `openrouter-models.json` and saved prompts in `saved-prompts.json`. Set `LUVOX_DATA_DIR` to an absolute directory to keep these files elsewhere. Docker Compose stores both files in the persistent `luvox-data` volume; `docker compose down -v` deliberately removes that volume and its data.
-
-The file can also be edited by hand while Luvox is stopped:
-
-```json
-{
-  "version": 1,
-  "images": [],
-  "videos": []
-}
-```
-
-Invalid definitions stop server startup rather than silently weakening request validation. Luvox reads manual changes at startup, so restart it after editing the file.
+Choose **Manage models** beside the OpenRouter key field to add compatible models from its [image](https://openrouter.ai/docs/api/api-reference/images/list-image-generation-models) and [video](https://openrouter.ai/docs/api/api-reference/video-generation/list-all-video-generation-models) catalogs. Browsing costs no credits. Built-in models cannot be replaced or removed.
 
 ## Saved prompts
 
-Choose **Saved prompts** beside the prompt field to open the prompt library, name and save the current prompt. You can save the prompt alone or include its current model and scalar generation settings, then load it later with one click. Saved prompts are stored on the Luvox PC in `.luvox/saved-prompts.json` and are limited to 100 entries; API keys, reference images, reference URLs, and local file paths are never included. Existing browser-local prompts are moved into this file the next time their original browser origin opens Luvox.
+Choose **Saved prompts** to save up to 100 prompts, optionally including model settings. Credentials and references are never saved.
+
+Custom models and saved prompts are stored in `.luvox`. Set `LUVOX_DATA_DIR` to an absolute path to change this location. Docker uses the `luvox-data` volume; **`docker compose down -v` deletes this saved data**.
 
 ## Local image generation with MFLUX
 
-Install and verify [MFLUX](https://github.com/mflux-community/mflux) on a Mac with Apple Silicon. Luvox automatically finds `mflux-generate-flux2`, its `mflux-generate-flux2-edit` companion, and `mflux-generate-z-image-turbo` on the server process's `PATH`; set absolute paths in `.env` when the primary executables are not detected:
+Requires **macOS on Apple Silicon** and an installed [MFLUX](https://github.com/mflux-community/mflux). Use the npm setup, then choose **Text to image → Local MFLUX**.
+
+- **Z-Image Turbo** (default): text-to-image and optional reference-image variations.
+- **FLUX.2 Klein 4B**: text-to-image and instruction-based editing with one reference image.
+
+Luvox discovers the executables on `PATH`. If needed, set absolute paths in `.env`:
 
 ```bash
 MFLUX_FLUX2_BINARY=/absolute/path/to/mflux-generate-flux2
 MFLUX_Z_IMAGE_TURBO_BINARY=/absolute/path/to/mflux-generate-z-image-turbo
 ```
 
-Run `npm run dev`, choose **Text to image**, then select **Local MFLUX**. Luvox supports Z-Image Turbo and FLUX.2 Klein 4B with common 1:1, 16:9, 9:16, 4:3, 3:4, 3:2, and 2:3 resolution presets. Both generate from text without a reference. Z-Image Turbo accepts one optional reference for image-to-image variations at MFLUX's default 0.4 reference strength; describe the desired result in the prompt. FLUX.2 uses its dedicated instruction-based edit pipeline when a reference is supplied. Uploaded references can preserve the full image with padding or crop to fill the selected output canvas. The MFLUX CLI's multi-image and LoRA options are not exposed.
+FLUX.2 editing also requires `mflux-generate-flux2-edit` beside the main executable or on `PATH`.
 
-Z-Image Turbo is the default local model, with a Standard setup of 1024p / 1:1, nine steps, and 8-bit quantization; Fast switches to 4-bit. Advanced steps are 4, 6, or 9, and reference images use a shorter denoising loop. FLUX.2 offers four-step Quality (8-bit) and Fast (4-bit) setups. Advanced controls expose each model's allowlisted steps, quantization, seed, Low RAM mode, and VAE tiling at 128, 256, or 512 pixels. Low RAM automatically enables VAE tiling. Guidance is fixed by each distilled model and has no user control.
+Missing model resources download automatically on first generation, with progress shown in the app. Stopping keeps cached resources for retry. Gated models may require accepting their terms and running `hf auth login` on the host. MFLUX and its dependencies must be installed separately.
 
-Before using a model in Luvox, run its MFLUX executable successfully once in Terminal so its weights are downloaded and cached. Luvox does not download or bundle weights, keeps prompts and references in a private temporary directory, allows only one MFLUX generation at a time, and removes temporary files after each request. MFLUX and model weights have separate licenses; review them before use.
+Use **Fast** for lower-memory quantization or **Low RAM** to reduce peak memory and unload the model after each image. Otherwise, model reuse speeds up repeat generations while keeping memory occupied.
 
-With standard pip/uv MFLUX executables, Luvox reuses one Python worker and its loaded model between images. Repeated requests with the same model, generation/edit pipeline, quantization, and VAE tiling settings avoid interpreter startup and model loading. Changing the prompt, seed, steps, guidance, or resolution does not reload the model. The worker uses the Python interpreter from the installed MFLUX executable; custom executable wrappers retain the one-shot CLI behavior.
+Optional `.env` settings, in minutes:
 
-The model and its text encoder stay in memory, increasing RAM usage during and between generations. Luvox releases them after **five idle minutes**, on a model/configuration switch, cancellation, failure, or server shutdown. Set `MFLUX_KEEP_ALIVE_MINUTES` in `.env` to change the idle period (0–240 minutes); `0` disables reuse. **Low RAM** always uses the one-shot CLI and releases memory after each image. Prompts, references, and outputs are still removed after every request; only the worker bootstrap script and ownership marker remain until the worker exits.
-
-During local generation, the preview monitor streams MFLUX's inference steps, elapsed time, step ETA, and seconds per step. The ETA covers the remaining inference loop; final image decoding can add time.
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `MFLUX_DOWNLOAD_TIMEOUT_MINUTES` | `120` | Cumulative resource-check/download limit; 1–240. |
+| `MFLUX_TIMEOUT_MINUTES` | `30` | Loading/generation limit, excluding detected downloads; 1–240. |
+| `MFLUX_KEEP_ALIVE_MINUTES` | `5` | Idle time before unloading the model; 0–240. Set `0` to disable reuse. |
 
 ## Local generation with h3.c
 
-Part of Luvox's work is inspired by [h3.c](https://github.com/antirez/h3.c), which is also the engine required for local image-to-video generation. It is not bundled with Luvox.
-
-Local mode requires macOS on Apple Silicon, `ffmpeg`, the MiniMax H3 model weights, and a working h3.c build. Follow the [h3.c project instructions](https://github.com/antirez/h3.c) to install and verify them, then set these paths in `.env`:
+Requires **macOS on Apple Silicon**, `ffmpeg`, [h3.c](https://github.com/antirez/h3.c), and MiniMax H3 model weights. Follow the h3.c installation instructions, then set absolute paths in `.env`:
 
 ```bash
 H3_BINARY=/absolute/path/to/h3.c/h3
 H3_MODEL_DIR=/absolute/path/to/MiniMax-H3
 ```
 
-Run `npm run dev` and select **Local** in Luvox. Local mode does not need an OpenRouter API key. The current official h3.c CLI accepts one-shot prompts only through a process argument, so prompts may be visible to local process-inspection and monitoring tools while generation runs.
-
-The Advanced section includes allowlisted h3.c acceleration presets, seed control, and SSD streaming. Reduced tokens and the fast internal canvas are limited to the officially validated 512p / 1:1 / Balanced path.
-
-The h3.c source and MiniMax H3 model weights have their own licenses and usage restrictions. Review them before downloading, running, or distributing the engine, weights, or outputs.
+Use the npm setup and select **Local** for video generation. No OpenRouter key is needed. **h3.c prompts may be visible in local process listings** while generation runs.
 
 ## Session jobs
 
-Each generation type has one slot: OpenRouter image, local MFLUX image, OpenRouter video, and local h3.c video can overlap, but the same type must finish or fail before another starts. Unknown submissions stay locked until Unlock (OpenRouter) or Clear (local). Completed results can be deleted individually; other session jobs remain until Clear, reload, or server restart. Active local MFLUX and h3.c work can be aborted, but OpenRouter exposes no cancellation endpoint.
+Different generation types can run together, with one active job per type. **Download results you want to keep**: jobs and results are cleared on reload or server restart.
+
+Local generation can be stopped. OpenRouter jobs cannot be cancelled through Luvox; closing the app does not stop paid work already submitted.
 
 ## Privacy
 
-Luvox uses volatile session state instead of accounts or a generation database. Custom model definitions and prompts explicitly added to **Saved prompts** are persisted by the server under `LUVOX_DATA_DIR`. Saved entries may include model and scalar settings, but never credentials, references, jobs, or results. API responses are marked `private, no-store`, and credentials are kept out of payloads and URLs.
-
-When using OpenRouter, Luvox creates no local generation files. Except for prompts you explicitly save, UI-entered keys, prompts, results, and job records stay in tab or transit memory and are not persisted by Luvox. Keys travel only in request headers, remain pinned to submitted jobs in tab memory, and disappear on workspace reset, reload, or tab close. Videos are streamed through an authenticated proxy rather than saved to disk; temporary-key media uses revocable browser `blob:` URLs. Server-key video access uses a per-job capability kept only in tab and server memory, never in a URL, and expires after 24 hours without use. A server-configured `OPENROUTER_API_KEY` never reaches the browser.
-
-OpenRouter and model providers have separate data practices. Review OpenRouter's [privacy policy](https://openrouter.ai/privacy) and [provider logging documentation](https://openrouter.ai/docs/features/privacy-and-logging). Closing Luvox does not cancel provider work already submitted.
-
-Local MFLUX and h3.c run only on a compatible Mac. MFLUX uses an owner-marked private system temporary directory for each request, removes it when the request finishes or stops, and removes stale owned directories at startup after an abrupt server exit. Its reusable worker retains model weights, with a separate owner-marked directory containing only bootstrap code and an ownership marker; this directory is removed when the worker exits. The worker also exits if its Luvox parent process disappears. h3.c temporarily stores app-owned jobs, outputs, and uploaded references under `.h3-jobs` or `H3_JOBS_DIR`; per-tab tokens isolate them. Luvox cleans h3.c files when a job is deleted or aborted, on Clear, reload/close cleanup, startup, graceful shutdown, or after a browser workspace misses its five-minute lease.
+- Only custom models and explicitly saved prompts persist as workspace data. Temporary browser-entered API keys are not stored; the server's `OPENROUTER_API_KEY` never reaches the browser.
+- Local engines use temporary generation files that Luvox cleans up. Downloaded model caches remain on disk for reuse.
+- Remote prompts and references are sent to the selected provider. See OpenRouter's [privacy policy](https://openrouter.ai/privacy) and [provider logging documentation](https://openrouter.ai/docs/features/privacy-and-logging).
 
 ## License
 
 Luvox is licensed under the [GNU General Public License v3.0](LICENSE).
+
+MFLUX, h3.c, and their model weights have separate licenses and usage restrictions. Engines and weights are not bundled with Luvox.

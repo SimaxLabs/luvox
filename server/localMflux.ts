@@ -84,6 +84,7 @@ export function getAvailableLocalMfluxModels(): string[] {
   if (!isLocalMfluxSupported() || storageBlocked) return [];
   try {
     timeoutMilliseconds();
+    timeoutMilliseconds("MFLUX_DOWNLOAD_TIMEOUT_MINUTES", 120);
     keepAliveMilliseconds();
   } catch {
     return [];
@@ -91,11 +92,11 @@ export function getAvailableLocalMfluxModels(): string[] {
   return MFLUX_IMAGE_MODELS.filter((model) => resolveMfluxBinary(model)).map((model) => model.id);
 }
 
-function timeoutMilliseconds(): number {
-  const minutes = Number(process.env.MFLUX_TIMEOUT_MINUTES || 30);
+function timeoutMilliseconds(name = "MFLUX_TIMEOUT_MINUTES", fallback = 30): number {
+  const minutes = Number(process.env[name] || fallback);
   if (!Number.isFinite(minutes) || minutes < 1 || minutes > 240) {
     throw new LocalMfluxError(
-      "MFLUX_TIMEOUT_MINUTES must be between 1 and 240.",
+      `${name} must be between 1 and 240.`,
       503,
       "local_mflux_configuration_error",
       false,
@@ -396,6 +397,22 @@ function parseClock(value: string): number | undefined {
   return value.split(":").reduce((seconds, part) => seconds * 60 + Number(part), 0);
 }
 
+function mfluxEngineError(code: string): LocalMfluxError {
+  const failures: Record<string, [string, boolean]> = {
+    access: ["Model download requires Hugging Face access. Accept the model's terms if required and run hf auth login on the Luvox host, then try again.", false],
+    resource_missing: ["A required model resource is unavailable on Hugging Face. Check the model's availability and update MFLUX before trying again.", false],
+    network: ["Could not fetch required model resources. Check the Luvox host's internet connection and try again; cached resources are kept.", true],
+    disk_full: ["MFLUX ran out of disk space. Free space for the model cache and temporary files on the Luvox host, then try again.", false],
+    cache_permission: ["MFLUX cannot access required files. Check model cache and temporary directory permissions on the Luvox host.", false],
+    dependencies: ["MFLUX or a required Python dependency could not load. Repair or update the MFLUX installation on the Luvox host.", false],
+    download: ["Required model resources could not be downloaded. Check Hugging Face access and the host's network and cache, then try again.", true],
+  };
+  const failure = Object.hasOwn(failures, code) ? failures[code] : undefined;
+  return failure
+    ? new LocalMfluxError(failure[0], 503, `local_mflux_${code}_error`, failure[1])
+    : new LocalMfluxError("MFLUX generation failed.", 500, "local_mflux_error", false);
+}
+
 async function createMfluxDirectory(binary: string, kind: string): Promise<string> {
   const directory = await mkdtemp(path.join(os.tmpdir(), MFLUX_TEMP_PREFIX));
   activeDirectories.add(directory);
@@ -454,13 +471,13 @@ async function stopWarmWorker(): Promise<void> {
   clearTimeout(killTimer);
 }
 
-async function startWarmWorker(python: string, binary: string, pipeline: string, key: string): Promise<NonNullable<typeof warmWorker>> {
+async function startWarmWorker(python: string, binary: string, pipeline: string, key: string, oneShot: boolean): Promise<NonNullable<typeof warmWorker>> {
   const directory = await createMfluxDirectory(python, MFLUX_WORKER_KIND);
   try {
     const script = path.join(directory, "worker.py");
     await writeFile(script, MFLUX_WORKER_SOURCE, { mode: 0o600 });
     assertMfluxMayContinue();
-    const child = spawn(python, ["-u", "-B", script, binary, pipeline, String(process.pid)], {
+    const child = spawn(python, ["-u", "-B", script, binary, pipeline, String(process.pid), ...(oneShot ? ["--once"] : [])], {
       cwd: directory,
       detached: true,
       env: childEnvironment(),
@@ -508,11 +525,11 @@ async function runMflux(
 ): Promise<void> {
   const keepAlive = input.lowRam ? 0 : keepAliveMilliseconds();
   const pipeline = input.model === "z-image-turbo" ? "z-image-turbo" : input.inputReference ? "flux2-edit" : "flux2";
-  const python = keepAlive ? await mfluxPython(binary, pipeline) : undefined;
+  const python = await mfluxPython(binary, pipeline);
   const key = JSON.stringify([binary, pipeline, input.model, input.quantization, input.vaeTiling ? input.vaeTileSize : null]);
-  if (warmWorker && (!python || warmWorker.key !== key)) await stopWarmWorker();
+  if (warmWorker && (!keepAlive || !python || warmWorker.key !== key)) await stopWarmWorker();
   assertMfluxMayContinue(signal);
-  const worker = python ? warmWorker ?? await startWarmWorker(python, binary, pipeline, key) : undefined;
+  const worker = python ? warmWorker ?? await startWarmWorker(python, binary, pipeline, key, !keepAlive) : undefined;
   if (worker) clearTimeout(worker.idleTimer);
   if (signal?.aborted) {
     await stopWarmWorker();
@@ -523,7 +540,8 @@ async function runMflux(
     ? input.steps - Math.max(1, Math.floor(input.steps * Z_IMAGE_REFERENCE_STRENGTH))
     : input.steps;
   return new Promise((resolve, reject) => {
-    const timeoutMs = timeoutMilliseconds();
+    let generationRemaining = timeoutMilliseconds();
+    let downloadRemaining = timeoutMilliseconds("MFLUX_DOWNLOAD_TIMEOUT_MINUTES", 120);
     const child = worker?.child ?? spawn(binary, args, {
       cwd: directory,
       detached: true,
@@ -538,14 +556,76 @@ async function runMflux(
     let progressBuffer = "";
     let controlBuffer = "";
     let lastStep = -1;
+    let completed = false;
+    let resourcePhase = false;
+    let phaseStarted = performance.now();
+    let timeout: ReturnType<typeof setTimeout>;
+    let reportedError: LocalMfluxError | undefined;
+
+    const armTimeout = () => {
+      clearTimeout(timeout);
+      timeout = setTimeout(() => {
+        stop(new LocalMfluxError(
+          resourcePhase
+            ? "Model resource download timed out. Try again to reuse cached files, or increase MFLUX_DOWNLOAD_TIMEOUT_MINUTES."
+            : "MFLUX loading or generation timed out.",
+          504,
+          resourcePhase ? "local_mflux_download_timeout" : "local_mflux_timeout",
+          true,
+        ));
+      }, Math.max(0, resourcePhase ? downloadRemaining : generationRemaining));
+      timeout.unref();
+    };
+    const setResourcePhase = (next: boolean) => {
+      if (next === resourcePhase) return;
+      const elapsed = performance.now() - phaseStarted;
+      if (resourcePhase) downloadRemaining -= elapsed;
+      else generationRemaining -= elapsed;
+      resourcePhase = next;
+      phaseStarted = performance.now();
+      armTimeout();
+    };
+    const resourceProgress = (phase: "checking" | "downloading" | "loading", download?: LocalMfluxProgress["download"]) => {
+      setResourcePhase(phase !== "loading");
+      onProgress?.({
+        phase, step: 0, total: totalSteps,
+        percent: download && download.total > 0 ? Math.min(100, 100 * download.completed / download.total) : 0,
+        download,
+      });
+    };
 
     const appendDiagnostics = (chunk: Buffer) => {
       const text = chunk.toString("utf8");
-      progressBuffer = (progressBuffer + text).slice(-4_096);
-      for (const match of progressBuffer.matchAll(/(\d{1,3})%\|[^\r\n]*\|\s*(\d+)\/(\d+)\s*\[([^\]]+)\]/g)) {
+      const lines = (progressBuffer + text).split(/[\r\n]/);
+      progressBuffer = (lines.pop() || "").slice(-4_096);
+      for (const raw of lines) {
+        const line = raw.slice(-4_096).replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
+        if (!worker) {
+          // Custom wrappers retain their CLI. Recognize native Hub output without exposing raw logs.
+          if (/GatedRepoError|LocalTokenNotFoundError|\b(?:401|403) Client Error/.test(line)) reportedError = mfluxEngineError("access");
+          else if (/No space left on device|\bENOSPC\b/.test(line)) reportedError = mfluxEngineError("disk_full");
+          else if (/PermissionError|Read-only file system/.test(line)) reportedError = mfluxEngineError("cache_permission");
+          else if (/ModuleNotFoundError|ImportError/.test(line)) reportedError = mfluxEngineError("dependencies");
+          else if (/ConnectError|ConnectionError|ReadTimeout|LocalEntryNotFoundError/.test(line)) reportedError = mfluxEngineError("network");
+          if (/Downloading model from HuggingFace:|^\s*Fetching \d+ files:/.test(line)) {
+            const files = /\|\s*(\d+)\/(\d+)\s*\[/.exec(line);
+            resourceProgress("downloading", files ? { completed: Number(files[1]), total: Number(files[2]), unit: "files" } : undefined);
+            if (files && Number(files[2]) > 0 && files[1] === files[2]) resourceProgress("loading");
+            continue;
+          }
+          if (resourcePhase && /Download complete|Reconstruction complete/.test(line)) {
+            resourceProgress("loading");
+            continue;
+          }
+        }
+        // Inference bars have no filename/Fetching prefix; download counts must not masquerade as steps.
+        const match = /^\s*(\d{1,3})%\|[^\r\n]*\|\s*(\d+)\/(\d+)\s*\[([^\]]+)\]/.exec(line);
+        if (!match) continue;
         const step = Number(match[2]);
         const total = Number(match[3]);
         if (total !== totalSteps || step <= lastStep || step > total) continue;
+        setResourcePhase(false);
+        reportedError = undefined;
         const timing = /^(\d+(?::\d+){1,2})<([\d:?]+)(?:,\s*([\d.]+)(s\/it|it\/s))?/.exec(match[4]);
         const rate = Number(timing?.[3]);
         lastStep = step;
@@ -573,7 +653,7 @@ async function runMflux(
       child.off("close", onClose);
       if (error) reject(error);
       else {
-        if (worker) {
+        if (worker && keepAlive) {
           worker.idleTimer = setTimeout(() => { void stopWarmWorker(); }, keepAlive);
           worker.idleTimer.unref();
         }
@@ -582,11 +662,36 @@ async function runMflux(
     };
     const appendControl = (chunk: Buffer) => {
       if (stopError) return;
-      controlBuffer = (controlBuffer + chunk.toString("utf8")).slice(0, 129);
-      if (controlBuffer === "done\n") {
-        if (!stopError) finish();
-      } else if (controlBuffer.length > 128 || controlBuffer.includes("\n")) {
-        stop(new LocalMfluxError("MFLUX generation failed.", 500, "local_mflux_error", false));
+      const lines = (controlBuffer + chunk.toString("utf8")).split("\n");
+      controlBuffer = lines.pop() || "";
+      if (controlBuffer.length > 4_096) {
+        controlBuffer = "";
+        stop(mfluxEngineError("engine"));
+        return;
+      }
+      for (const line of lines) {
+        if (settled || stopError) break;
+        try {
+          if (line.length > 4_096) throw new Error("oversized event");
+          const event = JSON.parse(line);
+          if (event.type === "done") {
+            completed = true;
+            if (keepAlive) finish();
+          } else if (event.type === "error" && typeof event.code === "string") {
+            stop(mfluxEngineError(event.code));
+          } else if (event.type === "checking" || event.type === "loading") {
+            resourceProgress(event.type);
+          } else if (
+            event.type === "downloading" &&
+            Number.isSafeInteger(event.completed) && event.completed >= 0 &&
+            Number.isSafeInteger(event.total) && event.total >= event.completed &&
+            (event.unit === "bytes" || event.unit === "files")
+          ) {
+            resourceProgress("downloading", { completed: event.completed, total: event.total, unit: event.unit });
+          } else throw new Error("invalid event");
+        } catch {
+          stop(mfluxEngineError("engine"));
+        }
       }
     };
     child.stdout?.on("data", worker ? appendControl : appendDiagnostics);
@@ -603,17 +708,15 @@ async function runMflux(
     stopActive = abort;
     signal?.addEventListener("abort", abort, { once: true });
 
-    const timeout = setTimeout(() => {
-      stop(new LocalMfluxError("MFLUX generation timed out.", 504, "local_mflux_timeout", true));
-    }, timeoutMs);
-    timeout.unref();
+    armTimeout();
 
     const onError = () => {
       stopError ??= new LocalMfluxError("MFLUX could not start.", 503, "local_mflux_spawn_error", false);
     };
     const onClose = async (code: number | null) => {
       if (worker) await worker.closed;
-      finish(stopError ?? (code === 0 && !worker ? undefined : new LocalMfluxError("MFLUX generation failed.", 500, "local_mflux_error", false)));
+      finish(stopError ?? (code === 0 && (!worker || completed) ? undefined
+        : reportedError ?? mfluxEngineError(resourcePhase && lastStep < 0 ? "download" : "engine")));
     };
     child.once("error", onError);
     child.once("close", onClose);

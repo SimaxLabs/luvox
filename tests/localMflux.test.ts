@@ -160,6 +160,15 @@ if (referenceIndex >= 0) {
   const height = process.argv[process.argv.indexOf("--height") + 1];
   if (referenceInfo.status !== 0 || !referenceInfo.stdout.includes("pixelWidth: " + width) || !referenceInfo.stdout.includes("pixelHeight: " + height)) process.exit(2);
 }
+if (prompt.startsWith("download")) {
+  process.stderr.write("Downloading model from HuggingFace: private/model...\\n");
+  process.stderr.write("Fetching 4 files:  50%|#####     | 2/4 [00:20<00:20, 2.00s/it]\\r");
+  if (prompt === "download access") {
+    process.stderr.write("GatedRepoError: hf_secret /private/cache https://private.example/model\\n");
+    process.exit(1);
+  }
+  process.stderr.write("Fetching 4 files: 100%|##########| 4/4 [00:40<00:00, 2.00s/it]\\r");
+}
 process.stderr.write("  0%|          | 0/" + steps + " [00:00<?, ?it/s]\\r");
 process.stderr.write(" 50%|#####     | " + Math.floor(steps / 2) + "/" + steps + " [00:20<00:20, 2.00s/it]\\r");
 process.stderr.write("100%|##########| " + steps + "/" + steps + " [00:40<00:00, 2.00s/it]\\r");
@@ -223,6 +232,12 @@ process.exit(resizeStatus);
       inputReference: webpReferenceImage,
     }));
     assert.equal(webpResult.mediaType, "image/png");
+    const downloadProgress: LocalMfluxProgress[] = [];
+    await generateLocalMfluxImage(input({ prompt: "download" }), undefined, (progress) => downloadProgress.push(progress));
+    assert.ok(downloadProgress.some((progress) => progress.phase === "downloading" && progress.download?.completed === 2));
+    assert.equal(downloadProgress.filter((progress) => progress.phase === "generating" && progress.step === 2).length, 1);
+    await assert.rejects(generateLocalMfluxImage(input({ prompt: "download access" })), (error) =>
+      error instanceof LocalMfluxError && error.type === "local_mflux_access_error" && !error.message.includes("hf_secret"));
     const preprocessingController = new AbortController();
     const preprocessing = generateLocalMfluxImage(input({
       resolution: "1280x720",
@@ -275,7 +290,7 @@ process.exit(resizeStatus);
 test("MFLUX warm worker reuses weights, isolates requests, and releases memory on lifecycle changes", {
   skip: process.platform !== "darwin" || process.arch !== "arm64",
   timeout: 30_000,
-}, async () => {
+}, async (t) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "luvox-warm-test-"));
   const temporaryRoot = path.join(directory, "jobs");
   const python = path.join(directory, "python3");
@@ -283,7 +298,7 @@ test("MFLUX warm worker reuses weights, isolates requests, and releases memory o
   const binary = path.join(directory, "mflux-generate-flux2");
   const editBinary = path.join(directory, "mflux-generate-flux2-edit");
   const zImageBinary = path.join(directory, "mflux-generate-z-image-turbo");
-  const names = ["MFLUX_FLUX2_BINARY", "MFLUX_Z_IMAGE_TURBO_BINARY", "MFLUX_KEEP_ALIVE_MINUTES", "TMPDIR", "OPENROUTER_API_KEY"];
+  const names = ["MFLUX_FLUX2_BINARY", "MFLUX_Z_IMAGE_TURBO_BINARY", "MFLUX_KEEP_ALIVE_MINUTES", "MFLUX_TIMEOUT_MINUTES", "MFLUX_DOWNLOAD_TIMEOUT_MINUTES", "TMPDIR", "OPENROUTER_API_KEY"];
   const previous = names.map((name) => process.env[name]);
   const events = async (): Promise<Array<Record<string, any>>> => (await readFile(path.join(directory, "python3.events"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
   const request = (overrides: Partial<LocalMfluxGenerateImageInput> = {}) => generateLocalMfluxImage(input({ prompt: "first", seed: 42, ...overrides }));
@@ -390,6 +405,76 @@ test("MFLUX warm worker reuses weights, isolates requests, and releases memory o
     assert.deepEqual(await readdir(temporaryRoot), []);
     await request();
     assert.notEqual((await events()).at(-1)?.pid, idlePid);
+
+    process.env.MFLUX_KEEP_ALIVE_MINUTES = "0";
+    process.env.MFLUX_TIMEOUT_MINUTES = "30";
+    process.env.MFLUX_DOWNLOAD_TIMEOUT_MINUTES = "120";
+    const cache = path.join(directory, "python3.cache");
+    const mode = path.join(directory, "python3.mode");
+    await rm(cache, { recursive: true, force: true });
+    const downloadProgress: LocalMfluxProgress[] = [];
+    await generateLocalMfluxImage(input({ prompt: "first", lowRam: true }), undefined, (progress) => downloadProgress.push(progress));
+    assert.ok(downloadProgress.some((progress) => progress.phase === "checking"));
+    assert.ok(downloadProgress.some((progress) => progress.phase === "downloading" && progress.download?.unit === "bytes" && progress.download.completed === 500_000 && progress.percent === 50));
+    assert.equal((await events()).at(-1)?.low_ram, true);
+    assert.deepEqual(await readdir(temporaryRoot), []);
+    assert.equal((await readdir(cache)).length, 2);
+    assert.ok(!JSON.stringify(downloadProgress).includes("private"));
+    const cachedProgress: LocalMfluxProgress[] = [];
+    await generateLocalMfluxImage(input({ prompt: "first" }), undefined, (progress) => cachedProgress.push(progress));
+    assert.ok(!cachedProgress.some((progress) => progress.phase === "downloading"));
+
+    for (const code of ["access", "network", "disk_full", "cache_permission", "resource_missing", "dependencies"]) {
+      await rm(cache, { recursive: true, force: true });
+      await writeFile(mode, code);
+      await assert.rejects(request(), (error) => error instanceof LocalMfluxError &&
+        error.type === `local_mflux_${code}_error` && !/hf_secret|private/.test(error.message));
+      assert.deepEqual(await readdir(temporaryRoot), []);
+    }
+
+    await writeFile(mode, "stall");
+    const downloadController = new AbortController();
+    let markDownloading!: () => void;
+    const downloading = new Promise<void>((resolve) => { markDownloading = resolve; });
+    const interrupted = generateLocalMfluxImage(input({ prompt: "first" }), downloadController.signal, (progress) => {
+      if (progress.phase === "downloading") markDownloading();
+    });
+    await downloading;
+    await assert.rejects(request(), (error) => error instanceof LocalMfluxError && error.type === "local_mflux_busy");
+    downloadController.abort();
+    await assert.rejects(interrupted, (error) => error instanceof LocalMfluxError && error.type === "local_mflux_aborted");
+    assert.deepEqual(await readdir(temporaryRoot), []);
+    assert.ok((await readdir(cache)).some((file) => file.endsWith(".incomplete")));
+    await writeFile(mode, "");
+    await request();
+    assert.equal((await readdir(cache)).length, 2);
+
+    // Advance the host clock without slowing the fake engine or downloading real resources.
+    for (const scenario of ["separate budgets", "download timeout", "generation timeout"]) {
+      await rm(cache, { recursive: true, force: true });
+      t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
+      const clock = t.mock.method(performance, "now", () => Date.now());
+      try {
+        const operation = generateLocalMfluxImage(input({ prompt: "first" }), undefined, (progress) => {
+          if (progress.phase === "checking" && scenario !== "generation timeout") {
+            t.mock.timers.tick((scenario === "download timeout" ? 70 : 20) * 60_000);
+          }
+          if (progress.phase === "generating" && scenario === "generation timeout") {
+            t.mock.timers.tick(31 * 60_000);
+          }
+        });
+        if (scenario === "separate budgets") assert.equal((await operation).mediaType, "image/png");
+        else await assert.rejects(operation, (error) => error instanceof LocalMfluxError && error.type ===
+          (scenario === "download timeout" ? "local_mflux_download_timeout" : "local_mflux_timeout"));
+        assert.deepEqual(await readdir(temporaryRoot), []);
+      } finally {
+        clock.mock.restore();
+        t.mock.timers.reset();
+      }
+    }
+
+    process.env.MFLUX_KEEP_ALIVE_MINUTES = "5";
+    await request();
     await shutdownLocalMflux();
     assert.deepEqual(await readdir(temporaryRoot), []);
 

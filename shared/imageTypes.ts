@@ -7,10 +7,11 @@ export interface ImageGenerationResponse {
 }
 
 export interface LocalMfluxProgress {
-  phase: "loading" | "generating" | "decoding";
+  phase: "checking" | "downloading" | "loading" | "generating" | "decoding";
   step: number;
   total: number;
   percent: number;
   etaSeconds?: number;
   secondsPerStep?: number;
+  download?: { completed: number; total: number; unit: "bytes" | "files" };
 }

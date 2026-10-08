@@ -650,6 +650,12 @@ function formatSeconds(value?: number): string {
   return minutes ? `${minutes}m ${String(seconds % 60).padStart(2, "0")}s` : `${seconds}s`;
 }
 
+function formatBytes(bytes: number): string {
+  if (bytes >= 1_000_000_000) return `${(bytes / 1_000_000_000).toFixed(1)} GB`;
+  if (bytes >= 1_000_000) return `${(bytes / 1_000_000).toFixed(1)} MB`;
+  return `${Math.ceil(bytes / 1_000)} KB`;
+}
+
 function getImageTaskStatus(
   submitting: boolean,
   result: ImageGenerationResponse | null,
@@ -1182,6 +1188,8 @@ export default function App() {
   const selectedMfluxModel = getMfluxImageModel(mfluxModel) ?? MFLUX_IMAGE_MODEL;
   const selectedMfluxResolution = getMfluxImageResolution(mfluxResolution) ?? MFLUX_IMAGE_RESOLUTIONS[0];
   const mfluxVaeTilingEnabled = mfluxLowRam || mfluxVaeTiling;
+  const mfluxResourcePhase = mfluxProgress?.phase === "checking" || mfluxProgress?.phase === "downloading";
+  const mfluxHasProgress = Boolean(mfluxProgress?.download?.total) || mfluxProgress?.phase === "generating" || mfluxProgress?.phase === "decoding";
   const mfluxRecommendedSetups = MFLUX_IMAGE_RECOMMENDED_SETUPS.filter((setup) =>
     (setup.models as readonly string[]).includes(selectedMfluxModel.id));
   const selectedLocalQuality = getLocalH3QualityPreset(form.localQuality);
@@ -3372,46 +3380,62 @@ export default function App() {
                     <div className="mx-auto mb-5 size-12 animate-spin rounded-full border border-white/15 border-t-[#d9ff72]" />
                     <p className="font-display text-2xl uppercase text-white" aria-live="polite">
                       {imageProvider === "mflux"
-                        ? mfluxProgress?.phase === "decoding"
-                          ? "Decoding image"
-                          : mfluxProgress?.phase === "generating"
-                            ? "Generating image"
-                            : "Loading model"
+                        ? mfluxProgress?.phase === "checking"
+                          ? "Checking model resources"
+                          : mfluxProgress?.phase === "downloading"
+                            ? "Downloading model resources"
+                            : mfluxProgress?.phase === "decoding"
+                              ? "Decoding image"
+                              : mfluxProgress?.phase === "generating"
+                                ? "Generating image"
+                                : "Loading model"
                         : "Rendering first frame"}
                     </p>
                     <p className="mt-2 font-mono text-[10px] uppercase tracking-[0.2em] text-white/60">
-                      {imageProvider === "mflux" ? "MFLUX is composing the image" : `${currentImageModelName} is composing the image`}
+                      {imageProvider === "mflux"
+                        ? mfluxResourcePhase ? "Preparing cached weights and tokenizers" : "MFLUX is composing the image"
+                        : `${currentImageModelName} is composing the image`}
                     </p>
                     {imageProvider === "mflux" && (
                       <div className="mt-8 border border-white/10 bg-black/20 p-4 text-left">
                         <div
-                          aria-label="MFLUX generation progress"
+                          aria-label={mfluxResourcePhase ? "MFLUX model resource download progress" : "MFLUX generation progress"}
                           aria-valuemax={100}
                           aria-valuemin={0}
-                          aria-valuenow={mfluxProgress?.percent ?? 0}
+                          aria-valuenow={mfluxHasProgress ? mfluxProgress?.percent : undefined}
                           className="h-1.5 overflow-hidden bg-white/10"
                           role="progressbar"
                         >
-                          <div className="h-full bg-[#d9ff72] transition-[width]" style={{ width: `${mfluxProgress?.percent ?? 0}%` }} />
+                          <div className={`h-full bg-[#d9ff72] transition-[width] ${mfluxHasProgress ? "" : "animate-pulse"}`} style={{ width: mfluxHasProgress ? `${mfluxProgress?.percent ?? 0}%` : "35%" }} />
                         </div>
                         <div className="mt-4 grid grid-cols-3 gap-3">
                           <div>
-                            <p className="font-mono text-[8px] uppercase tracking-[0.16em] text-white/45">Progress</p>
-                            <p className="mt-1 font-mono text-xs text-white">{mfluxProgress?.step ?? 0} / {mfluxProgress?.total ?? mfluxSteps}</p>
+                            <p className="font-mono text-[8px] uppercase tracking-[0.16em] text-white/45">{mfluxResourcePhase ? "Current download" : "Steps"}</p>
+                            <p className="mt-1 font-mono text-xs text-white">
+                              {mfluxResourcePhase
+                                ? mfluxProgress?.download
+                                  ? mfluxProgress.download.unit === "bytes"
+                                    ? `${formatBytes(mfluxProgress.download.completed)} / ${formatBytes(mfluxProgress.download.total)}`
+                                    : `${mfluxProgress.download.completed} / ${mfluxProgress.download.total} files`
+                                  : "Checking…"
+                                : `${mfluxProgress?.step ?? 0} / ${mfluxProgress?.total ?? mfluxSteps}`}
+                            </p>
                           </div>
                           <div>
                             <p className="font-mono text-[8px] uppercase tracking-[0.16em] text-white/45">Elapsed</p>
                             <p className="mt-1 font-mono text-xs text-white">{formatSeconds(mfluxElapsedSeconds)}</p>
                           </div>
                           <div>
-                            <p className="font-mono text-[8px] uppercase tracking-[0.16em] text-white/45">Step ETA</p>
-                            <p className="mt-1 font-mono text-xs text-white">{formatSeconds(mfluxProgress?.etaSeconds)}</p>
+                            <p className="font-mono text-[8px] uppercase tracking-[0.16em] text-white/45">{mfluxResourcePhase ? "Progress" : "Step ETA"}</p>
+                            <p className="mt-1 font-mono text-xs text-white">{mfluxResourcePhase ? mfluxHasProgress ? `${mfluxProgress?.percent.toFixed(0)}%` : "—" : formatSeconds(mfluxProgress?.etaSeconds)}</p>
                           </div>
                         </div>
                         <p className="mt-4 font-mono text-[9px] leading-4 text-white/50">
-                          {mfluxProgress?.secondsPerStep
-                            ? `${mfluxProgress.secondsPerStep.toFixed(1)} seconds per step. ETA covers inference; final decoding may add time.`
-                            : "Timing appears after the first inference step."}
+                          {mfluxResourcePhase
+                            ? "Progress is for the current resource batch. Downloads have a separate time limit; cached files are kept when stopped and reused on retry."
+                            : mfluxProgress?.secondsPerStep
+                              ? `${mfluxProgress.secondsPerStep.toFixed(1)} seconds per step. ETA covers inference; final decoding may add time.`
+                              : "Timing appears after the first inference step."}
                         </p>
                       </div>
                     )}

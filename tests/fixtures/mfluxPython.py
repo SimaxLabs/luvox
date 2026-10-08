@@ -2,6 +2,8 @@
 """Fake MFLUX environment: executes Luvox's real worker without loading weights."""
 import argparse
 import base64
+import errno
+from functools import partial
 import json
 import os
 from pathlib import Path
@@ -12,6 +14,8 @@ import time
 import types
 
 events = Path(__file__).with_suffix(".events")
+cache = Path(__file__).with_suffix(".cache")
+mode_file = Path(__file__).with_suffix(".mode")
 
 
 def record(event, **values):
@@ -71,6 +75,14 @@ class Image:
 
 class Model:
     def __init__(self, **options):
+        import huggingface_hub as hub
+        for resource in ["weights", "tokenizer"]:
+            repo = options["model_config"] + "-" + resource
+            download = hub.snapshot_download if resource == "weights" else hub.hf_hub_download
+            try:
+                download(repo, local_files_only=True)
+            except LocalEntryNotFoundError:
+                download(repo)
         self.callbacks = types.SimpleNamespace(register=lambda callback: self.registered.append(callback))
         self.registered = []
         self.tiling_config = None
@@ -103,6 +115,84 @@ class Model:
         return Image(options)
 
 
+class LocalEntryNotFoundError(Exception):
+    pass
+
+
+class GatedRepoError(Exception):
+    pass
+
+
+class FakeProgress:
+    def __init__(self, **kwargs):
+        self.total = kwargs.get("total", 0)
+        self.n = kwargs.get("initial", 0)
+        self.unit = kwargs.get("unit", "it")
+        self.desc = kwargs.get("desc", "")
+        self.display()
+
+    def display(self):
+        pass
+
+    def update(self, amount):
+        self.n += amount
+        self.display()
+
+
+def snapshot_download(repo_id, *, local_files_only=False, tqdm_class=FakeProgress):
+    resource = cache / repo_id
+    if resource.exists():
+        record("cached", resource=repo_id)
+        return str(resource)
+    if local_files_only:
+        raise LocalEntryNotFoundError("missing cached test resource")
+    mode = mode_file.read_text() if mode_file.exists() else ""
+    sensitive = "private prompt /private/cache hf_secret https://private.example/model"
+    if mode == "access":
+        raise GatedRepoError(sensitive)
+    if mode == "network":
+        raise ConnectionError(sensitive)
+    if mode == "disk_full":
+        raise OSError(errno.ENOSPC, sensitive)
+    if mode == "cache_permission":
+        raise PermissionError(sensitive)
+    if mode == "resource_missing":
+        error = ValueError(sensitive)
+        error.response = types.SimpleNamespace(status_code=404)
+        raise error
+    if mode == "dependencies":
+        raise ModuleNotFoundError(sensitive)
+    record("download", resource=repo_id)
+    cache.mkdir(exist_ok=True)
+    incomplete = cache / (repo_id + ".incomplete")
+    incomplete.write_text("partial test resource")
+    progress = tqdm_class(total=1000000, unit="B", desc=sensitive)
+    while mode == "stall":
+        time.sleep(1)
+    time.sleep(0.21)
+    progress.update(500000)
+    progress.update(500000)
+    incomplete.rename(resource)
+    return str(resource)
+
+
+def cli(model_class):
+    args = build_parser().parse_args()
+    model = model_class(quantize=args.quantize, model_config=args.model)
+    model.callbacks.register(5)
+    options = dict(seed=args.seed[0], prompt=Path(args.prompt_file).read_text(), width=args.width,
+                   height=args.height, num_inference_steps=args.steps,
+                   guidance=0 if model_class.__name__ == "ZImage" else 1)
+    if model_class.__name__ == "ZImage":
+        options.update(image_path=args.image_path, image_strength=args.image_strength)
+    elif args.image_paths:
+        options["image_paths"] = args.image_paths
+    model.generate_image(**options).save(args.output, False)
+    record("cli", low_ram=args.low_ram)
+
+
+module("huggingface_hub", snapshot_download=snapshot_download, hf_hub_download=snapshot_download)
+module("tqdm.auto", tqdm=FakeProgress)
 module("mlx.core", clear_cache=lambda: None)
 module("mflux.callbacks.instances.battery_saver", BatterySaver=lambda limit: limit)
 module("mflux.models.common.resolution.config_resolution", ConfigResolution=types.SimpleNamespace(resolve_restricted=lambda model, default: model))
@@ -113,7 +203,8 @@ for name, class_name in [
     ("flux2.cli.flux2_edit_generate", "Flux2KleinEdit"),
     ("z_image.cli.z_image_turbo_generate", "ZImage"),
 ]:
-    module("mflux.models." + name, build_parser=build_parser, **{class_name: type(class_name, (Model,), {})})
+    model_class = type(class_name, (Model,), {})
+    module("mflux.models." + name, build_parser=build_parser, main=partial(cli, model_class), **{class_name: model_class})
 
 if sys.argv[1] == "-u":
     sys.argv = sys.argv[3:]
