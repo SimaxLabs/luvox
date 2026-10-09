@@ -10,32 +10,10 @@ import {
   LOCAL_H3_FRAME_FIT_IDS,
 } from "../shared/localH3.js";
 import { getMfluxImageModel, getMfluxImageResolution, MFLUX_IMAGE_MODELS, MFLUX_VAE_TILE_SIZES } from "../shared/imageModels.js";
-import type { ImageMediaType } from "../shared/imageTypes.js";
+import { rasterMediaType } from "../shared/imageTypes.js";
 import { getOpenRouterImageModel, getOpenRouterVideoModel } from "./openrouterModels.js";
 
 const IMAGE_REFERENCE_MAX_BYTES = 10 * 1024 * 1024;
-
-export function rasterMediaType(base64: string): ImageMediaType | undefined {
-  const bytes = Buffer.from(base64.slice(0, 24), "base64");
-  if (
-    bytes[0] === 0x89 &&
-    bytes[1] === 0x50 &&
-    bytes[2] === 0x4e &&
-    bytes[3] === 0x47 &&
-    bytes[4] === 0x0d &&
-    bytes[5] === 0x0a &&
-    bytes[6] === 0x1a &&
-    bytes[7] === 0x0a
-  ) return "image/png";
-  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
-    return "image/jpeg";
-  }
-  if (
-    bytes.toString("ascii", 0, 4) === "RIFF" &&
-    bytes.toString("ascii", 8, 12) === "WEBP"
-  ) return "image/webp";
-  return undefined;
-}
 
 function isPublicHostname(hostname: string): boolean {
   const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, "");
@@ -109,7 +87,7 @@ const imageReferenceDataUrl = z
   }, "The reference image must be 10 MB or smaller.")
   .refine((value) => {
     const [header, base64] = value.split(",", 2);
-    const mediaType = rasterMediaType(base64 || "");
+    const mediaType = rasterMediaType(Buffer.from((base64 || "").slice(0, 24), "base64"));
     return Boolean(mediaType && header === `data:${mediaType};base64`);
   }, "The reference image content does not match its image type.")
   .optional();
@@ -151,6 +129,7 @@ const generateImageSchema = z.discriminatedUnion("provider", [
 export type OpenRouterGenerateImageInput = z.infer<typeof openRouterGenerateImageSchema>;
 export type LocalMfluxGenerateImageInput = z.infer<typeof localMfluxGenerateImageSchema>;
 export type ImageGenerateInput = z.infer<typeof generateImageSchema>;
+export type ImageGeneratePayload = z.input<typeof generateImageSchema>;
 
 export function validateGenerateImageInput(value: unknown): ImageGenerateInput {
   const input = generateImageSchema.parse(value);
@@ -236,6 +215,7 @@ const generateVideoSchema = z.discriminatedUnion("provider", [
   localGenerateVideoSchema,
 ]);
 export type VideoGenerateInput = z.infer<typeof generateVideoSchema>;
+export type VideoGeneratePayload = z.input<typeof generateVideoSchema>;
 
 export function validateGenerateVideoInput(value: unknown): VideoGenerateInput {
   const input = generateVideoSchema.parse(value);

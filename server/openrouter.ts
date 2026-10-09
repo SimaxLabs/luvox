@@ -1,15 +1,15 @@
 import { randomUUID } from "node:crypto";
-import {
-  rasterMediaType,
-  type OpenRouterGenerateImageInput,
-  type GenerateVideoInput,
+import type {
+  OpenRouterGenerateImageInput,
+  GenerateVideoInput,
 } from "./validation.js";
 import type {
   GenerationStatus,
   VideoStatusResponse,
 } from "../shared/videoTypes.js";
-import type {
-  ImageGenerationResponse,
+import {
+  rasterMediaType,
+  type ImageGenerationResponse,
 } from "../shared/imageTypes.js";
 import type { OpenRouterImageModelConfig } from "../shared/imageModels.js";
 import type {
@@ -457,7 +457,7 @@ function parseImageResponse(value: unknown): ImageGenerationResponse {
     );
   }
 
-  const mediaType = rasterMediaType(image.b64_json);
+  const mediaType = rasterMediaType(Buffer.from(image.b64_json.slice(0, 24), "base64"));
   if (!mediaType) {
     throw new OpenRouterError(
       "OpenRouter returned an unsupported image format.",

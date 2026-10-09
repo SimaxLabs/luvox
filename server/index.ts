@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { z, ZodError } from "zod";
+import { abortableRoute } from "./abortableRoute.js";
 import {
   beginLocalH3Shutdown,
   deleteLocalVideoJob,
@@ -155,29 +156,18 @@ app.get("/api/config", (_request, response) => {
 app.get(
   "/api/openrouter/models/discover",
   loopbackOnly,
-  async (request: Request, response: Response, next: NextFunction) => {
-    const controller = new AbortController();
-    const abortUpstream = () => {
-      if (!response.writableEnded) controller.abort();
-    };
-    response.once("close", abortUpstream);
-    try {
-      const input = z.object({
-        kind: z.enum(["image", "video"]),
-        model: z.string().trim().min(3).max(200).optional(),
-      }).strict().parse(request.query);
-      if (input.model && input.kind !== "image") {
-        throw new OpenRouterError("Endpoint discovery is available only for image models.", 400, "invalid_request", false);
-      }
-      response.json(input.model
-        ? await discoverOpenRouterImageEndpoints(input.model, controller.signal)
-        : await discoverOpenRouterModels(input.kind, controller.signal));
-    } catch (error) {
-      if (!controller.signal.aborted) next(error);
-    } finally {
-      response.off("close", abortUpstream);
+  abortableRoute(async (request, response, signal) => {
+    const input = z.object({
+      kind: z.enum(["image", "video"]),
+      model: z.string().trim().min(3).max(200).optional(),
+    }).strict().parse(request.query);
+    if (input.model && input.kind !== "image") {
+      throw new OpenRouterError("Endpoint discovery is available only for image models.", 400, "invalid_request", false);
     }
-  },
+    response.json(input.model
+      ? await discoverOpenRouterImageEndpoints(input.model, signal)
+      : await discoverOpenRouterModels(input.kind, signal));
+  }),
 );
 
 app.put(
@@ -224,46 +214,35 @@ app.post(
   "/api/image/generate",
   loopbackOnly,
   express.json({ limit: "15mb" }),
-  async (request: Request, response: Response, next: NextFunction) => {
-    const controller = new AbortController();
-    const abortUpstream = () => {
-      if (!response.writableEnded) controller.abort();
-    };
-    response.once("close", abortUpstream);
-    try {
-      const input = validateGenerateImageInput(request.body);
-      if (input.provider === "mflux") {
-        response.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
-        response.flushHeaders();
-        const send = (event: unknown) => {
-          if (!response.writableEnded) response.write(`${JSON.stringify(event)}\n`);
-        };
-        try {
-          const result = await generateLocalMfluxImage(input, controller.signal, (progress) => send({ type: "progress", progress }));
-          send({ type: "result", result });
-        } catch (error) {
-          if (!controller.signal.aborted) {
-            if (!(error instanceof LocalMfluxError)) console.error(error);
-            send({
-              type: "error",
-              error: error instanceof LocalMfluxError
-                ? { status: error.status, type: error.type, message: error.message, retryable: error.retryable }
-                : { status: 500, type: "internal_error", message: "The server could not complete the request.", retryable: false },
-            });
-          }
-        } finally {
-          if (!response.writableEnded) response.end();
+  abortableRoute(async (request, response, signal) => {
+    const input = validateGenerateImageInput(request.body);
+    if (input.provider === "mflux") {
+      response.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+      response.flushHeaders();
+      const send = (event: unknown) => {
+        if (!response.writableEnded) response.write(`${JSON.stringify(event)}\n`);
+      };
+      try {
+        const result = await generateLocalMfluxImage(input, signal, (progress) => send({ type: "progress", progress }));
+        send({ type: "result", result });
+      } catch (error) {
+        if (!signal.aborted) {
+          if (!(error instanceof LocalMfluxError)) console.error(error);
+          send({
+            type: "error",
+            error: error instanceof LocalMfluxError
+              ? { status: error.status, type: error.type, message: error.message, retryable: error.retryable }
+              : { status: 500, type: "internal_error", message: "The server could not complete the request.", retryable: false },
+          });
         }
-        return;
+      } finally {
+        if (!response.writableEnded) response.end();
       }
-
-      response.json(await generateImage(input, getSessionApiKey(request), controller.signal));
-    } catch (error) {
-      if (!controller.signal.aborted) next(error);
-    } finally {
-      response.off("close", abortUpstream);
+      return;
     }
-  },
+
+    response.json(await generateImage(input, getSessionApiKey(request), signal));
+  }),
 );
 
 app.use(express.json({ limit: "100kb" }));
@@ -339,57 +318,35 @@ app.delete(
 app.post(
   "/api/video/generate",
   loopbackOnly,
-  async (request: Request, response: Response, next: NextFunction) => {
-    const controller = new AbortController();
-    const abortUpstream = () => {
-      if (!response.writableEnded) controller.abort();
-    };
-    response.once("close", abortUpstream);
-    try {
-      const input = validateGenerateVideoInput(request.body);
-      const result =
-        input.provider === "local"
-          ? await generateLocalVideo(input, getLocalWorkspaceToken(request))
-          : await generateVideo(
-              input,
-              getSessionApiKey(request),
-              controller.signal,
-            );
-      response.status(202).json(result);
-    } catch (error) {
-      if (!controller.signal.aborted) next(error);
-    } finally {
-      response.off("close", abortUpstream);
-    }
-  },
+  abortableRoute(async (request, response, signal) => {
+    const input = validateGenerateVideoInput(request.body);
+    const result =
+      input.provider === "local"
+        ? await generateLocalVideo(input, getLocalWorkspaceToken(request))
+        : await generateVideo(
+            input,
+            getSessionApiKey(request),
+            signal,
+          );
+    response.status(202).json(result);
+  }),
 );
 
 app.get(
   "/api/video/status/:id",
   loopbackOnly,
-  async (request: Request, response: Response, next: NextFunction) => {
-    const controller = new AbortController();
-    const abortUpstream = () => {
-      if (!response.writableEnded) controller.abort();
-    };
-    response.once("close", abortUpstream);
-    try {
-      const id = validateJobId(request.params.id);
-      const result = isLocalJobId(id)
-        ? getLocalVideoStatus(id, getLocalWorkspaceToken(request))
-        : await getVideoStatus(
-            id,
-            getSessionApiKey(request),
-            controller.signal,
-            getVideoCapabilityToken(request),
-          );
-      response.json(result);
-    } catch (error) {
-      if (!controller.signal.aborted) next(error);
-    } finally {
-      response.off("close", abortUpstream);
-    }
-  },
+  abortableRoute(async (request, response, signal) => {
+    const id = validateJobId(request.params.id);
+    const result = isLocalJobId(id)
+      ? getLocalVideoStatus(id, getLocalWorkspaceToken(request))
+      : await getVideoStatus(
+          id,
+          getSessionApiKey(request),
+          signal,
+          getVideoCapabilityToken(request),
+        );
+    response.json(result);
+  }),
 );
 
 app.head(

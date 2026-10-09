@@ -17,6 +17,7 @@ import {
 } from "../shared/localH3.js";
 import type { LocalGenerateVideoInput } from "./validation.js";
 import type { GenerationStatus, VideoStatusResponse } from "../shared/videoTypes.js";
+import { rasterMediaType } from "../shared/imageTypes.js";
 
 const LOCAL_JOB_ID = /^local_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const STORAGE_LOCK = ".luvox.lock";
@@ -794,23 +795,8 @@ async function resolveRuntime(): Promise<LocalH3Runtime> {
 }
 
 function referenceImageExtension(data: Buffer): string | undefined {
-  if (
-    data.length >= 8 &&
-    data.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
-  ) {
-    return ".png";
-  }
-  if (data.length >= 3 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff) {
-    return ".jpg";
-  }
-  if (
-    data.length >= 12 &&
-    data.toString("ascii", 0, 4) === "RIFF" &&
-    data.toString("ascii", 8, 12) === "WEBP"
-  ) {
-    return ".webp";
-  }
-  return undefined;
+  const mediaType = rasterMediaType(data);
+  return mediaType === "image/jpeg" ? ".jpg" : mediaType ? `.${mediaType.slice(6)}` : undefined;
 }
 
 function serializeReferenceProcessing<T>(work: () => Promise<T>): Promise<T> {

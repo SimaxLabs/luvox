@@ -2,6 +2,7 @@ import { type ChangeEvent, type Dispatch, type FormEvent, type ReactNode, type S
 import { VIDEO_MODELS, type VideoModelConfig } from "../shared/videoModels";
 import { getMfluxImageModel, getMfluxImageResolution, MFLUX_IMAGE_MODEL, MFLUX_IMAGE_MODELS, MFLUX_IMAGE_QUANTIZATIONS, MFLUX_IMAGE_RECOMMENDED_SETUPS, MFLUX_IMAGE_RESOLUTIONS, MFLUX_VAE_TILE_SIZES, MUSE_IMAGE_MODEL, OPENROUTER_IMAGE_MODELS, type OpenRouterImageModelConfig } from "../shared/imageModels";
 import type { DiscoveredOpenRouterModel, OpenRouterModelRegistry } from "../shared/openrouterModels";
+import { rasterMediaType } from "../shared/imageTypes";
 import type { SavedPrompt, SavedPromptSettings } from "../shared/savedPrompts";
 import {
   getLocalH3QualityPreset,
@@ -1119,7 +1120,7 @@ export default function App() {
   const [mfluxModel, setMfluxModel] = useState<string>(MFLUX_IMAGE_MODEL.id);
   const [mfluxResolution, setMfluxResolution] = useState<string>(defaultMfluxSetup.resolution);
   const [mfluxSteps, setMfluxSteps] = useState<number>(defaultMfluxSetup.steps);
-  const [mfluxQuantization, setMfluxQuantization] = useState<number | null>(defaultMfluxSetup.quantization);
+  const [mfluxQuantization, setMfluxQuantization] = useState<(typeof MFLUX_IMAGE_QUANTIZATIONS)[number]>(defaultMfluxSetup.quantization);
   const [mfluxSeed, setMfluxSeed] = useState("");
   const [mfluxLowRam, setMfluxLowRam] = useState<boolean>(defaultMfluxSetup.lowRam);
   const [mfluxVaeTiling, setMfluxVaeTiling] = useState<boolean>(defaultMfluxSetup.vaeTiling);
@@ -1765,7 +1766,8 @@ export default function App() {
         setMfluxModel(model.id);
         setMfluxResolution(getMfluxImageResolution(settings.resolution) ? settings.resolution : setup.resolution);
         setMfluxSteps(model.steps.some((steps) => steps === settings.steps) ? settings.steps : setup.steps);
-        setMfluxQuantization(MFLUX_IMAGE_QUANTIZATIONS.some((value) => value === settings.quantization) ? settings.quantization : setup.quantization);
+        const quantization = MFLUX_IMAGE_QUANTIZATIONS.find((value) => value === settings.quantization);
+        setMfluxQuantization(quantization === undefined ? setup.quantization : quantization);
         setMfluxSeed(settings.seed);
         setMfluxLowRam(settings.lowRam);
         setMfluxVaeTiling(settings.vaeTiling);
@@ -1916,22 +1918,7 @@ export default function App() {
     setReadingImageReference(true);
     try {
       const bytes = new Uint8Array(await file.slice(0, 12).arrayBuffer());
-      const mediaType =
-        bytes[0] === 0x89 &&
-        bytes[1] === 0x50 &&
-        bytes[2] === 0x4e &&
-        bytes[3] === 0x47 &&
-        bytes[4] === 0x0d &&
-        bytes[5] === 0x0a &&
-        bytes[6] === 0x1a &&
-        bytes[7] === 0x0a
-          ? "image/png"
-          : bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff
-            ? "image/jpeg"
-            : new TextDecoder().decode(bytes.slice(0, 4)) === "RIFF" &&
-                new TextDecoder().decode(bytes.slice(8, 12)) === "WEBP"
-              ? "image/webp"
-              : undefined;
+      const mediaType = rasterMediaType(bytes);
       if (!mediaType) throw new Error("Choose a PNG, JPEG, or WebP reference image.");
 
       const rawDataUrl = await new Promise<string>((resolve, reject) => {
@@ -2837,7 +2824,7 @@ export default function App() {
                         <select
                           className="h-12 w-full border border-black/15 bg-[#faf9f3] px-3 text-sm outline-none transition focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
                           id="mflux-quantization"
-                          onChange={(event) => setMfluxQuantization(event.target.value === "off" ? null : Number(event.target.value))}
+                          onChange={(event) => setMfluxQuantization(MFLUX_IMAGE_QUANTIZATIONS.find((value) => String(value ?? "off") === event.target.value) ?? null)}
                           value={mfluxQuantization ?? "off"}
                         >
                           {MFLUX_IMAGE_QUANTIZATIONS.map((quantization) => <option key={quantization ?? "off"} value={quantization ?? "off"}>{quantization === null ? "Off" : `${quantization}-bit`}</option>)}

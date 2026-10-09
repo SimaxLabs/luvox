@@ -1,4 +1,4 @@
-import type { LocalH3FrameFitId } from "../shared/localH3";
+import type { ImageGeneratePayload, VideoGeneratePayload } from "../server/validation";
 import type { VideoStatusResponse as VideoJob } from "../shared/videoTypes";
 import type { ImageGenerationResponse, LocalMfluxProgress } from "../shared/imageTypes";
 import type {
@@ -10,32 +10,6 @@ import type { SavedPrompt, SavedPromptsFile } from "../shared/savedPrompts";
 
 export type { GenerationStatus, VideoStatusResponse as VideoJob } from "../shared/videoTypes";
 export type { ImageGenerationResponse, LocalMfluxProgress } from "../shared/imageTypes";
-
-export interface OpenRouterGenerateVideoPayload {
-  provider: "openrouter";
-  prompt: string;
-  model: string;
-  duration: number;
-  aspectRatio: string;
-  resolution?: string;
-  firstFrameUrl?: string;
-  lastFrameUrl?: string;
-  generateAudio?: boolean;
-}
-
-export interface LocalGenerateVideoPayload {
-  provider: "local";
-  prompt: string;
-  resolution: string;
-  frames: number;
-  quality: string;
-  acceleration: string;
-  seed: number;
-  firstFramePath?: string;
-  lastFramePath?: string;
-  frameFit: LocalH3FrameFitId;
-  ssdStreaming: boolean;
-}
 
 interface ApiErrorBody {
   error?: {
@@ -84,7 +58,21 @@ function videoCapabilityHeaders(capabilityToken?: string): Record<string, string
   return capabilityToken ? { "X-Luvox-Video-Token": capabilityToken } : {};
 }
 
-async function request<T>(url: string, init?: RequestInit): Promise<T> {
+async function readJson<T>(response: Response): Promise<T> {
+  try {
+    return await response.json() as T;
+  } catch {
+    throw new ApiError(
+      "The local API returned an unreadable response.",
+      response.status,
+      true,
+      undefined,
+      "invalid_local_response",
+    );
+  }
+}
+
+async function fetchResponse(url: string, init?: RequestInit): Promise<Response> {
   let response: Response;
 
   try {
@@ -99,21 +87,8 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
     );
   }
 
-  let body: ApiErrorBody | T;
-  try {
-    body = (await response.json()) as ApiErrorBody | T;
-  } catch {
-    throw new ApiError(
-      "The local API returned an unreadable response.",
-      response.status,
-      true,
-      undefined,
-      "invalid_local_response",
-    );
-  }
-
   if (!response.ok) {
-    const errorBody = body as ApiErrorBody;
+    const errorBody = await readJson<ApiErrorBody>(response);
     const retryAfter = Number(response.headers.get("retry-after"));
     throw new ApiError(
       errorBody.error?.message || `The request failed with status ${response.status}.`,
@@ -124,11 +99,15 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
     );
   }
 
-  return body as T;
+  return response;
+}
+
+async function request<T>(url: string, init?: RequestInit): Promise<T> {
+  return readJson<T>(await fetchResponse(url, init));
 }
 
 export function generateVideo(
-  payload: OpenRouterGenerateVideoPayload | LocalGenerateVideoPayload,
+  payload: VideoGeneratePayload,
   sessionApiKey?: string,
   signal?: AbortSignal,
   workspaceToken?: string,
@@ -146,23 +125,7 @@ export function generateVideo(
 }
 
 export function generateImage(
-  payload:
-    | { provider: "openrouter"; prompt: string; model: string; aspectRatio?: string; resolution?: string; inputReference?: string }
-    | {
-        provider: "mflux";
-        prompt: string;
-        model: string;
-        resolution: string;
-        steps: number;
-        quantization: number | null;
-        seed?: number;
-        lowRam: boolean;
-        vaeTiling: boolean;
-        vaeTileSize: number;
-        referenceFit?: LocalH3FrameFitId;
-        generateMissing?: boolean;
-        inputReference?: string;
-      },
+  payload: ImageGeneratePayload,
   sessionApiKey?: string,
   signal?: AbortSignal,
   onMfluxProgress?: (progress: LocalMfluxProgress) => void,
@@ -182,37 +145,16 @@ export function generateImage(
 }
 
 async function streamMfluxImage(
-  payload: Extract<Parameters<typeof generateImage>[0], { provider: "mflux" }>,
+  payload: Extract<ImageGeneratePayload, { provider: "mflux" }>,
   signal?: AbortSignal,
   onProgress?: (progress: LocalMfluxProgress) => void,
 ): Promise<ImageGenerationResponse> {
-  let response: Response;
-  try {
-    response = await fetch("/api/image/generate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-      signal,
-    });
-  } catch {
-    throw new ApiError("Could not reach the local API. Make sure the backend is running.", 0, true, undefined, "local_network_error");
-  }
-
-  if (!response.ok) {
-    let body: ApiErrorBody;
-    try {
-      body = await response.json() as ApiErrorBody;
-    } catch {
-      throw new ApiError("The local API returned an unreadable response.", response.status, true, undefined, "invalid_local_response");
-    }
-    throw new ApiError(
-      body.error?.message || `The request failed with status ${response.status}.`,
-      response.status,
-      body.error?.retryable ?? response.status >= 500,
-      undefined,
-      body.error?.type,
-    );
-  }
+  const response = await fetchResponse("/api/image/generate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    signal,
+  });
   if (!response.body) throw new ApiError("The local API returned an unreadable response.", response.status, true, undefined, "invalid_local_response");
 
   const reader = response.body.getReader();

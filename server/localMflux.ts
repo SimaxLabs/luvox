@@ -6,10 +6,9 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import { getMfluxImageModel, getMfluxImageResolution, MFLUX_IMAGE_MODELS } from "../shared/imageModels.js";
-import type { ImageGenerationResponse, LocalMfluxProgress } from "../shared/imageTypes.js";
+import { rasterMediaType, type ImageGenerationResponse, type LocalMfluxProgress } from "../shared/imageTypes.js";
 import type { LocalH3FrameFitId } from "../shared/localH3.js";
 import type { LocalMfluxGenerateImageInput } from "./validation.js";
-import { rasterMediaType } from "./validation.js";
 import { MFLUX_WORKER_SOURCE } from "./mfluxWorker.js";
 
 const MAX_OUTPUT_BYTES = 50 * 1024 * 1024;
@@ -841,7 +840,7 @@ export async function generateLocalMfluxImage(
     await inspectRaster(outputPath, "The MFLUX output", resolution, operationSignal);
     assertMfluxMayContinue(operationSignal);
     const output = await readFile(outputPath);
-    const mediaType = rasterMediaType(output.subarray(0, 24).toString("base64"));
+    const mediaType = rasterMediaType(output);
     if (!mediaType) {
       throw new LocalMfluxError("MFLUX created an unsupported image format.", 502, "local_mflux_output_error", false);
     }
