@@ -24,6 +24,9 @@ export const savedPromptSettingsSchema = z.discriminatedUnion("kind", [
     // Read legacy settings without invalidating existing saved prompt files.
     guidance: z.number().min(0).max(20).optional(),
     referenceFit: frameFit,
+    generateMissing: z.boolean().optional(),
+    // Preserve legacy Z-Image settings when reading saved prompts for removed models.
+    referenceStrength: z.number().finite().min(0).max(0.95).optional(),
   }).strict(),
   z.object({
     kind: z.literal("openrouter"),

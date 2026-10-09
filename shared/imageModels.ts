@@ -45,22 +45,20 @@ export const MFLUX_IMAGE_RESOLUTIONS = [
 
 export const MFLUX_IMAGE_QUANTIZATIONS = [null, 8, 6, 5, 4, 3] as const;
 export const MFLUX_VAE_TILE_SIZES = [128, 256, 512] as const;
-export const MFLUX_Z_IMAGE_REFERENCE_STRENGTH = 0.4;
-export const MFLUX_LORA_LIMITS = { count: 4, sourceLength: 1_024, minScale: -2, maxScale: 2, defaultScale: 1 } as const;
-
 export const MFLUX_IMAGE_MODEL = {
-  id: "z-image-turbo",
-  name: "Z-Image Turbo",
-  executable: "mflux-generate-z-image-turbo",
-  environmentVariable: "MFLUX_Z_IMAGE_TURBO_BINARY",
-  steps: [4, 6, 9],
+  id: "flux2-klein-4b",
+  name: "FLUX.2 Klein 4B",
+  executable: "mflux-generate-flux2",
+  referenceExecutable: "mflux-generate-flux2-edit",
+  environmentVariable: "MFLUX_FLUX2_BINARY",
+  steps: [1, 2, 3, 4],
 } as const;
 
 export const MFLUX_IMAGE_MODELS = [
   MFLUX_IMAGE_MODEL,
   {
-    id: "flux2-klein-4b",
-    name: "FLUX.2 Klein 4B",
+    id: "flux2-klein-9b",
+    name: "FLUX.2 Klein 9B",
     executable: "mflux-generate-flux2",
     referenceExecutable: "mflux-generate-flux2-edit",
     environmentVariable: "MFLUX_FLUX2_BINARY",
@@ -78,19 +76,10 @@ const recommendedDefaults = {
 export const MFLUX_IMAGE_RECOMMENDED_SETUPS = [
   {
     ...recommendedDefaults,
-    id: "z-image-standard",
-    label: "Standard",
-    note: "1024p / 1:1, 9 steps, 8-bit",
-    models: ["z-image-turbo"],
-    steps: 9,
-    quantization: 8,
-  },
-  {
-    ...recommendedDefaults,
     id: "quality",
     label: "Quality",
     note: "1024p / 1:1, 4 steps, 8-bit",
-    models: ["flux2-klein-4b"],
+    models: ["flux2-klein-4b", "flux2-klein-9b"],
     steps: 4,
     quantization: 8,
   },
@@ -99,17 +88,8 @@ export const MFLUX_IMAGE_RECOMMENDED_SETUPS = [
     id: "fast",
     label: "Fast",
     note: "1024p / 1:1, 4 steps, 4-bit",
-    models: ["flux2-klein-4b"],
+    models: ["flux2-klein-4b", "flux2-klein-9b"],
     steps: 4,
-    quantization: 4,
-  },
-  {
-    ...recommendedDefaults,
-    id: "z-image-fast",
-    label: "Fast",
-    note: "1024p / 1:1, 9 steps, 4-bit",
-    models: ["z-image-turbo"],
-    steps: 9,
     quantization: 4,
   },
 ] as const;
@@ -120,11 +100,4 @@ export function getMfluxImageModel(id: string) {
 
 export function getMfluxImageResolution(id: string) {
   return MFLUX_IMAGE_RESOLUTIONS.find((resolution) => resolution.id === id);
-}
-
-export function getMfluxInferenceSteps(model: string, steps: number, hasReference: boolean): number {
-  // MFLUX starts image-to-image partway through the selected schedule.
-  return model === "z-image-turbo" && hasReference
-    ? steps - Math.max(1, Math.floor(steps * MFLUX_Z_IMAGE_REFERENCE_STRENGTH))
-    : steps;
 }

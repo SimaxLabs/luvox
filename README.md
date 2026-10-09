@@ -53,19 +53,18 @@ Custom models and saved prompts are stored in `.luvox`. Set `LUVOX_DATA_DIR` to 
 
 Requires **macOS on Apple Silicon** and an installed [MFLUX](https://github.com/mflux-community/mflux). Use the npm setup, then choose **Text to image → Local MFLUX**.
 
-- **Z-Image Turbo** (default): text-to-image and optional reference-image variations.
-- **FLUX.2 Klein 4B**: text-to-image and instruction-based editing with one reference image.
+- **FLUX.2 Klein 4B** (default): text-to-image and instruction-based editing with one reference image.
+- **FLUX.2 Klein 9B**: the larger distilled model for text-to-image and instruction-based editing with one reference image. Uses the same 4-step Quality (8-bit) and Fast (4-bit) presets, with higher memory use than 4B.
+
+For either FLUX.2 model, attach a reference, choose **Reference framing → Preserve full image**, and enable **Generate missing** below the framing controls to extend the scene to the selected output aspect ratio. Luvox supplies the full reference without black padding and adds a canvas-extension instruction to your prompt when the aspect ratios differ. This is prompt-guided expansion, not a pixel-locked masked edit; reference details may change. The option is included in saved prompt settings.
 
 Luvox discovers the executables on `PATH`. If needed, set absolute paths in `.env`:
 
 ```bash
 MFLUX_FLUX2_BINARY=/absolute/path/to/mflux-generate-flux2
-MFLUX_Z_IMAGE_TURBO_BINARY=/absolute/path/to/mflux-generate-z-image-turbo
 ```
 
-FLUX.2 editing also requires `mflux-generate-flux2-edit` beside the main executable or on `PATH`.
-
-For Z-Image Turbo, open **Advanced → LoRA adapters** to add up to four compatible adapters. Enter an absolute `.safetensors` path or Hugging Face `owner/repo[:file.safetensors]`; strength defaults to `1` and accepts `-2` to `2`. Include any required trigger words in your prompt. LoRA selections are session-only and are not saved with prompts.
+Both FLUX.2 sizes use `mflux-generate-flux2` and `MFLUX_FLUX2_BINARY`. Editing also requires `mflux-generate-flux2-edit` beside the main executable or on `PATH`. Use an MFLUX release supporting `flux2-klein-9b`. The [9B weights](https://huggingface.co/black-forest-labs/FLUX.2-klein-9B) require accepting their Hugging Face terms and use the FLUX Non-Commercial License.
 
 Missing model resources download automatically on first generation, with progress shown in the app. Stopping keeps cached resources for retry. Gated models may require accepting their terms and running `hf auth login` on the host. MFLUX and its dependencies must be installed separately.
 

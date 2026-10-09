@@ -1,10 +1,5 @@
 export type ImageMediaType = "image/jpeg" | "image/png" | "image/webp";
 
-export interface LocalMfluxLora {
-  source: string;
-  scale: number;
-}
-
 export interface ImageGenerationResponse {
   b64Json: string;
   mediaType: ImageMediaType;

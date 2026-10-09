@@ -9,7 +9,7 @@ import {
   LOCAL_H3_DURATIONS,
   LOCAL_H3_FRAME_FIT_IDS,
 } from "../shared/localH3.js";
-import { getMfluxImageModel, getMfluxImageResolution, MFLUX_IMAGE_MODELS, MFLUX_LORA_LIMITS, MFLUX_VAE_TILE_SIZES } from "../shared/imageModels.js";
+import { getMfluxImageModel, getMfluxImageResolution, MFLUX_IMAGE_MODELS, MFLUX_VAE_TILE_SIZES } from "../shared/imageModels.js";
 import type { ImageMediaType } from "../shared/imageTypes.js";
 import { getOpenRouterImageModel, getOpenRouterVideoModel } from "./openrouterModels.js";
 
@@ -125,17 +125,6 @@ const openRouterGenerateImageSchema = z
   })
   .strict();
 
-const mfluxLoraSchema = z.object({
-  source: z.string().trim().min(1).max(MFLUX_LORA_LIMITS.sourceLength).refine((value) => {
-    if (/[\u0000-\u001f\u007f]/.test(value)) return false;
-    if (path.isAbsolute(value)) return value.endsWith(".safetensors");
-    // Permit Hub identifiers, never URLs, glob patterns, relative paths, or CLI options.
-    return /^[A-Za-z0-9][A-Za-z0-9._-]{0,95}\/[A-Za-z0-9][A-Za-z0-9._-]{0,95}(?::[A-Za-z0-9][A-Za-z0-9._-]*\.safetensors)?$/.test(value)
-      && !value.includes("..") && !value.includes("--") && !value.split(":")[0].endsWith(".git");
-  }, "Use an absolute .safetensors path or a Hugging Face owner/repo[:file.safetensors] source."),
-  scale: z.number().finite().min(MFLUX_LORA_LIMITS.minScale).max(MFLUX_LORA_LIMITS.maxScale),
-}).strict();
-
 const localMfluxGenerateImageSchema = z
   .object({
     provider: z.literal("mflux"),
@@ -149,8 +138,8 @@ const localMfluxGenerateImageSchema = z
     vaeTiling: z.boolean(),
     vaeTileSize: z.number().int().refine((value) => (MFLUX_VAE_TILE_SIZES as readonly number[]).includes(value), "Unsupported MFLUX VAE tile size."),
     referenceFit: z.enum(LOCAL_H3_FRAME_FIT_IDS).default("contain"),
+    generateMissing: z.boolean().optional(),
     inputReference: imageReferenceDataUrl,
-    loras: z.array(mfluxLoraSchema).max(MFLUX_LORA_LIMITS.count).optional(),
   })
   .strict();
 
@@ -193,7 +182,9 @@ export function validateGenerateImageInput(value: unknown): ImageGenerateInput {
       if (!(model.steps as readonly number[]).includes(input.steps)) issues.push(customIssue("steps", "Unsupported step count for this MFLUX model."));
     }
     if (!getMfluxImageResolution(input.resolution)) issues.push(customIssue("resolution", "Unsupported MFLUX resolution preset."));
-    if (input.loras?.length && input.model !== "z-image-turbo") issues.push(customIssue("loras", "LoRAs are supported only for Z-Image Turbo."));
+    if (input.generateMissing && (!input.inputReference || input.referenceFit !== "contain")) {
+      issues.push(customIssue("generateMissing", "Generate missing requires a FLUX.2 reference image with Preserve full image framing."));
+    }
     if (issues.length > 0) throw new z.ZodError(issues);
   }
   return input;

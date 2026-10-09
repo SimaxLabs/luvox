@@ -1,7 +1,6 @@
 import { type ChangeEvent, type Dispatch, type FormEvent, type ReactNode, type SetStateAction, useEffect, useRef, useState } from "react";
 import { VIDEO_MODELS, type VideoModelConfig } from "../shared/videoModels";
-import { getMfluxImageModel, getMfluxImageResolution, getMfluxInferenceSteps, MFLUX_IMAGE_MODEL, MFLUX_IMAGE_MODELS, MFLUX_IMAGE_QUANTIZATIONS, MFLUX_IMAGE_RECOMMENDED_SETUPS, MFLUX_IMAGE_RESOLUTIONS, MFLUX_LORA_LIMITS, MFLUX_VAE_TILE_SIZES, MFLUX_Z_IMAGE_REFERENCE_STRENGTH, MUSE_IMAGE_MODEL, OPENROUTER_IMAGE_MODELS, type OpenRouterImageModelConfig } from "../shared/imageModels";
-import type { LocalMfluxLora } from "../shared/imageTypes";
+import { getMfluxImageModel, getMfluxImageResolution, MFLUX_IMAGE_MODEL, MFLUX_IMAGE_MODELS, MFLUX_IMAGE_QUANTIZATIONS, MFLUX_IMAGE_RECOMMENDED_SETUPS, MFLUX_IMAGE_RESOLUTIONS, MFLUX_VAE_TILE_SIZES, MUSE_IMAGE_MODEL, OPENROUTER_IMAGE_MODELS, type OpenRouterImageModelConfig } from "../shared/imageModels";
 import type { DiscoveredOpenRouterModel, OpenRouterModelRegistry } from "../shared/openrouterModels";
 import type { SavedPrompt, SavedPromptSettings } from "../shared/savedPrompts";
 import {
@@ -1125,8 +1124,8 @@ export default function App() {
   const [mfluxLowRam, setMfluxLowRam] = useState<boolean>(defaultMfluxSetup.lowRam);
   const [mfluxVaeTiling, setMfluxVaeTiling] = useState<boolean>(defaultMfluxSetup.vaeTiling);
   const [mfluxVaeTileSize, setMfluxVaeTileSize] = useState<number>(defaultMfluxSetup.vaeTileSize);
-  const [mfluxLoras, setMfluxLoras] = useState<LocalMfluxLora[]>([]);
   const [imageReferenceFit, setImageReferenceFit] = useState<LocalH3FrameFitId>("contain");
+  const [mfluxGenerateMissing, setMfluxGenerateMissing] = useState(false);
   const [imagePrompt, setImagePrompt] = useState("");
   const [imageReference, setImageReference] = useState<{ name: string; dataUrl: string } | null>(null);
   const [readingImageReference, setReadingImageReference] = useState(false);
@@ -1189,10 +1188,9 @@ export default function App() {
   const selectedOpenRouterImageModel = openRouterRegistry.images.find((model) => model.id === openRouterImageModelId) ?? openRouterRegistry.images[0] ?? MUSE_IMAGE_MODEL;
   const selectedMfluxModel = getMfluxImageModel(mfluxModel) ?? MFLUX_IMAGE_MODEL;
   const selectedMfluxResolution = getMfluxImageResolution(mfluxResolution) ?? MFLUX_IMAGE_RESOLUTIONS[0];
-  const mfluxInferenceSteps = getMfluxInferenceSteps(selectedMfluxModel.id, mfluxSteps, Boolean(imageReference));
   const mfluxVaeTilingEnabled = mfluxLowRam || mfluxVaeTiling;
   const mfluxResourcePhase = mfluxProgress?.phase === "checking" || mfluxProgress?.phase === "downloading";
-  const mfluxHasProgress = Boolean(mfluxProgress?.download?.total) || mfluxProgress?.phase === "generating" || mfluxProgress?.phase === "decoding";
+  const mfluxHasProgress = !mfluxResourcePhase || Boolean(mfluxProgress?.download?.total);
   const mfluxRecommendedSetups = MFLUX_IMAGE_RECOMMENDED_SETUPS.filter((setup) =>
     (setup.models as readonly string[]).includes(selectedMfluxModel.id));
   const selectedLocalQuality = getLocalH3QualityPreset(form.localQuality);
@@ -1240,7 +1238,7 @@ export default function App() {
   const currentImageModelName = imageProvider === "openrouter"
     ? openRouterImageTaskStatus && openRouterImageTaskModelName ? openRouterImageTaskModelName : selectedOpenRouterImageModel.name
     : selectedMfluxModel.name;
-  const usesMfluxEdit = imageProvider === "mflux" && selectedMfluxModel.id === "flux2-klein-4b" && Boolean(imageReference);
+  const usesMfluxEdit = imageProvider === "mflux" && Boolean(imageReference);
   const selectedMfluxModelAvailable = appConfig?.localMflux.models.includes(selectedMfluxModel.id) === true;
   const openRouterSubmissionStatus = openRouterSubmitting
     ? "submitting"
@@ -1301,6 +1299,7 @@ export default function App() {
           vaeTiling: mfluxVaeTiling,
           vaeTileSize: mfluxVaeTileSize,
           referenceFit: imageReferenceFit,
+          generateMissing: imageReferenceFit === "contain" && mfluxGenerateMissing,
         }
       : currentSubmissionKind === "openrouter"
         ? {
@@ -1426,8 +1425,8 @@ export default function App() {
     setMfluxLowRam(defaultMfluxSetup.lowRam);
     setMfluxVaeTiling(defaultMfluxSetup.vaeTiling);
     setMfluxVaeTileSize(defaultMfluxSetup.vaeTileSize);
-    setMfluxLoras([]);
     setImageReferenceFit("contain");
+    setMfluxGenerateMissing(false);
     setImagePrompt("");
     setImageReference(null);
     setReadingImageReference(false);
@@ -1756,7 +1755,6 @@ export default function App() {
     } else if (settings.kind === "mflux") {
       setWorkflow("image");
       setImagePrompt(saved.prompt);
-      setMfluxLoras([]);
       const model = getMfluxImageModel(settings.model);
       if (appConfig?.localMflux.supported !== true || !model) {
         setImageProvider("openrouter");
@@ -1773,6 +1771,7 @@ export default function App() {
         setMfluxVaeTiling(settings.vaeTiling);
         setMfluxVaeTileSize(MFLUX_VAE_TILE_SIZES.some((size) => size === settings.vaeTileSize) ? settings.vaeTileSize : setup.vaeTileSize);
         setImageReferenceFit(settings.referenceFit);
+        setMfluxGenerateMissing(settings.generateMissing ?? false);
         setImageReference(null);
         setMfluxAdvancedStatus("Saved settings applied.");
       }
@@ -1997,7 +1996,7 @@ export default function App() {
     } else {
       mfluxStartedAt.current = Date.now();
       setMfluxElapsedSeconds(0);
-      setMfluxProgress({ phase: "loading", step: 0, total: mfluxInferenceSteps, percent: 0 });
+      setMfluxProgress({ phase: "loading", step: 0, total: mfluxSteps, percent: 0 });
       setMfluxImageSubmitting(true);
       setMfluxImageFailure(null);
       setJobAnnouncement("Local MFLUX image started.");
@@ -2022,8 +2021,8 @@ export default function App() {
               lowRam: mfluxLowRam,
               vaeTiling: mfluxVaeTiling,
               vaeTileSize: mfluxVaeTileSize,
-              loras: selectedMfluxModel.id === "z-image-turbo" ? mfluxLoras : undefined,
               referenceFit: imageReference ? imageReferenceFit : undefined,
+              generateMissing: usesMfluxEdit && imageReferenceFit === "contain" && mfluxGenerateMissing,
               inputReference: imageReference?.dataUrl,
             }, undefined, requestController.signal, (progress) => {
               if (version === workspaceVersion.current) setMfluxProgress(progress);
@@ -2635,7 +2634,6 @@ export default function App() {
                       const setup = MFLUX_IMAGE_RECOMMENDED_SETUPS.find((candidate) => (candidate.models as readonly string[]).includes(event.target.value));
                       if (!model || !setup) return;
                       setMfluxModel(model.id);
-                      setMfluxLoras([]);
                       applyMfluxSetup(setup);
                     }}
                     value={selectedMfluxModel.id}
@@ -2723,9 +2721,7 @@ export default function App() {
                   <h3 className="text-xs font-bold uppercase tracking-[0.12em]">Reference image</h3>
                   <p className="mt-1 text-[11px] leading-4 text-stone-500">
                     {imageProvider === "mflux"
-                      ? selectedMfluxModel.id === "flux2-klein-4b"
-                        ? "Add one optional PNG, JPEG, or WebP image to use FLUX.2's dedicated edit mode."
-                        : `Add one optional PNG, JPEG, or WebP image for an image-to-image variation at ${MFLUX_Z_IMAGE_REFERENCE_STRENGTH} reference strength. Describe the desired result in the prompt.`
+                      ? "Add one optional PNG, JPEG, or WebP image to use FLUX.2's dedicated edit mode."
                       : selectedOpenRouterImageModel.inputReference.required
                         ? "This model requires one PNG, JPEG, or WebP image up to 10 MB."
                         : "Add one optional PNG, JPEG, or WebP image up to 10 MB."}
@@ -2777,7 +2773,18 @@ export default function App() {
                     </div>
                   </div>
                   {imageProvider === "mflux" && (
-                    <FrameFitPicker idPrefix="image-reference-fit" onSelect={setImageReferenceFit} selected={imageReferenceFit} />
+                    <>
+                      <FrameFitPicker idPrefix="image-reference-fit" onSelect={setImageReferenceFit} selected={imageReferenceFit} />
+                      {imageReferenceFit === "contain" && (
+                        <Toggle
+                          checked={mfluxGenerateMissing}
+                          label="Generate missing"
+                          note="Ask FLUX.2 to extend the scene into unused canvas instead of adding black bars. Adds a canvas-extension instruction to your prompt; image details may change."
+                          noteClassName="max-w-sm pr-4 leading-4"
+                          onChange={setMfluxGenerateMissing}
+                        />
+                      )}
+                    </>
                   )}
                 </>
               ) : (
@@ -2805,73 +2812,14 @@ export default function App() {
                   <summary className="flex cursor-pointer list-none items-center justify-between px-4 py-4 text-xs font-bold uppercase tracking-[0.12em] hover:bg-white/30 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-black [&::-webkit-details-marker]:hidden">
                     Advanced
                     <span className="flex items-center gap-2 font-mono text-[9px] font-normal text-stone-500">
-                      {selectedMfluxModel.id === "z-image-turbo" ? "Steps, memory, LoRAs" : "Steps, quantization, VAE, memory"}
+                      Steps, quantization, VAE, memory
                       <Icon name="arrow" className="size-3 transition group-open:rotate-90" />
                     </span>
                   </summary>
                   <div className="border-t border-black/10 p-4 sm:p-5">
-                    {selectedMfluxModel.id === "z-image-turbo" && (
-                      <div className="mb-6 border-b border-black/10 pb-6">
-                        <div className="flex items-center justify-between gap-3">
-                          <h3 className="text-xs font-bold uppercase tracking-[0.12em]">LoRA adapters</h3>
-                          <button
-                            className="border border-black/20 px-3 py-2 text-[10px] font-bold uppercase tracking-[0.12em] hover:border-black disabled:opacity-40"
-                            disabled={mfluxLoras.length >= MFLUX_LORA_LIMITS.count}
-                            onClick={() => setMfluxLoras((current) => [...current, { source: "", scale: MFLUX_LORA_LIMITS.defaultScale }])}
-                            type="button"
-                          >
-                            Add LoRA
-                          </button>
-                        </div>
-                        <p className="mt-2 text-[11px] leading-4 text-stone-500">
-                          Up to {MFLUX_LORA_LIMITS.count} Z-Image Turbo adapters. Use a Hugging Face owner/repo[:file.safetensors] or an absolute .safetensors path on the host. Include any adapter trigger words in your prompt.
-                        </p>
-                        {mfluxLoras.map((lora, index) => (
-                          <div className="mt-4 grid gap-3 sm:grid-cols-[minmax(0,1fr)_6rem_auto] sm:items-end" key={index}>
-                            <div>
-                              <FieldLabel htmlFor={`mflux-lora-${index}`}>LoRA {index + 1} source</FieldLabel>
-                              <input
-                                autoCapitalize="none"
-                                autoComplete="off"
-                                className="h-12 w-full border border-black/15 bg-[#faf9f3] px-3 text-sm outline-none focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
-                                id={`mflux-lora-${index}`}
-                                maxLength={MFLUX_LORA_LIMITS.sourceLength}
-                                onChange={(event) => setMfluxLoras((current) => current.map((item, position) => position === index ? { ...item, source: event.target.value } : item))}
-                                placeholder="owner/z-image-turbo-lora"
-                                required
-                                spellCheck={false}
-                                value={lora.source}
-                              />
-                            </div>
-                            <div>
-                              <FieldLabel htmlFor={`mflux-lora-scale-${index}`}>Strength</FieldLabel>
-                              <input
-                                aria-label={`LoRA ${index + 1} strength`}
-                                className="h-12 w-full border border-black/15 bg-[#faf9f3] px-3 font-mono text-sm outline-none focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
-                                id={`mflux-lora-scale-${index}`}
-                                max={MFLUX_LORA_LIMITS.maxScale}
-                                min={MFLUX_LORA_LIMITS.minScale}
-                                onChange={(event) => setMfluxLoras((current) => current.map((item, position) => position === index ? { ...item, scale: Number(event.target.value) } : item))}
-                                required
-                                step={0.05}
-                                type="number"
-                                value={lora.scale}
-                              />
-                            </div>
-                            <button
-                              aria-label={`Remove LoRA ${index + 1}`}
-                              className="h-12 border border-black/20 px-3 text-[10px] font-bold uppercase tracking-[0.12em] hover:border-black"
-                              onClick={() => setMfluxLoras((current) => current.filter((_, position) => position !== index))}
-                              type="button"
-                            >Remove</button>
-                          </div>
-                        ))}
-                        <p className="mt-2 text-[10px] leading-4 text-stone-500">Strength 1 applies the adapter normally; 0 has no effect. LoRA selections are session-only and are not included in saved prompts.</p>
-                      </div>
-                    )}
                     <div className="grid grid-cols-2 gap-3">
                       <div>
-                        <FieldLabel htmlFor="mflux-steps">Schedule steps</FieldLabel>
+                        <FieldLabel htmlFor="mflux-steps">Denoising steps</FieldLabel>
                         <select
                           className="h-12 w-full border border-black/15 bg-[#faf9f3] px-3 text-sm outline-none transition focus:border-black focus:ring-2 focus:ring-[#d9ff72]"
                           id="mflux-steps"
@@ -2881,9 +2829,7 @@ export default function App() {
                           {selectedMfluxModel.steps.map((steps) => <option key={steps} value={steps}>{steps}</option>)}
                         </select>
                         <p className="mt-1.5 text-[10px] leading-4 text-stone-500">
-                          {mfluxInferenceSteps < mfluxSteps
-                            ? `With this reference, MFLUX runs ${mfluxInferenceSteps} denoising steps from the selected ${mfluxSteps}-step schedule.`
-                            : selectedMfluxModel.id === "z-image-turbo" ? "Nine is recommended." : "Four is recommended."}
+                          Four is recommended.
                         </p>
                       </div>
                       <div>
@@ -2922,9 +2868,7 @@ export default function App() {
                         </select>
                       </div>
                       <p className="text-[10px] leading-4 text-stone-500 sm:col-span-2">
-                        {selectedMfluxModel.id === "z-image-turbo"
-                          ? "VAE tiling reduces peak memory during final decoding."
-                          : "MFLUX 0.19.1 applies VAE tiling to reference encoding, not final decoding."}
+                        MFLUX 0.19.1 applies VAE tiling to reference encoding, not final decoding.
                       </p>
                     </div>
 
@@ -3488,7 +3432,7 @@ export default function App() {
                                     ? `${formatBytes(mfluxProgress.download.completed)} / ${formatBytes(mfluxProgress.download.total)}`
                                     : `${mfluxProgress.download.completed} / ${mfluxProgress.download.total} files`
                                   : "Checking…"
-                                : `${mfluxProgress?.step ?? 0} / ${mfluxProgress?.total ?? mfluxInferenceSteps}`}
+                                : `${mfluxProgress?.step ?? 0} / ${mfluxProgress?.total ?? mfluxSteps}`}
                             </p>
                           </div>
                           <div>
@@ -3500,9 +3444,6 @@ export default function App() {
                             <p className="mt-1 font-mono text-xs text-white">{mfluxResourcePhase ? mfluxHasProgress ? `${mfluxProgress?.percent.toFixed(0)}%` : "—" : formatSeconds(mfluxProgress?.etaSeconds)}</p>
                           </div>
                         </div>
-                        {!mfluxResourcePhase && selectedMfluxModel.id === "z-image-turbo" && (
-                          <p className="mt-3 text-[10px] leading-4 text-white/60">The counter tracks actual denoising steps. A reference image shortens the selected schedule.</p>
-                        )}
                         <p className="mt-4 font-mono text-[9px] leading-4 text-white/50">
                           {mfluxResourcePhase
                             ? "Progress is for the current resource batch. Downloads have a separate time limit; cached files are kept when stopped and reused on retry."

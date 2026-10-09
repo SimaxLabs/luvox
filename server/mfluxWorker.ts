@@ -116,8 +116,6 @@ threading.Thread(target=watch_parent, daemon=True).start()
 
 def main():
     observe_downloads()
-    import huggingface_hub as hub
-    from huggingface_hub.errors import LocalEntryNotFoundError
     import mlx.core as mx
     from mflux.callbacks.instances.battery_saver import BatterySaver
     from mflux.models.common.resolution.config_resolution import ConfigResolution
@@ -127,7 +125,6 @@ def main():
     module_name, class_name = {
         "flux2": ("mflux.models.flux2.cli.flux2_generate", "Flux2Klein"),
         "flux2-edit": ("mflux.models.flux2.cli.flux2_edit_generate", "Flux2KleinEdit"),
-        "z-image-turbo": ("mflux.models.z_image.cli.z_image_turbo_generate", "ZImage"),
     }[pipeline]
     command = importlib.import_module(module_name)
     model = None
@@ -136,16 +133,6 @@ def main():
         global resource_error
         nonlocal model
         resource_error = None
-        if "--lora-paths" in arguments:
-            for index in range(arguments.index("--lora-paths") + 1, arguments.index("--lora-scales")):
-                source = arguments[index]
-                if not Path(source).is_absolute() and ":" in source:
-                    # Use the exact Hub file: older MFLUX collection aliases cache by basename across repos.
-                    repo, filename = source.split(":", 1)
-                    try:
-                        arguments[index] = hub.hf_hub_download(repo_id=repo, filename=filename, local_files_only=True)
-                    except LocalEntryNotFoundError:
-                        arguments[index] = hub.hf_hub_download(repo_id=repo, filename=filename)
         sys.argv = [binary, *arguments]
         if one_shot:
             # Keep the CLI's Low RAM callbacks and encoder cleanup in one-shot mode.
@@ -155,10 +142,9 @@ def main():
         if model is None:
             options = {
                 "quantize": args.quantize,
-                "model_config": ConfigResolution.resolve_restricted(args.model, "z-image-turbo" if pipeline == "z-image-turbo" else "flux2-klein-4b"),
+                # Node validates canonical model IDs; load the selected checkpoint, including 9B.
+                "model_config": ConfigResolution.resolve_restricted(args.model, args.model),
             }
-            if args.lora_paths:
-                options.update(lora_paths=args.lora_paths, lora_scales=args.lora_scales, bake_lora=True)
             model = getattr(command, class_name)(**options)
             model.callbacks.register(BatterySaver(args.battery_percentage_stop_limit))
             # ponytail: one model per worker; Node restarts it when load settings change.
@@ -173,13 +159,10 @@ def main():
             "width": args.width,
             "height": args.height,
             "num_inference_steps": args.steps,
-            "guidance": 0.0 if pipeline == "z-image-turbo" else 1.0,
-            "scheduler": args.scheduler if pipeline == "z-image-turbo" else "flow_match_euler_discrete",
+            "guidance": 1.0,
+            "scheduler": "flow_match_euler_discrete",
         }
-        if pipeline == "z-image-turbo":
-            options["image_path"] = args.image_path
-            options["image_strength"] = args.image_strength
-        elif pipeline == "flux2-edit":
+        if pipeline == "flux2-edit":
             options["image_paths"] = [Path(p) for p in args.image_paths]
         image = model.generate_image(**options)
         image.save(path=args.output, export_json_metadata=False)

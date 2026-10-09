@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
-import { getMfluxImageModel, getMfluxImageResolution, getMfluxInferenceSteps, MFLUX_IMAGE_MODELS, MFLUX_Z_IMAGE_REFERENCE_STRENGTH } from "../shared/imageModels.js";
+import { getMfluxImageModel, getMfluxImageResolution, MFLUX_IMAGE_MODELS } from "../shared/imageModels.js";
 import type { ImageGenerationResponse, LocalMfluxProgress } from "../shared/imageTypes.js";
 import type { LocalH3FrameFitId } from "../shared/localH3.js";
 import type { LocalMfluxGenerateImageInput } from "./validation.js";
@@ -316,8 +316,9 @@ async function frameReferenceImage(
   directory: string,
   target: { width: number; height: number },
   fit: LocalH3FrameFitId,
+  generateMissing: boolean,
   signal?: AbortSignal,
-): Promise<string> {
+): Promise<{ path: string; width: number; height: number }> {
   const sourceSize = await inspectRaster(source, "The reference image", undefined, signal, false);
   const scale = fit === "cover"
     ? Math.max(target.width / sourceSize.width, target.height / sourceSize.height)
@@ -327,9 +328,11 @@ async function frameReferenceImage(
   const scaledHeight = Math.max(1, round(sourceSize.height * scale));
   const decoded = path.join(directory, "reference-decoded.png");
   const output = path.join(directory, "reference-framed.png");
+  // FLUX.2 encodes references at their own aspect ratio; output size is supplied separately.
+  const referenceSize = generateMissing ? { width: scaledWidth, height: scaledHeight } : target;
   const framingArgs = fit === "cover"
     ? ["--cropToHeightWidth", String(target.height), String(target.width)]
-    : ["--padToHeightWidth", String(target.height), String(target.width), "--padColor", "000000"];
+    : generateMissing ? [] : ["--padToHeightWidth", String(target.height), String(target.width), "--padColor", "000000"];
   try {
     await execFileAsync(
       "/usr/bin/sips",
@@ -380,15 +383,15 @@ async function frameReferenceImage(
     );
   }
   const outputSize = await inspectRaster(output, "The framed reference image", undefined, signal);
-  if (outputSize.width !== target.width || outputSize.height !== target.height) {
+  if (outputSize.width !== referenceSize.width || outputSize.height !== referenceSize.height) {
     throw new LocalMfluxError(
-      `Reference framing produced ${outputSize.width}x${outputSize.height} instead of ${target.width}x${target.height} with ${fit} fit from a ${sourceSize.width}x${sourceSize.height} image.`,
+      `Reference framing produced ${outputSize.width}x${outputSize.height} instead of ${referenceSize.width}x${referenceSize.height} with ${fit} fit from a ${sourceSize.width}x${sourceSize.height} image.`,
       400,
       "local_mflux_image_error",
       false,
     );
   }
-  return output;
+  return { path: output, ...outputSize };
 }
 
 function parseClock(value: string): number | undefined {
@@ -441,8 +444,7 @@ async function mfluxPython(binary: string, pipeline: string): Promise<string | u
     const source = buffer.toString("utf8", 0, bytesRead).replaceAll("\r\n", "\n");
     const header = /^#!(\/[^\n]+\/python(?:\d+(?:\.\d+)*)?)\n(?:# -\*- coding: utf-8 -\*-\n)?(?:import re\n)?import sys\nfrom (mflux\.[\w.]+) import main\nif __name__ == ["']__main__["']:\n/.exec(source);
     if (!header) return undefined;
-    const module = pipeline === "z-image-turbo" ? "mflux.models.z_image.cli.z_image_turbo_generate"
-      : pipeline === "flux2-edit" ? "mflux.models.flux2.cli.flux2_edit_generate" : "mflux.models.flux2.cli.flux2_generate";
+    const module = pipeline === "flux2-edit" ? "mflux.models.flux2.cli.flux2_edit_generate" : "mflux.models.flux2.cli.flux2_generate";
     const body = source.slice(header[0].length).trimEnd().replaceAll("'", '"');
     if (header[2] !== module || ![
       "    sys.exit(main())",
@@ -523,9 +525,9 @@ async function runMflux(
   onProgress?: (progress: LocalMfluxProgress) => void,
 ): Promise<void> {
   const keepAlive = input.lowRam ? 0 : keepAliveMilliseconds();
-  const pipeline = input.model === "z-image-turbo" ? "z-image-turbo" : input.inputReference ? "flux2-edit" : "flux2";
+  const pipeline = input.inputReference ? "flux2-edit" : "flux2";
   const python = await mfluxPython(binary, pipeline);
-  const key = JSON.stringify([binary, pipeline, input.model, input.quantization, input.vaeTiling ? input.vaeTileSize : null, input.loras ?? []]);
+  const key = JSON.stringify([binary, pipeline, input.model, input.quantization, input.vaeTiling ? input.vaeTileSize : null]);
   if (warmWorker && (!keepAlive || !python || warmWorker.key !== key)) await stopWarmWorker();
   assertMfluxMayContinue(signal);
   const worker = python ? warmWorker ?? await startWarmWorker(python, binary, pipeline, key, !keepAlive) : undefined;
@@ -534,7 +536,7 @@ async function runMflux(
     await stopWarmWorker();
     assertMfluxMayContinue(signal);
   }
-  const totalSteps = getMfluxInferenceSteps(input.model, input.steps, Boolean(input.inputReference));
+  const totalSteps = input.steps;
   return new Promise((resolve, reject) => {
     let generationRemaining = timeoutMilliseconds();
     let downloadRemaining = timeoutMilliseconds("MFLUX_DOWNLOAD_TIMEOUT_MINUTES", 120);
@@ -603,7 +605,7 @@ async function runMflux(
           else if (/PermissionError|Read-only file system/.test(line)) reportedError = mfluxEngineError("cache_permission");
           else if (/ModuleNotFoundError|ImportError/.test(line)) reportedError = mfluxEngineError("dependencies");
           else if (/ConnectError|ConnectionError|ReadTimeout|LocalEntryNotFoundError/.test(line)) reportedError = mfluxEngineError("network");
-          if (/Downloading (?:model|LoRA) from HuggingFace:|Downloading LoRA '.+' from |^\s*Fetching \d+ files:/.test(line)) {
+          if (/Downloading model from HuggingFace:|^\s*Fetching \d+ files:/.test(line)) {
             const files = /\|\s*(\d+)\/(\d+)\s*\[/.exec(line);
             resourceProgress("downloading", files ? { completed: Number(files[1]), total: Number(files[2]), unit: "files" } : undefined);
             if (files && Number(files[2]) > 0 && files[1] === files[2]) resourceProgress("loading");
@@ -744,7 +746,7 @@ export async function generateLocalMfluxImage(
   // ponytail: generations are created only from route-validated static presets.
   const model = getMfluxImageModel(input.model)!;
   const resolution = getMfluxImageResolution(input.resolution)!;
-  const executable = input.inputReference && "referenceExecutable" in model
+  const executable = input.inputReference
     ? model.referenceExecutable
     : model.executable;
   const binary = resolveMfluxBinary(model, executable);
@@ -768,7 +770,7 @@ export async function generateLocalMfluxImage(
     ? AbortSignal.any([signal, shutdownController.signal])
     : shutdownController.signal;
   assertMfluxMayContinue(operationSignal);
-  onProgress?.({ phase: "loading", step: 0, total: getMfluxInferenceSteps(input.model, input.steps, Boolean(input.inputReference)), percent: 0 });
+  onProgress?.({ phase: "loading", step: 0, total: input.steps, percent: 0 });
 
   generationReserved = true;
   let finishCompletion: (() => void) | undefined;
@@ -777,20 +779,10 @@ export async function generateLocalMfluxImage(
   });
   let directory: string | undefined;
   try {
-    for (const lora of input.loras ?? []) {
-      if (!path.isAbsolute(lora.source)) continue;
-      try {
-        const info = await stat(lora.source);
-        if (!info.isFile() || info.size === 0) throw new Error("Invalid adapter file");
-        accessSync(lora.source, fsConstants.R_OK);
-      } catch {
-        throw new LocalMfluxError("A selected LoRA file is missing, empty, or unreadable on the Luvox host.", 400, "local_mflux_lora_error", false);
-      }
-    }
     directory = await createMfluxDirectory(binary, MFLUX_OWNER_KIND);
     const promptPath = path.join(directory, "prompt.txt");
     const outputPath = path.join(directory, "output.png");
-    await writeFile(promptPath, input.prompt, { mode: 0o600, signal: operationSignal });
+    let prompt = input.prompt;
     const args = [
       "--model", input.model,
       "--prompt-file", promptPath,
@@ -801,10 +793,6 @@ export async function generateLocalMfluxImage(
     ];
     if (input.quantization !== null) args.push("--quantize", String(input.quantization));
     if (input.seed !== undefined) args.push("--seed", String(input.seed));
-    if (input.loras?.length) {
-      args.push("--lora-paths", ...input.loras.map((lora) => lora.source));
-      args.push("--lora-scales", ...input.loras.map((lora) => String(lora.scale)));
-    }
     if (input.lowRam) args.push("--low-ram");
     if (input.vaeTiling || input.lowRam) args.push("--vae-tiling", "--vae-tile-size", String(input.vaeTileSize));
     if (input.inputReference) {
@@ -813,19 +801,25 @@ export async function generateLocalMfluxImage(
       const referencePath = path.join(directory, `reference.${extension}`);
       await writeFile(referencePath, Buffer.from(base64, "base64"), { mode: 0o600, signal: operationSignal });
       try {
-        args.push(model.id === "z-image-turbo" ? "--image-path" : "--image-paths", await frameReferenceImage(
+        const reference = await frameReferenceImage(
           referencePath,
           directory,
           resolution,
           input.referenceFit,
+          Boolean(input.generateMissing),
           operationSignal,
-        ));
-        if (model.id === "z-image-turbo") args.push("--image-strength", String(MFLUX_Z_IMAGE_REFERENCE_STRENGTH));
+        );
+        args.push("--image-paths", reference.path);
+        if (input.generateMissing && (reference.width < resolution.width || reference.height < resolution.height)) {
+          const sides = [reference.width < resolution.width ? "left and right" : "", reference.height < resolution.height ? "top and bottom" : ""].filter(Boolean).join(" and ");
+          prompt += `\n\nCanvas extension: Generate a full-bleed ${resolution.width}x${resolution.height} image. Keep the entire reference composition centered and uncropped, without stretching it. Extend the surrounding scene naturally on the ${sides} to fill the extra canvas, matching lighting, perspective, colors, and textures. Apply the requested edits and generate scene content instead of black bars, blank margins, borders, or letterboxing.`;
+        }
       } finally {
         await rm(referencePath, { force: true });
       }
     }
 
+    await writeFile(promptPath, prompt, { mode: 0o600, signal: operationSignal });
     assertMfluxMayContinue(operationSignal);
     await runMflux(
       binary,

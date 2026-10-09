@@ -37,40 +37,16 @@ def module(name, **values):
 
 def build_parser():
     parser = argparse.ArgumentParser()
-    for name in ["model", "prompt-file", "output", "image-paths", "image-path"]:
+    for name in ["model", "prompt-file", "output"]:
         parser.add_argument("--" + name)
+    parser.add_argument("--image-paths", nargs="+")
     for name in ["steps", "width", "height", "quantize", "vae-tile-size"]:
         parser.add_argument("--" + name, type=int)
     parser.add_argument("--seed", type=int, nargs="+", default=[123])
     parser.add_argument("--guidance", type=float)
-    parser.add_argument("--image-strength", type=float, default=0.4)
-    parser.add_argument("--lora-paths", nargs="*")
-    parser.add_argument("--lora-scales", nargs="*", type=float)
     parser.add_argument("--low-ram", action="store_true")
     parser.add_argument("--vae-tiling", action="store_true")
-    parser.set_defaults(battery_percentage_stop_limit=10, scheduler="linear")
-    original_parse = parser.parse_args
-
-    def parse_args():
-        args = original_parse()
-        if args.image_paths:
-            args.image_paths = [args.image_paths]
-        if args.lora_paths:
-            import huggingface_hub as hub
-            resolved = []
-            for source in args.lora_paths:
-                if Path(source).is_absolute():
-                    resolved.append(source)
-                else:
-                    resource = "lora-" + source.replace("/", "-").replace(":", "-")
-                    try:
-                        resolved.append(hub.snapshot_download(resource, local_files_only=True))
-                    except LocalEntryNotFoundError:
-                        resolved.append(hub.snapshot_download(resource))
-            args.lora_paths = resolved
-        return args
-
-    parser.parse_args = parse_args
+    parser.set_defaults(battery_percentage_stop_limit=10)
     return parser
 
 
@@ -101,20 +77,13 @@ class Model:
         self.callbacks = types.SimpleNamespace(register=lambda callback: self.registered.append(callback))
         self.registered = []
         self.tiling_config = None
-        if options.get("lora_paths"):
-            assert type(self).__name__ == "ZImage"
-            assert options["bake_lora"] is True
-            assert len(options["lora_paths"]) == len(options["lora_scales"])
-            for file in options["lora_paths"]:
-                if Path(file).read_text() == "invalid adapter":
-                    raise ValueError("private adapter path must not escape: " + file)
         record("load", pipeline=type(self).__name__, **options)
 
     def generate_image(self, **options):
         assert "OPENROUTER_API_KEY" not in os.environ
         assert len(self.registered) == 1
-        references = options.get("image_paths", []) + ([options["image_path"]] if options.get("image_path") else [])
-        for reference in references:
+        assert options["guidance"] == 1
+        for reference in options.get("image_paths", []):
             assert Path(reference).is_file()
             assert not any(Path(reference).parent.glob("reference.*"))
         record("generate", tile=self.tiling_config, **{key: [str(p) for p in value] if key == "image_paths" else value for key, value in options.items()})
@@ -123,11 +92,6 @@ class Model:
         if options["prompt"] == "exit":
             os._exit(0)
         steps = options["num_inference_steps"]
-        if type(self).__name__ == "ZImage":
-            assert options["guidance"] == 0
-            assert "image_paths" not in options
-            if options["image_path"]:
-                steps -= max(1, int(steps * options["image_strength"]))
         sys.stderr.write(" 50%%|#####     | %d/%d [00:20<00:20, 2.00s/it]\r" % (steps // 2, steps))
         sys.stderr.flush()
         while options["prompt"] == "wait":
@@ -161,8 +125,8 @@ class FakeProgress:
         self.display()
 
 
-def snapshot_download(repo_id, *, filename=None, local_files_only=False, tqdm_class=FakeProgress):
-    repo_id = repo_id.replace("/", "-") + ("-" + filename if filename else "")
+def snapshot_download(repo_id, *, local_files_only=False, tqdm_class=FakeProgress):
+    repo_id = repo_id.replace("/", "-")
     resource = cache / repo_id
     if resource.exists():
         record("cached", resource=repo_id)
@@ -201,18 +165,21 @@ def snapshot_download(repo_id, *, filename=None, local_files_only=False, tqdm_cl
 
 def cli(model_class):
     args = build_parser().parse_args()
-    loras = dict(lora_paths=args.lora_paths, lora_scales=args.lora_scales, bake_lora=True) if args.lora_paths else {}
-    model = model_class(quantize=args.quantize, model_config=args.model, **loras)
+    model = model_class(quantize=args.quantize, model_config=args.model)
     model.callbacks.register(5)
     options = dict(seed=args.seed[0], prompt=Path(args.prompt_file).read_text(), width=args.width,
                    height=args.height, num_inference_steps=args.steps,
-                   guidance=0 if model_class.__name__ == "ZImage" else 1)
-    if model_class.__name__ == "ZImage":
-        options.update(image_path=args.image_path, image_strength=args.image_strength)
-    elif args.image_paths:
+                   guidance=1, scheduler="flow_match_euler_discrete")
+    if args.image_paths:
         options["image_paths"] = args.image_paths
     model.generate_image(**options).save(args.output, False)
     record("cli", low_ram=args.low_ram)
+
+
+def resolve_restricted(model, registry_key):
+    if model != registry_key:
+        raise ValueError("Model does not match the restricted registry entry")
+    return model
 
 
 module("huggingface_hub", snapshot_download=snapshot_download, hf_hub_download=snapshot_download)
@@ -220,13 +187,12 @@ module("huggingface_hub.errors", LocalEntryNotFoundError=LocalEntryNotFoundError
 module("tqdm.auto", tqdm=FakeProgress)
 module("mlx.core", clear_cache=lambda: None)
 module("mflux.callbacks.instances.battery_saver", BatterySaver=lambda limit: limit)
-module("mflux.models.common.resolution.config_resolution", ConfigResolution=types.SimpleNamespace(resolve_restricted=lambda model, default: model))
+module("mflux.models.common.resolution.config_resolution", ConfigResolution=types.SimpleNamespace(resolve_restricted=resolve_restricted))
 module("mflux.models.common.vae.tiling_config", TilingConfig=lambda **options: options)
 module("mflux.utils.prompt_util", PromptUtil=types.SimpleNamespace(read_prompt=lambda args: Path(args.prompt_file).read_text()))
 for name, class_name in [
     ("flux2.cli.flux2_generate", "Flux2Klein"),
     ("flux2.cli.flux2_edit_generate", "Flux2KleinEdit"),
-    ("z_image.cli.z_image_turbo_generate", "ZImage"),
 ]:
     model_class = type(class_name, (Model,), {})
     module("mflux.models." + name, build_parser=build_parser, main=partial(cli, model_class), **{class_name: model_class})

@@ -35,9 +35,9 @@ const prompts: SavedPrompt[] = [
     createdAt,
     settings: {
       kind: "mflux",
-      model: "z-image-turbo",
+      model: "flux2-klein-4b",
       resolution: "1024x1024",
-      steps: 9,
+      steps: 4,
       quantization: 8,
       seed: "42",
       lowRam: false,
@@ -121,6 +121,19 @@ test("saved prompts persist on disk and update by id", async () => {
     await saveSavedPrompt(legacy);
     await initializeSavedPrompts();
     assert.deepEqual(getSavedPrompts().prompts[0], legacy);
+
+    const legacyTurbo = { ...prompts[2], settings: { ...prompts[2].settings, model: "z-image-turbo", steps: 9, referenceStrength: 0.15 } };
+    await saveSavedPrompt(legacyTurbo);
+    await initializeSavedPrompts();
+    assert.deepEqual(getSavedPrompts().prompts[0], legacyTurbo);
+    for (const referenceStrength of [-0.1, 1, Infinity]) {
+      assert.throws(() => saveSavedPrompt({ ...legacyTurbo, settings: { ...legacyTurbo.settings, referenceStrength } }));
+    }
+    const outpainting = { ...prompts[2], settings: { ...prompts[2].settings, model: "flux2-klein-9b", generateMissing: true } };
+    await saveSavedPrompt(outpainting);
+    await initializeSavedPrompts();
+    assert.deepEqual(getSavedPrompts().prompts[0], outpainting);
+    assert.throws(() => saveSavedPrompt({ ...outpainting, settings: { ...outpainting.settings, generateMissing: "true" } }));
 
     assert.throws(() => saveSavedPrompt({ ...prompts[0], secret: "not allowed" }));
     assert.throws(() => saveSavedPrompt({

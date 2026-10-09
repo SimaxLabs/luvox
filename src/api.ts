@@ -1,6 +1,6 @@
 import type { LocalH3FrameFitId } from "../shared/localH3";
 import type { VideoStatusResponse as VideoJob } from "../shared/videoTypes";
-import type { ImageGenerationResponse, LocalMfluxLora, LocalMfluxProgress } from "../shared/imageTypes";
+import type { ImageGenerationResponse, LocalMfluxProgress } from "../shared/imageTypes";
 import type {
   OpenRouterDiscoveryResponse,
   OpenRouterModelDefinition,
@@ -160,8 +160,8 @@ export function generateImage(
         vaeTiling: boolean;
         vaeTileSize: number;
         referenceFit?: LocalH3FrameFitId;
+        generateMissing?: boolean;
         inputReference?: string;
-        loras?: LocalMfluxLora[];
       },
   sessionApiKey?: string,
   signal?: AbortSignal,
