@@ -1,4 +1,4 @@
-import { type ChangeEvent, type Dispatch, type FormEvent, type ReactNode, type SetStateAction, useEffect, useRef, useState } from "react";
+import { type ChangeEvent, type Dispatch, type FormEvent, type PointerEvent, type ReactNode, type SetStateAction, useEffect, useRef, useState } from "react";
 import { VIDEO_MODELS, type VideoModelConfig } from "../shared/videoModels";
 import { getMfluxImageModel, getMfluxImageResolution, MFLUX_IMAGE_MODEL, MFLUX_IMAGE_MODELS, MFLUX_IMAGE_QUANTIZATIONS, MFLUX_IMAGE_RECOMMENDED_SETUPS, MFLUX_IMAGE_RESOLUTIONS, MFLUX_VAE_TILE_SIZES, MUSE_IMAGE_MODEL, OPENROUTER_IMAGE_MODELS, type OpenRouterImageModelConfig } from "../shared/imageModels";
 import type { DiscoveredOpenRouterModel, OpenRouterModelRegistry } from "../shared/openrouterModels";
@@ -22,7 +22,7 @@ import {
   deleteLocalReferenceImage,
   discoverOpenRouterImageEndpoints,
   discoverOpenRouterModels,
-  generateImage,
+  generateImageBatch,
   generateVideo,
   getAppConfig,
   getSavedPrompts,
@@ -77,6 +77,21 @@ interface DisplayJob extends VideoJob {
   pollingStopped?: boolean;
 }
 
+interface ImageReference {
+  id: string;
+  name: string;
+  dataUrl: string;
+}
+
+interface ImageBatchItem {
+  id: string;
+  name: string;
+  reference?: { dataUrl: string; fit: LocalH3FrameFitId };
+  status: GenerationStatus | "unknown" | "skipped";
+  result?: ImageGenerationResponse;
+  error?: string;
+}
+
 type IconName =
   | "arrow"
   | "check"
@@ -91,6 +106,7 @@ type IconName =
 const statusOrder: GenerationStatus[] = ["queued", "processing", "completed", "failed"];
 const defaultMfluxSetup = MFLUX_IMAGE_RECOMMENDED_SETUPS[0];
 const imageReferenceMaxBytes = 10 * 1024 * 1024;
+const imageBatchMaxFiles = 10;
 const uncertainSubmissionMessage = "OpenRouter may already be processing a paid request that Luvox cannot track. Check OpenRouter Activity before unlocking another submission.";
 const uncertainLocalSubmissionMessage = "The local h3.c submission may have been accepted but Luvox did not receive its job ID. Clear the workspace before submitting another local job.";
 const uncertainMfluxSubmissionMessage = "The local MFLUX request status is unknown. Clear the workspace before submitting another local MFLUX image.";
@@ -524,6 +540,65 @@ function StatusRail({ status }: { status?: GenerationStatus }) {
   );
 }
 
+function ImagePreview({ source, reference }: { source: string; reference?: ImageBatchItem["reference"] }) {
+  const [position, setPosition] = useState(50);
+  const slider = useRef<HTMLInputElement>(null);
+
+  const moveDivider = (event: PointerEvent<HTMLDivElement>) => {
+    const { left, width } = event.currentTarget.getBoundingClientRect();
+    if (width > 0) setPosition(Math.round(Math.max(0, Math.min(100, (event.clientX - left) / width * 100))));
+  };
+
+  return (
+    <div className="relative mx-auto w-fit max-w-full overflow-hidden bg-black select-none">
+      <img alt="Generated first frame" className="block max-h-[760px] max-w-full" draggable={false} src={source} />
+      {reference && (
+        <>
+          <div className="pointer-events-none absolute inset-0 bg-black" style={{ clipPath: `inset(0 ${100 - position}% 0 0)` }}>
+            <img alt="Original reference before generation" className="h-full w-full" draggable={false} src={reference.dataUrl} style={{ objectFit: reference.fit }} />
+            <span className="absolute top-3 left-3 bg-black/75 px-2 py-1 font-mono text-[9px] uppercase tracking-[0.15em] text-white">Before</span>
+          </div>
+          <div aria-hidden="true" className="pointer-events-none absolute inset-0" style={{ clipPath: `inset(0 0 0 ${position}%)` }}>
+            <span className="absolute top-3 right-3 bg-black/75 px-2 py-1 font-mono text-[9px] uppercase tracking-[0.15em] text-white">After</span>
+          </div>
+          <div
+            className="absolute inset-0 cursor-ew-resize touch-none"
+            onPointerDown={(event) => {
+              if (!event.isPrimary || event.button !== 0) return;
+              event.preventDefault();
+              slider.current?.focus({ preventScroll: true });
+              event.currentTarget.setPointerCapture(event.pointerId);
+              moveDivider(event);
+            }}
+            onPointerMove={(event) => {
+              if (event.currentTarget.hasPointerCapture(event.pointerId)) moveDivider(event);
+            }}
+          >
+            <input
+              aria-label="Before and after image comparison"
+              aria-valuetext={`${position}% original reference, ${100 - position}% generated image`}
+              className="peer pointer-events-none absolute inset-0 m-0 h-full w-full opacity-0"
+              max={100}
+              min={0}
+              onChange={(event) => setPosition(event.target.valueAsNumber)}
+              ref={slider}
+              step={1}
+              type="range"
+              value={position}
+            />
+            <div aria-hidden="true" className="pointer-events-none absolute inset-y-0 w-0.5 -translate-x-1/2 bg-[#d9ff72] shadow-[0_0_4px_#000] peer-focus-visible:[&>span]:ring-2 peer-focus-visible:[&>span]:ring-white peer-focus-visible:[&>span]:ring-offset-2 peer-focus-visible:[&>span]:ring-offset-black" style={{ left: `${position}%` }}>
+              <span className="absolute top-1/2 left-1/2 flex size-11 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border border-black/30 bg-[#d9ff72] text-black shadow-lg">
+                <Icon className="size-4 rotate-180" name="arrow" />
+                <Icon className="size-4" name="arrow" />
+              </span>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function Preview({
   aspectRatio,
   job,
@@ -659,13 +734,13 @@ function formatBytes(bytes: number): string {
 
 function getImageTaskStatus(
   submitting: boolean,
-  result: ImageGenerationResponse | null,
+  batch: ImageBatchItem[],
   failure: string | null,
 ): GenerationStatus | "unknown" | null {
   if (submitting) return "processing";
-  if (result) return "completed";
   if (failure === uncertainSubmissionMessage || failure === uncertainMfluxSubmissionMessage) return "unknown";
-  return failure ? "failed" : null;
+  if (failure) return "failed";
+  return batch.some((item) => item.result) ? "completed" : null;
 }
 
 function ModelManager({
@@ -1117,6 +1192,7 @@ export default function App() {
   const [openRouterImageAspectRatio, setOpenRouterImageAspectRatio] = useState("");
   const [openRouterImageResolution, setOpenRouterImageResolution] = useState("");
   const [openRouterImageTaskModelName, setOpenRouterImageTaskModelName] = useState<string | null>(null);
+  const [mfluxImageTaskModelName, setMfluxImageTaskModelName] = useState<string | null>(null);
   const [mfluxModel, setMfluxModel] = useState<string>(MFLUX_IMAGE_MODEL.id);
   const [mfluxResolution, setMfluxResolution] = useState<string>(defaultMfluxSetup.resolution);
   const [mfluxSteps, setMfluxSteps] = useState<number>(defaultMfluxSetup.steps);
@@ -1128,12 +1204,13 @@ export default function App() {
   const [imageReferenceFit, setImageReferenceFit] = useState<LocalH3FrameFitId>("contain");
   const [mfluxGenerateMissing, setMfluxGenerateMissing] = useState(false);
   const [imagePrompt, setImagePrompt] = useState("");
-  const [imageReference, setImageReference] = useState<{ name: string; dataUrl: string } | null>(null);
+  const [imageReferences, setImageReferences] = useState<ImageReference[]>([]);
   const [readingImageReference, setReadingImageReference] = useState(false);
-  const [imageResult, setImageResult] = useState<ImageGenerationResponse | null>(null);
+  const [imageBatch, setImageBatch] = useState<ImageBatchItem[]>([]);
   const [imageFailure, setImageFailure] = useState<string | null>(null);
-  const [mfluxImageResult, setMfluxImageResult] = useState<ImageGenerationResponse | null>(null);
+  const [mfluxImageBatch, setMfluxImageBatch] = useState<ImageBatchItem[]>([]);
   const [mfluxImageFailure, setMfluxImageFailure] = useState<string | null>(null);
+  const [selectedImageIds, setSelectedImageIds] = useState<Partial<Record<ImageProvider, string>>>({});
   const [openRouterSubmissionFailure, setOpenRouterSubmissionFailure] = useState<string | null>(null);
   const [localSubmissionFailure, setLocalSubmissionFailure] = useState<string | null>(null);
   const [jobs, setJobs] = useState<DisplayJob[]>([]);
@@ -1231,15 +1308,20 @@ export default function App() {
   const currentVideoUnknown = form.provider === "local" && localSubmissionFailure === uncertainLocalSubmissionMessage;
   const currentVideoLocked = currentVideoActive || currentVideoUnknown;
   const hasUnknownSubmission = openRouterImageUncertain || openRouterVideoUncertain || mfluxSubmissionUncertain || localSubmissionFailure === uncertainLocalSubmissionMessage;
-  const openRouterImageTaskStatus = getImageTaskStatus(imageSubmitting, imageResult, imageFailure);
-  const mfluxImageTaskStatus = getImageTaskStatus(mfluxImageSubmitting, mfluxImageResult, mfluxImageFailure);
+  const openRouterImageTaskStatus = getImageTaskStatus(imageSubmitting, imageBatch, imageFailure);
+  const mfluxImageTaskStatus = getImageTaskStatus(mfluxImageSubmitting, mfluxImageBatch, mfluxImageFailure);
   const imageTaskStatus = imageProvider === "openrouter" ? openRouterImageTaskStatus : mfluxImageTaskStatus;
-  const currentImageResult = imageProvider === "openrouter" ? imageResult : mfluxImageResult;
+  const currentImageBatch = imageProvider === "openrouter" ? imageBatch : mfluxImageBatch;
+  const activeImageIndex = currentImageBatch.findIndex((item) => item.status === "processing");
+  const currentImageItem = currentImageBatch.find((item) => item.id === selectedImageIds[imageProvider])
+    ?? currentImageBatch[activeImageIndex] ?? currentImageBatch[0];
+  const currentImageResult = currentImageItem?.result;
   const currentImageFailure = imageProvider === "openrouter" ? imageFailure : mfluxImageFailure;
   const currentImageModelName = imageProvider === "openrouter"
     ? openRouterImageTaskStatus && openRouterImageTaskModelName ? openRouterImageTaskModelName : selectedOpenRouterImageModel.name
-    : selectedMfluxModel.name;
-  const usesMfluxEdit = imageProvider === "mflux" && Boolean(imageReference);
+    : mfluxImageTaskStatus && mfluxImageTaskModelName ? mfluxImageTaskModelName : selectedMfluxModel.name;
+  const usesMfluxEdit = imageProvider === "mflux" && imageReferences.length > 0;
+  const imageInputCount = imageProvider === "mflux" || selectedOpenRouterImageModel.inputReference.supported ? Math.max(1, imageReferences.length) : 1;
   const selectedMfluxModelAvailable = appConfig?.localMflux.models.includes(selectedMfluxModel.id) === true;
   const openRouterSubmissionStatus = openRouterSubmitting
     ? "submitting"
@@ -1418,6 +1500,7 @@ export default function App() {
     setOpenRouterImageAspectRatio("");
     setOpenRouterImageResolution("");
     setOpenRouterImageTaskModelName(null);
+    setMfluxImageTaskModelName(null);
     setMfluxModel(MFLUX_IMAGE_MODEL.id);
     setMfluxResolution(defaultMfluxSetup.resolution);
     setMfluxSteps(defaultMfluxSetup.steps);
@@ -1429,12 +1512,13 @@ export default function App() {
     setImageReferenceFit("contain");
     setMfluxGenerateMissing(false);
     setImagePrompt("");
-    setImageReference(null);
+    setImageReferences([]);
     setReadingImageReference(false);
-    setImageResult(null);
+    setImageBatch([]);
     setImageFailure(preserveImageSubmissionLock ? uncertainSubmissionMessage : null);
-    setMfluxImageResult(null);
+    setMfluxImageBatch([]);
     setMfluxImageFailure(null);
+    setSelectedImageIds({});
     setOpenRouterSubmissionFailure(preserveVideoSubmissionLock ? uncertainSubmissionMessage : null);
     setLocalSubmissionFailure(null);
     setJobs([]);
@@ -1749,7 +1833,7 @@ export default function App() {
         setOpenRouterImageModelId(model.id);
         setOpenRouterImageAspectRatio(model.aspectRatios.includes(settings.aspectRatio) ? settings.aspectRatio : model.defaultAspectRatio || "");
         setOpenRouterImageResolution(model.resolutions.includes(settings.resolution) ? settings.resolution : model.defaultResolution || "");
-        setImageReference(null);
+        setImageReferences([]);
       } else {
         status = `${saved.name} loaded, but its saved OpenRouter image model is no longer available.`;
       }
@@ -1774,7 +1858,7 @@ export default function App() {
         setMfluxVaeTileSize(MFLUX_VAE_TILE_SIZES.some((size) => size === settings.vaeTileSize) ? settings.vaeTileSize : setup.vaeTileSize);
         setImageReferenceFit(settings.referenceFit);
         setMfluxGenerateMissing(settings.generateMissing ?? false);
-        setImageReference(null);
+        setImageReferences([]);
         setMfluxAdvancedStatus("Saved settings applied.");
       }
     } else if (settings.kind === "openrouter") {
@@ -1902,39 +1986,47 @@ export default function App() {
     }
   };
 
-  const selectImageReference = async (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.currentTarget.files?.[0];
+  const selectImageReferences = async (event: ChangeEvent<HTMLInputElement>, replace = false) => {
+    const files = Array.from(event.currentTarget.files ?? []);
     event.currentTarget.value = "";
-    if (!file) return;
+    if (!files.length || readingImageReference || currentSubmitting) return;
 
     setError(null);
-    if (file.size > imageReferenceMaxBytes) {
-      setError("The reference image must be 10 MB or smaller.");
+    if (files.length + (replace ? 0 : imageReferences.length) > imageBatchMaxFiles) {
+      setError(`Choose up to ${imageBatchMaxFiles} reference images per batch.`);
+      return;
+    }
+    if (files.some((file) => file.size > imageReferenceMaxBytes)) {
+      setError("Each reference image must be 10 MB or smaller.");
       return;
     }
 
     const version = workspaceVersion.current;
-    setImageReference(null);
     setReadingImageReference(true);
     try {
-      const bytes = new Uint8Array(await file.slice(0, 12).arrayBuffer());
-      const mediaType = rasterMediaType(bytes);
-      if (!mediaType) throw new Error("Choose a PNG, JPEG, or WebP reference image.");
+      const added: ImageReference[] = [];
+      for (const file of files) {
+        const bytes = new Uint8Array(await file.slice(0, 12).arrayBuffer());
+        const mediaType = rasterMediaType(bytes);
+        if (!mediaType) throw new Error(`${file.name}: choose a PNG, JPEG, or WebP reference image.`);
 
-      const rawDataUrl = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => typeof reader.result === "string"
-          ? resolve(reader.result)
-          : reject(new Error("The browser could not read the reference image."));
-        reader.onerror = () => reject(new Error("The browser could not read the reference image."));
-        reader.readAsDataURL(file);
-      });
-      if (version !== workspaceVersion.current) return;
-      setImageReference({
-        name: file.name,
-        dataUrl: `data:${mediaType};base64,${rawDataUrl.slice(rawDataUrl.indexOf(",") + 1)}`,
-      });
-      setImageReferenceFit("contain");
+        const rawDataUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => typeof reader.result === "string"
+            ? resolve(reader.result)
+            : reject(new Error("The browser could not read the reference image."));
+          reader.onerror = () => reject(new Error("The browser could not read the reference image."));
+          reader.readAsDataURL(file);
+        });
+        if (version !== workspaceVersion.current) return;
+        added.push({
+          id: crypto.randomUUID(),
+          name: file.name,
+          dataUrl: `data:${mediaType};base64,${rawDataUrl.slice(rawDataUrl.indexOf(",") + 1)}`,
+        });
+      }
+      setImageReferences((current) => [...(replace ? [] : current), ...added]);
+      if (replace || imageReferences.length === 0) setImageReferenceFit("contain");
     } catch (referenceError) {
       if (version === workspaceVersion.current) setError(messageFrom(referenceError));
     } finally {
@@ -1951,7 +2043,7 @@ export default function App() {
       generationControllers.current.has(submissionKind) ||
       currentSubmissionUncertain ||
       readingImageReference ||
-      (workflow === "image" && imageProvider === "openrouter" && selectedOpenRouterImageModel.inputReference.required && !imageReference) ||
+      (workflow === "image" && imageProvider === "openrouter" && selectedOpenRouterImageModel.inputReference.required && imageReferences.length === 0) ||
       (clearingWorkspace && workflow === "video" && form.provider === "local") ||
       (localCleanupFailed && workflow === "video" && form.provider === "local") ||
       (workflow === "video" && currentVideoLocked)
@@ -1986,6 +2078,7 @@ export default function App() {
       setMfluxProgress({ phase: "loading", step: 0, total: mfluxSteps, percent: 0 });
       setMfluxImageSubmitting(true);
       setMfluxImageFailure(null);
+      setMfluxImageTaskModelName(selectedMfluxModel.name);
       setJobAnnouncement("Local MFLUX image started.");
     }
     setError(null);
@@ -1994,11 +2087,19 @@ export default function App() {
       const key = sessionApiKey.trim();
       if (isImageSubmission) {
         const isMflux = submissionKind === "mflux";
-        if (isMflux) setMfluxImageResult(null);
-        else setImageResult(null);
-        const result = isMflux
-          ? await generateImage({
-              provider: "mflux",
+        const references = isMflux || selectedOpenRouterImageModel.inputReference.supported ? imageReferences : [];
+        const batch: ImageBatchItem[] = (references.length ? references : [undefined]).map((reference) => ({
+          id: crypto.randomUUID(),
+          name: reference?.name ?? "Generated image",
+          reference: reference ? { dataUrl: reference.dataUrl, fit: isMflux ? imageReferenceFit : "contain" } : undefined,
+          status: "queued",
+        }));
+        const setBatch = isMflux ? setMfluxImageBatch : setImageBatch;
+        setBatch(batch);
+        setSelectedImageIds((current) => ({ ...current, [imageProvider]: undefined }));
+        const payloads = batch.map((item) => isMflux
+          ? {
+              provider: "mflux" as const,
               prompt: imagePrompt,
               model: selectedMfluxModel.id,
               resolution: mfluxResolution,
@@ -2008,25 +2109,42 @@ export default function App() {
               lowRam: mfluxLowRam,
               vaeTiling: mfluxVaeTiling,
               vaeTileSize: mfluxVaeTileSize,
-              referenceFit: imageReference ? imageReferenceFit : undefined,
+              referenceFit: item.reference?.fit,
               generateMissing: usesMfluxEdit && imageReferenceFit === "contain" && mfluxGenerateMissing,
-              inputReference: imageReference?.dataUrl,
-            }, undefined, requestController.signal, (progress) => {
-              if (version === workspaceVersion.current) setMfluxProgress(progress);
-            })
-          : await generateImage({
-              provider: "openrouter",
+              inputReference: item.reference?.dataUrl,
+            }
+          : {
+              provider: "openrouter" as const,
               prompt: imagePrompt,
               model: selectedOpenRouterImageModel.id,
               aspectRatio: openRouterImageAspectRatio || undefined,
               resolution: openRouterImageResolution || undefined,
-              inputReference: selectedOpenRouterImageModel.inputReference.supported ? imageReference?.dataUrl : undefined,
-            }, key || undefined, requestController.signal);
+              inputReference: item.reference?.dataUrl,
+            });
+        await generateImageBatch(payloads, {
+          sessionApiKey: isMflux ? undefined : key || undefined,
+          signal: requestController.signal,
+          onStart: (index) => {
+            if (version !== workspaceVersion.current) return;
+            setBatch((current) => current.map((item) => item.id === batch[index].id ? { ...item, status: "processing" } : item));
+            if (isMflux) {
+              mfluxStartedAt.current = Date.now();
+              setMfluxElapsedSeconds(0);
+              setMfluxProgress({ phase: "loading", step: 0, total: mfluxSteps, percent: 0 });
+            }
+            setJobAnnouncement(`Processing image ${index + 1} of ${batch.length}: ${batch[index].name}.`);
+          },
+          onResult: (index, result) => {
+            if (version !== workspaceVersion.current) return;
+            setBatch((current) => current.map((item) => item.id === batch[index].id ? { ...item, status: "completed", result } : item));
+          },
+          onProgress: (progress) => {
+            if (version === workspaceVersion.current) setMfluxProgress(progress);
+          },
+        });
         if (version !== workspaceVersion.current) return;
         if (isPaidSubmission) paidRemoteWork.delete(pendingRemoteSubmission);
-        if (isMflux) setMfluxImageResult(result);
-        else setImageResult(result);
-        setJobAnnouncement(`${isMflux ? "Local MFLUX" : selectedOpenRouterImageModel.name} image completed.`);
+        setJobAnnouncement(`${isMflux ? "Local MFLUX" : selectedOpenRouterImageModel.name}: ${batch.length} ${batch.length === 1 ? "image" : "images"} completed.`);
         return;
       }
 
@@ -2085,22 +2203,31 @@ export default function App() {
       setJobAnnouncement(`${trackedJob.provider === "local" ? "Local h3.c" : "OpenRouter"} job ${trackedJob.id.slice(0, 12)} ${trackedJob.status}.`);
     } catch (submitError) {
       if (version !== workspaceVersion.current) return;
-      if (requestController.signal.aborted && cancelledSubmissions.current.delete(submissionKind)) {
+      const stoppedLocally = requestController.signal.aborted && cancelledSubmissions.current.delete(submissionKind);
+      const apiError = submitError instanceof ApiError ? submitError : null;
+      const outcomeIsUnknown = stoppedLocally || (
+        apiError?.status === 0 ||
+        Boolean(apiError?.type && uncertainSubmissionErrors.has(apiError.type))
+      );
+      if (isImageSubmission) {
+        const message = outcomeIsUnknown
+          ? submissionKind === "mflux" ? uncertainMfluxSubmissionMessage : uncertainSubmissionMessage
+          : messageFrom(submitError);
+        const setBatch = submissionKind === "mflux" ? setMfluxImageBatch : setImageBatch;
+        setBatch((current) => current.map((item) => item.status === "processing"
+          ? { ...item, status: outcomeIsUnknown ? "unknown" : "failed", error: message }
+          : item.status === "queued" ? { ...item, status: "skipped" } : item));
+      }
+      if (stoppedLocally) {
         if (submissionKind === "mflux") {
-          setMfluxImageResult(null);
           setMfluxImageFailure(uncertainMfluxSubmissionMessage);
           setMfluxProgress(null);
           setMfluxElapsedSeconds(0);
-          setError(uncertainMfluxSubmissionMessage);
+          if (currentSubmissionKindRef.current === submissionKind) setError(uncertainMfluxSubmissionMessage);
           setJobAnnouncement("Local MFLUX stop requested; status unknown until Clear.");
         }
         return;
       }
-      const apiError = submitError instanceof ApiError ? submitError : null;
-      const outcomeIsUnknown = (
-        apiError?.status === 0 ||
-        Boolean(apiError?.type && uncertainSubmissionErrors.has(apiError.type))
-      );
       const submissionIsUncertain = isPaidSubmission && outcomeIsUnknown;
       const mfluxSubmissionIsUncertain = submissionKind === "mflux" && outcomeIsUnknown;
       const localSubmissionIsUncertain = submissionKind === "local" && outcomeIsUnknown;
@@ -2150,25 +2277,17 @@ export default function App() {
 
   const stopMfluxImage = () => {
     const controller = generationControllers.current.get("mflux");
-    if (!controller || !window.confirm("Abort this local MFLUX generation?")) return;
+    if (!controller || !window.confirm("Abort this local MFLUX generation and skip any remaining images? Completed images will be kept.")) return;
     cancelledSubmissions.current.add("mflux");
     controller.abort();
     setJobAnnouncement("Stopping local MFLUX image.");
   };
 
   const deleteImageTask = () => {
-    if (!currentImageResult || !window.confirm("Delete this completed image from the session?")) return;
-    if (imageProvider === "mflux") {
-      setMfluxImageResult(null);
-      setMfluxImageFailure(null);
-      setMfluxProgress(null);
-      setMfluxElapsedSeconds(0);
-    } else {
-      setImageResult(null);
-      setImageFailure(null);
-      setOpenRouterImageTaskModelName(null);
-    }
-    setError(null);
+    if (currentSubmitting || !currentImageResult || !window.confirm("Delete this completed image from the session?")) return;
+    const setBatch = imageProvider === "mflux" ? setMfluxImageBatch : setImageBatch;
+    setBatch((current) => current.filter((item) => item.id !== currentImageItem.id));
+    setSelectedImageIds((current) => ({ ...current, [imageProvider]: undefined }));
     setJobAnnouncement(`${imageProvider === "mflux" ? "Local MFLUX" : currentImageModelName} image deleted.`);
   };
 
@@ -2312,9 +2431,9 @@ export default function App() {
                   </div>
                   <div className="max-h-[60vh] overflow-y-auto p-2">
                     {([
-                      ["openrouter", openRouterImageTaskStatus, openRouterImageTaskModelName || selectedOpenRouterImageModel.name],
-                      ["mflux", mfluxImageTaskStatus, "Local MFLUX"],
-                    ] as const).map(([provider, status, label]) => status && (
+                      ["openrouter", openRouterImageTaskStatus, openRouterImageTaskModelName || selectedOpenRouterImageModel.name, imageBatch],
+                      ["mflux", mfluxImageTaskStatus, "Local MFLUX", mfluxImageBatch],
+                    ] as const).map(([provider, status, label, batch]) => status && (
                       <button
                         aria-current={workflow === "image" && imageProvider === provider ? "true" : undefined}
                         className={`flex w-full items-center justify-between gap-3 border px-3 py-3 text-left transition ${workflow === "image" && imageProvider === provider ? "border-[#d9ff72]/60 bg-[#d9ff72]/5" : "border-transparent hover:border-white/15 hover:bg-white/5"}`}
@@ -2329,7 +2448,7 @@ export default function App() {
                       >
                         <span className="min-w-0">
                           <span className="block text-[10px] font-bold uppercase tracking-[0.12em]">{label}</span>
-                          <span className="mt-1 block font-mono text-[9px] text-white/40">Text to image request</span>
+                          <span className="mt-1 block font-mono text-[9px] text-white/40">{batch.length > 1 ? `${batch.filter((item) => item.result).length} / ${batch.length} images completed` : "Text to image request"}</span>
                         </span>
                         <span className={`shrink-0 text-[9px] font-bold uppercase tracking-[0.12em] ${status === "failed" ? "text-[#ff826e]" : status === "completed" ? "text-white/55" : "text-[#d9ff72]"}`}>
                           {status}
@@ -2705,13 +2824,9 @@ export default function App() {
               <div className="mb-4 flex items-start gap-3">
                 <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center bg-white/70"><Icon name="image" /></div>
                 <div className="min-w-0 flex-1">
-                  <h3 className="text-xs font-bold uppercase tracking-[0.12em]">Reference image</h3>
+                  <h3 className="text-xs font-bold uppercase tracking-[0.12em]">Reference images</h3>
                   <p className="mt-1 text-[11px] leading-4 text-stone-500">
-                    {imageProvider === "mflux"
-                      ? "Add one optional PNG, JPEG, or WebP image to use FLUX.2's dedicated edit mode."
-                      : selectedOpenRouterImageModel.inputReference.required
-                        ? "This model requires one PNG, JPEG, or WebP image up to 10 MB."
-                        : "Add one optional PNG, JPEG, or WebP image up to 10 MB."}
+                    Add up to {imageBatchMaxFiles} PNG, JPEG, or WebP images, 10 MB each. Each image is processed separately with the same prompt and settings.
                   </p>
                 </div>
                 <span className="shrink-0 border border-black/10 bg-white/50 px-2 py-1 text-[9px] font-bold uppercase tracking-[0.12em] text-stone-500">
@@ -2720,75 +2835,79 @@ export default function App() {
               </div>
               <p aria-live="polite" className="sr-only" role="status">
                 {readingImageReference
-                  ? "Reading reference image."
-                  : imageReference
-                    ? `Reference image ${imageReference.name} is ready.`
+                  ? "Reading reference images."
+                  : imageReferences.length
+                    ? `${imageReferences.length} reference images ready.`
                     : ""}
               </p>
-              {imageReference ? (
+              {imageReferences.length > 0 && (
                 <>
-                  <div className="grid gap-3 border border-black/15 bg-[#faf9f3] p-3 sm:grid-cols-[6rem_1fr]">
-                    <div className="flex h-24 items-center justify-center overflow-hidden bg-[#171917]">
-                      <img alt="Selected reference" className="h-full w-full object-contain" src={imageReference.dataUrl} />
-                    </div>
-                    <div className="flex min-w-0 flex-col justify-between gap-3 py-1">
-                      <div className="min-w-0">
-                        <p className="truncate text-sm font-bold" title={imageReference.name}>{imageReference.name}</p>
-                        <p className="mt-1 text-[10px] uppercase tracking-[0.12em] text-stone-500">Ready for generation</p>
+                  <div className={`grid max-h-96 gap-3 overflow-y-auto ${imageReferences.length > 1 ? "sm:grid-cols-2" : ""}`}>
+                    {imageReferences.map((reference, index) => (
+                      <div className="flex min-w-0 gap-3 border border-black/15 bg-[#faf9f3] p-3" key={reference.id}>
+                        <img alt={`Reference ${index + 1}: ${reference.name}`} className="size-16 shrink-0 bg-[#171917] object-contain" src={reference.dataUrl} />
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-xs font-bold" title={reference.name}>{index + 1}. {reference.name}</p>
+                          <button
+                            aria-label={`Remove reference ${index + 1}: ${reference.name}`}
+                            className="mt-2 min-h-9 text-[10px] font-bold uppercase tracking-[0.12em] text-[#a63d2e] hover:text-black"
+                            onClick={() => setImageReferences((current) => current.filter((item) => item.id !== reference.id))}
+                            type="button"
+                          >
+                            Remove
+                          </button>
+                        </div>
                       </div>
-                      <div className="flex gap-2">
-                        <label className="has-[:focus-visible]:ring-black flex h-9 cursor-pointer items-center border border-black/15 px-3 text-[10px] font-bold uppercase tracking-[0.12em] hover:border-black has-[:focus-visible]:ring-2">
-                          Replace
-                          <input
-                            accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp"
-                            aria-label="Replace reference image"
-                            aria-required={imageProvider === "openrouter" && selectedOpenRouterImageModel.inputReference.required}
-                            className="sr-only"
-                            id="image-reference"
-                            onChange={(event) => void selectImageReference(event)}
-                            type="file"
-                          />
-                        </label>
-                        <button
-                          className="h-9 border border-[#e44d38]/30 px-3 text-[10px] font-bold uppercase tracking-[0.12em] text-[#a63d2e] hover:border-[#e44d38]"
-                          onClick={() => setImageReference(null)}
-                          type="button"
-                        >
-                          Remove
-                        </button>
-                      </div>
-                    </div>
+                    ))}
                   </div>
-                  {imageProvider === "mflux" && (
-                    <>
-                      <FrameFitPicker idPrefix="image-reference-fit" onSelect={setImageReferenceFit} selected={imageReferenceFit} />
-                      {imageReferenceFit === "contain" && (
-                        <Toggle
-                          checked={mfluxGenerateMissing}
-                          label="Generate missing"
-                          note="Ask FLUX.2 to extend the scene into unused canvas instead of adding black bars. Adds a canvas-extension instruction to your prompt; image details may change."
-                          noteClassName="max-w-sm pr-4 leading-4"
-                          onChange={setMfluxGenerateMissing}
-                        />
-                      )}
-                    </>
-                  )}
+                  <div className="mt-3 flex flex-wrap items-center gap-3">
+                    <span className="mr-auto font-mono text-[10px] text-stone-600">{imageReferences.length} / {imageBatchMaxFiles} selected</span>
+                    <label className="flex min-h-9 cursor-pointer items-center border border-black/15 px-3 text-[10px] font-bold uppercase tracking-[0.12em] hover:border-black has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-black">
+                      Replace all
+                      <input
+                        accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp"
+                        aria-label="Replace reference images"
+                        className="sr-only"
+                        multiple
+                        onChange={(event) => void selectImageReferences(event, true)}
+                        type="file"
+                      />
+                    </label>
+                    <button className="min-h-9 text-[10px] font-bold uppercase tracking-[0.12em] text-[#a63d2e] hover:text-black" onClick={() => setImageReferences([])} type="button">Remove all</button>
+                  </div>
                 </>
-              ) : (
-                <label className={`flex min-h-32 flex-col items-center justify-center border border-dashed border-black/25 bg-[#faf9f3] px-6 text-center transition has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-black ${readingImageReference ? "cursor-wait opacity-60" : "cursor-pointer hover:border-black hover:bg-white"}`}>
+              )}
+              {imageReferences.length < imageBatchMaxFiles && (
+                <label className={`mt-3 flex flex-col items-center justify-center border border-dashed border-black/25 bg-[#faf9f3] px-6 py-4 text-center transition has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-black ${imageReferences.length ? "min-h-16" : "min-h-32"} ${readingImageReference ? "cursor-wait opacity-60" : "cursor-pointer hover:border-black hover:bg-white"}`}>
                   <input
                     accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp"
-                    aria-required={imageProvider === "openrouter" && selectedOpenRouterImageModel.inputReference.required}
+                    aria-label={imageReferences.length ? "Add reference images" : "Choose reference images"}
+                    aria-required={imageProvider === "openrouter" && selectedOpenRouterImageModel.inputReference.required && imageReferences.length === 0}
                     className="sr-only"
                     disabled={readingImageReference}
                     id="image-reference"
-                    onChange={(event) => void selectImageReference(event)}
+                    multiple
+                    onChange={(event) => void selectImageReferences(event)}
                     type="file"
                   />
-                  <span className="mb-3 flex size-10 items-center justify-center border border-black/10 bg-[#e7e5dc]"><Icon name="image" /></span>
-                  <span className="text-xs font-bold uppercase tracking-[0.12em]">{readingImageReference ? "Reading image..." : "Choose reference image"}</span>
-                  <span className="mt-1.5 text-[10px] uppercase tracking-[0.1em] text-stone-500">PNG, JPEG or WebP / 10 MB max</span>
+                  <span className="text-xs font-bold uppercase tracking-[0.12em]">{readingImageReference ? "Reading images..." : imageReferences.length ? "Add more images" : "Choose reference images"}</span>
+                  <span className="mt-1.5 text-[10px] uppercase tracking-[0.1em] text-stone-500">PNG, JPEG or WebP / 10 MB each</span>
                 </label>
+              )}
+              {imageReferences.length > 1 && <p className="mt-3 text-[11px] leading-4 text-stone-600">One result per image, processed in order. {imageProvider === "openrouter" ? "OpenRouter charges for each image. " : ""}A failed image stops the batch; completed results are kept.</p>}
+              {imageReferences.length > 0 && imageProvider === "mflux" && (
+                <>
+                  <FrameFitPicker idPrefix="image-reference-fit" onSelect={setImageReferenceFit} selected={imageReferenceFit} />
+                  {imageReferenceFit === "contain" && (
+                    <Toggle
+                      checked={mfluxGenerateMissing}
+                      label="Generate missing"
+                      note="Ask FLUX.2 to extend the scene into unused canvas instead of adding black bars. Adds a canvas-extension instruction to your prompt; image details may change."
+                      noteClassName="max-w-sm pr-4 leading-4"
+                      onChange={setMfluxGenerateMissing}
+                    />
+                  )}
+                </>
               )}
             </div>
             )}
@@ -3321,15 +3440,15 @@ export default function App() {
                 currentSubmissionUncertain ||
                 ((clearingWorkspace || localCleanupFailed) && workflow === "video" && form.provider === "local") ||
                 (workflow === "video" && (currentVideoLocked || uploadingReference !== null || !form.prompt.trim())) ||
-                (workflow === "image" && (!imagePrompt.trim() || (imageProvider === "openrouter" && selectedOpenRouterImageModel.inputReference.required && !imageReference) || (imageProvider === "mflux" && !selectedMfluxModelAvailable)))
+                (workflow === "image" && (!imagePrompt.trim() || (imageProvider === "openrouter" && selectedOpenRouterImageModel.inputReference.required && imageReferences.length === 0) || (imageProvider === "mflux" && !selectedMfluxModelAvailable)))
               }
               type="submit"
             >
               <span>
                 {currentSubmitting
-                  ? "Submitting..."
+                  ? workflow === "image" && currentImageBatch.length > 1 ? `Processing ${activeImageIndex + 1} / ${currentImageBatch.length}...` : "Submitting..."
                   : workflow === "image"
-                    ? imageProvider === "mflux" ? "Generate locally" : "Text to image"
+                    ? imageInputCount > 1 ? `Process ${imageInputCount} images` : imageProvider === "mflux" ? "Generate locally" : "Text to image"
                     : currentVideoUnknown
                       ? "Submission status unknown"
                       : currentVideoActive
@@ -3372,9 +3491,42 @@ export default function App() {
 
           <StatusRail status={imageTaskStatus === "unknown" ? undefined : imageTaskStatus ?? undefined} />
 
+          {currentImageBatch.length > 1 && (
+            <div className="border-b border-white/10 px-5 py-4 sm:px-8">
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                <p aria-live="polite" className="font-mono text-[10px] uppercase tracking-[0.12em] text-white/60">
+                  {currentImageBatch.filter((item) => item.result).length} / {currentImageBatch.length} completed
+                  {currentSubmitting && activeImageIndex >= 0 ? ` · Processing image ${activeImageIndex + 1}` : ""}
+                </p>
+                {currentSubmitting && selectedImageIds[imageProvider] && (
+                  <button className="min-h-9 text-[10px] font-bold uppercase tracking-[0.12em] text-[#d9ff72]" onClick={() => setSelectedImageIds((current) => ({ ...current, [imageProvider]: undefined }))} type="button">Follow progress</button>
+                )}
+              </div>
+              <div aria-label="Batch images" className="grid max-h-72 grid-cols-2 gap-2 overflow-y-auto sm:grid-cols-3 xl:grid-cols-4" role="group">
+                {currentImageBatch.map((item, index) => (
+                  <button
+                    aria-label={`Image ${index + 1}: ${item.name}, ${item.status}`}
+                    aria-pressed={currentImageItem?.id === item.id}
+                    className={`min-w-0 border p-2 text-left transition ${currentImageItem?.id === item.id ? "border-[#d9ff72] bg-[#d9ff72]/5" : "border-white/15 hover:border-white/50"}`}
+                    key={item.id}
+                    onClick={() => setSelectedImageIds((current) => ({ ...current, [imageProvider]: item.id }))}
+                    type="button"
+                  >
+                    <img alt="" className="h-16 w-full bg-black object-contain" src={item.result ? `data:${item.result.mediaType};base64,${item.result.b64Json}` : item.reference?.dataUrl} />
+                    <span className="mt-2 block truncate text-[10px] text-white" title={item.name}>{index + 1}. {item.name}</span>
+                    <span className={`mt-1 block font-mono text-[9px] uppercase ${item.status === "failed" || item.status === "unknown" ? "text-[#ff826e]" : item.status === "processing" ? "text-[#d9ff72]" : "text-white/55"}`}>{item.status}</span>
+                  </button>
+                ))}
+              </div>
+              {currentImageFailure && <p className="mt-3 text-xs leading-5 text-[#ff826e]">Batch stopped. Completed images are available above; remaining images were skipped.</p>}
+            </div>
+          )}
+          {currentImageItem?.reference && (
+            <p className="truncate px-5 pt-4 text-xs text-white/60 sm:px-8" title={currentImageItem.name}>{currentImageItem.name}</p>
+          )}
           <div className="flex flex-1 items-center p-5 sm:p-8">
             <div className="relative flex min-h-72 w-full items-center justify-center overflow-hidden bg-[#171917]">
-              {currentSubmitting ? (
+              {currentImageItem?.status === "processing" ? (
                 <div className="relative flex min-h-96 w-full items-center justify-center overflow-hidden bg-[#111310]">
                   <div className="absolute inset-0 preview-grid opacity-35" />
                   <div className="relative w-full max-w-lg px-6 text-center">
@@ -3443,19 +3595,19 @@ export default function App() {
                   </div>
                 </div>
               ) : imageSource ? (
-                <img
-                  alt="Generated first frame"
-                  className="max-h-[760px] w-full object-contain"
-                  src={imageSource}
-                />
-              ) : currentImageFailure ? (
+                <ImagePreview key={currentImageItem.id} reference={currentImageItem.reference} source={imageSource} />
+              ) : currentImageItem?.status === "queued" || currentImageItem?.status === "skipped" ? (
+                <p className="px-6 text-center font-mono text-[10px] uppercase leading-5 tracking-[0.15em] text-white/60">
+                  {currentImageItem.status === "queued" ? "Waiting for earlier images in this batch" : "Not submitted — the batch stopped before this image"}
+                </p>
+              ) : currentImageItem?.error || currentImageFailure ? (
                 <div className="flex min-h-72 w-full items-center justify-center bg-[#17100f] px-8 text-center">
                   <div>
                     <div className="mx-auto mb-5 flex size-14 items-center justify-center rounded-full border border-[#ff826e]/40 text-2xl text-[#ff826e]">!</div>
                     <p className="font-display text-2xl uppercase text-white">
                       {imageTaskStatus === "unknown" ? "Generation status unknown" : "Generation stopped"}
                     </p>
-                    <p className="mx-auto mt-3 max-w-md text-sm leading-6 text-white/55">{currentImageFailure}</p>
+                    <p className="mx-auto mt-3 max-w-md text-sm leading-6 text-white/55">{currentImageItem?.error || currentImageFailure}</p>
                   </div>
                 </div>
               ) : (
@@ -3472,13 +3624,14 @@ export default function App() {
                 <div className="flex flex-col gap-3 sm:flex-row">
                   <a
                     className="flex h-12 flex-1 items-center justify-center gap-2 bg-[#d9ff72] text-xs font-bold uppercase tracking-[0.12em] text-black transition hover:bg-white"
-                    download={`${imageProvider === "mflux" ? "mflux" : "openrouter"}-image.${imageExtension}`}
+                    download={currentImageItem.reference ? `${currentImageItem.name.replace(/\.[^.]+$/, "")}-generated.${imageExtension}` : `${imageProvider}-image.${imageExtension}`}
                     href={imageSource}
                   >
                     <Icon name="download" /> Download
                   </a>
                   <button
-                    className="flex h-12 flex-1 items-center justify-center border border-white/15 text-xs font-bold uppercase tracking-[0.12em] text-white transition hover:border-[#ff826e]/70 hover:text-[#ff826e]"
+                    className="flex h-12 flex-1 items-center justify-center border border-white/15 text-xs font-bold uppercase tracking-[0.12em] text-white transition hover:border-[#ff826e]/70 hover:text-[#ff826e] disabled:cursor-not-allowed disabled:opacity-40"
+                    disabled={currentSubmitting}
                     onClick={deleteImageTask}
                     type="button"
                   >
@@ -3491,18 +3644,19 @@ export default function App() {
                   </p>
                 )}
               </>
-            ) : imageProvider === "mflux" && mfluxImageSubmitting ? (
-              <button
-                className="flex h-12 w-full items-center justify-center border border-[#ff826e]/40 text-xs font-bold uppercase tracking-[0.12em] text-[#ff826e] transition hover:border-[#ff826e] hover:bg-[#ff826e]/5"
-                onClick={stopMfluxImage}
-                type="button"
-              >
-                Abort local generation
-              </button>
-            ) : (
+            ) : !currentSubmitting ? (
               <p className="font-mono text-[9px] uppercase tracking-[0.15em] text-white/60">
                 Output controls unlock on completion
               </p>
+            ) : null}
+            {imageProvider === "mflux" && mfluxImageSubmitting && (
+              <button
+                className="mt-3 flex h-12 w-full items-center justify-center border border-[#ff826e]/40 text-xs font-bold uppercase tracking-[0.12em] text-[#ff826e] transition hover:border-[#ff826e] hover:bg-[#ff826e]/5"
+                onClick={stopMfluxImage}
+                type="button"
+              >
+                {currentImageBatch.length > 1 ? "Abort local batch" : "Abort local generation"}
+              </button>
             )}
           </div>
           </>

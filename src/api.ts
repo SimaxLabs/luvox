@@ -144,6 +144,25 @@ export function generateImage(
   });
 }
 
+export async function generateImageBatch(
+  payloads: ImageGeneratePayload[],
+  options: {
+    sessionApiKey?: string;
+    signal: AbortSignal;
+    onStart: (index: number) => void;
+    onResult: (index: number, result: ImageGenerationResponse) => void;
+    onProgress: (progress: LocalMfluxProgress) => void;
+  },
+): Promise<void> {
+  for (const [index, payload] of payloads.entries()) {
+    options.signal.throwIfAborted();
+    options.onStart(index);
+    const result = await generateImage(payload, options.sessionApiKey, options.signal, options.onProgress);
+    options.signal.throwIfAborted();
+    options.onResult(index, result);
+  }
+}
+
 async function streamMfluxImage(
   payload: Extract<ImageGeneratePayload, { provider: "mflux" }>,
   signal?: AbortSignal,

@@ -49,6 +49,12 @@ Choose **Saved prompts** to save up to 100 prompts, optionally including model s
 
 Custom models and saved prompts are stored in `.luvox`. Set `LUVOX_DATA_DIR` to an absolute path to change this location. Docker uses the `luvox-data` volume; **`docker compose down -v` deletes this saved data**.
 
+## Image batches
+
+In **Text to image**, choose up to 10 reference images (PNG, JPEG, or WebP, up to 10 MB each), then select **Process N images**. Each image runs separately, in order, using the same submitted prompt and settings. OpenRouter charges per image.
+
+Use the result thumbnails to select an image, compare it with its original using the before/after slider, and download it. Completed results remain available while the next image runs. A failure or local abort stops the batch and skips the remaining images; completed results are kept. An unknown submission keeps the generation slot locked until Clear. Batches and references stay in this tab and are cleared on reload or server restart.
+
 ## Local image generation with MFLUX
 
 Requires **macOS on Apple Silicon** and an installed [MFLUX](https://github.com/mflux-community/mflux). Use the npm setup, then choose **Text to image → Local MFLUX**.
