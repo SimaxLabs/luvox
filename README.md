@@ -47,6 +47,8 @@ Choose **Manage models** beside the OpenRouter key field to add compatible model
 
 Choose **Saved prompts** to save up to 100 prompts, optionally including model settings. Credentials and references are never saved.
 
+When the library is full, delete a saved prompt before adding another. Existing prompts are never removed automatically.
+
 Custom models and saved prompts are stored in `.luvox`. Set `LUVOX_DATA_DIR` to an absolute path to change this location. Docker uses the `luvox-data` volume; **`docker compose down -v` deletes this saved data**.
 
 ## Image batches
@@ -98,6 +100,8 @@ Use the npm setup and select **Local** for video generation. No OpenRouter key i
 ## Session jobs
 
 Different generation types can run together, with one active job per type. **Download results you want to keep**: jobs and results are cleared on reload or server restart.
+
+An h3.c workspace expires after five minutes without a browser renewal, such as when a tab is suspended. This clears only its local video jobs and references; other generation types and prompts remain available.
 
 Local generation can be stopped. OpenRouter jobs cannot be cancelled through Luvox; closing the app does not stop paid work already submitted.
 

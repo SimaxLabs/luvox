@@ -3,7 +3,6 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import {
-  MAX_SAVED_PROMPTS,
   savedPromptSchema,
   savedPromptsFileSchema,
   type SavedPromptsFile,
@@ -74,10 +73,10 @@ function serializeWrite(operation: () => Promise<void>): Promise<void> {
 
 export function saveSavedPrompt(value: unknown): Promise<SavedPromptsFile> {
   const prompt = savedPromptSchema.parse(value);
-  return serializeWrite(() => persist({
+  return serializeWrite(() => persist(savedPromptsFileSchema.parse({
     version: 1,
-    prompts: [prompt, ...savedPrompts.prompts.filter((saved) => saved.id !== prompt.id)].slice(0, MAX_SAVED_PROMPTS),
-  })).then(getSavedPrompts);
+    prompts: [prompt, ...savedPrompts.prompts.filter((saved) => saved.id !== prompt.id)],
+  }))).then(getSavedPrompts);
 }
 
 export function removeSavedPrompt(value: unknown): Promise<SavedPromptsFile> {

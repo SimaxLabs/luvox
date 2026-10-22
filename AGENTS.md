@@ -4,8 +4,8 @@
 
 - Use Node.js `>=22.12.0` and the npm lockfile. Use `npm ci` for a clean install; use `npm install` when intentionally changing dependencies.
 - `npm run dev` starts Vite on `127.0.0.1:3000` and Express via `tsx watch` on `127.0.0.1:3001`; Vite proxies `/api` to Express.
-- Run `npm test` for the small local-engine contract checks and `npm run typecheck` for focused verification. Run `npm run build` before finishing; it repeats both TypeScript checks, builds the Vite client to `dist/`, and compiles the server to `dist-server/`.
-- There are currently no lint, formatter, codegen, or CI commands. Do not claim those checks ran.
+- Run `npm test` for client lifecycle, HTTP boundary, storage, and fake local-engine checks, and `npm run typecheck` for focused verification. Run `npm run build` before finishing; it repeats both TypeScript checks, builds the Vite client to `dist/`, and compiles the server to `dist-server/`.
+- GitHub Actions requires tests, type checks, and builds on Linux and Apple Silicon macOS before publishing. There are no lint, formatter, or codegen commands.
 - `npm start` alone does not serve the production UI. Run `npm run build`, then `NODE_ENV=production npm start` so Express serves `dist/` on port 3000.
 
 ## Architecture
@@ -19,6 +19,7 @@
 
 - Give every generation type its own independent per-tab slot. Different types may overlap, but never allow a second pending, queued, or processing job of the same type; OpenRouter video and local h3.c video count as separate types.
 - A slot unlocks only on completion or failure. A stopped poll is not terminal; an unknown paid submission keeps the existing ambiguity lock, and an unknown local submission keeps the local slot locked until Clear.
+- h3.c lease expiry clears only that local video workspace. Preserve other jobs, prompts, image results, and pinned credentials; ignore late local responses from the expired workspace token.
 - Apply the same slot lifecycle when adding a generation option. Keep each pending request's controller, form values, credentials, and remote-work marker independent. Workflows without a resumable provider job ID, such as Muse image generation, use only a volatile client task in Session jobs.
 
 ## OpenRouter Constraints

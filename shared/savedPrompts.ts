@@ -58,7 +58,7 @@ export const savedPromptSchema = z.object({
 
 export const savedPromptsFileSchema = z.object({
   version: z.literal(1),
-  prompts: z.array(savedPromptSchema).max(MAX_SAVED_PROMPTS),
+  prompts: z.array(savedPromptSchema).max(MAX_SAVED_PROMPTS, "Saved prompt library is full. Delete a prompt before saving another."),
 }).strict();
 
 export type SavedPrompt = z.infer<typeof savedPromptSchema>;

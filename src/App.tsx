@@ -1465,6 +1465,7 @@ export default function App() {
   };
 
   const viewJob = (nextJob: DisplayJob) => {
+    if (selectedJobId === nextJob.id) return;
     leaveJobView();
     setSelectedJobId(nextJob.id);
     setWorkflow("video");
@@ -1666,8 +1667,27 @@ export default function App() {
         ) {
           pendingLocalWorkspaceDiscards.current.add(token);
           localWorkspaceToken.current = crypto.randomUUID();
-          resetWorkspace(remoteImageWork.current.size > 0, remoteVideoWork.current.size > 0);
-          setError("The inactive local workspace expired and was cleared.");
+          generationControllers.current.get("local")?.abort();
+          generationControllers.current.delete("local");
+          setLocalSubmitting(false);
+          setLocalSubmissionFailure(null);
+          setLocalCleanupFailed(false);
+          setClearingWorkspace(false);
+          if (jobsRef.current.some((job) => job.provider === "local" && job.id === selectedJobIdRef.current)) leaveJobView();
+          if (jobsRef.current.some((job) => job.provider === "local" && job.id === removingJobIdRef.current)) {
+            removingJobIdRef.current = null;
+            setRemovingJobId(null);
+          }
+          setJobs((current) => current.filter((job) => job.provider !== "local"));
+          setForm((current) => ({ ...current, localFirstFramePath: "", localLastFramePath: "" }));
+          setReferenceUploadTokens({});
+          setReferenceUploadStatus("");
+          setUploadingReference(null);
+          firstFramePathOnFocus.current = "";
+          lastFramePathOnFocus.current = "";
+          const message = "The inactive h3.c workspace expired. Its local jobs and references were cleared.";
+          if (currentSubmissionKindRef.current === "local") setError(message);
+          setJobAnnouncement(message);
         }
       } finally {
         if (!disposed) timer = setTimeout(() => void renew(), 30_000);
@@ -1956,12 +1976,12 @@ export default function App() {
       try {
         result = await upload();
       } catch (firstAttemptError) {
-        if (version !== workspaceVersion.current) return;
+        if (version !== workspaceVersion.current || workspaceToken !== localWorkspaceToken.current) return;
         const apiError = firstAttemptError instanceof ApiError ? firstAttemptError : null;
         if (!apiError || apiError.status >= 300) throw firstAttemptError;
         result = await upload();
       }
-      if (version !== workspaceVersion.current) {
+      if (version !== workspaceVersion.current || workspaceToken !== localWorkspaceToken.current) {
         void deleteLocalReferenceImage(result.token, workspaceToken).catch(() => undefined);
         return;
       }
@@ -1978,11 +1998,11 @@ export default function App() {
       });
       setReferenceUploadStatus(`${frameLabel} frame image uploaded.`);
     } catch (uploadError) {
-      if (version !== workspaceVersion.current) return;
+      if (version !== workspaceVersion.current || workspaceToken !== localWorkspaceToken.current) return;
       setReferenceUploadStatus(`${frameLabel} frame image upload failed.`);
       setError(messageFrom(uploadError));
     } finally {
-      if (version === workspaceVersion.current) setUploadingReference(null);
+      if (version === workspaceVersion.current && workspaceToken === localWorkspaceToken.current) setUploadingReference(null);
     }
   };
 
@@ -2055,6 +2075,7 @@ export default function App() {
     const paidRemoteWork = submissionKind === "image" ? remoteImageWork.current : remoteVideoWork.current;
     if (isPaidSubmission) paidRemoteWork.add(pendingRemoteSubmission);
     const version = workspaceVersion.current;
+    const workspaceToken = localWorkspaceToken.current;
     let submittedSelectionVersion = selectionVersion.current;
     if (!isImageSubmission) {
       leaveJobView();
@@ -2161,7 +2182,7 @@ export default function App() {
             lastFramePath: form.localLastFramePath || undefined,
             frameFit: form.localFrameFit,
             ssdStreaming: form.localSsdStreaming,
-          }, undefined, requestController.signal, localWorkspaceToken.current)
+          }, undefined, requestController.signal, workspaceToken)
         : await generateVideo(
             {
               provider: "openrouter",
@@ -2177,7 +2198,7 @@ export default function App() {
             key || undefined,
             requestController.signal,
           );
-      if (version !== workspaceVersion.current) return;
+      if (version !== workspaceVersion.current || (submissionKind === "local" && workspaceToken !== localWorkspaceToken.current)) return;
       paidRemoteWork.delete(pendingRemoteSubmission);
       if (
         nextJob.provider === "openrouter" &&
@@ -2202,7 +2223,7 @@ export default function App() {
       ) setSelectedJobId(trackedJob.id);
       setJobAnnouncement(`${trackedJob.provider === "local" ? "Local h3.c" : "OpenRouter"} job ${trackedJob.id.slice(0, 12)} ${trackedJob.status}.`);
     } catch (submitError) {
-      if (version !== workspaceVersion.current) return;
+      if (version !== workspaceVersion.current || (submissionKind === "local" && workspaceToken !== localWorkspaceToken.current)) return;
       const stoppedLocally = requestController.signal.aborted && cancelledSubmissions.current.delete(submissionKind);
       const apiError = submitError instanceof ApiError ? submitError : null;
       const outcomeIsUnknown = stoppedLocally || (
@@ -2293,19 +2314,20 @@ export default function App() {
 
   const removeVideoJob = async (target: DisplayJob) => {
     const active = target.status === "queued" || target.status === "processing";
-    if (removingJobIdRef.current || (active && target.provider !== "local") || (target.status !== "completed" && !active)) return;
-    const action = active ? "Abort this local h3.c job?" : "Delete this completed video job?";
+    if (removingJobIdRef.current || (active && target.provider !== "local")) return;
+    const action = active ? "Abort this local h3.c job?" : `Delete this ${target.status} video job?`;
     if (!window.confirm(action)) return;
 
     const version = workspaceVersion.current;
+    const workspaceToken = localWorkspaceToken.current;
     removingJobIdRef.current = target.id;
     setRemovingJobId(target.id);
     try {
-      if (target.provider === "local") await deleteLocalVideoJob(target.id, localWorkspaceToken.current);
+      if (target.provider === "local") await deleteLocalVideoJob(target.id, workspaceToken);
       if (target.provider === "openrouter" && target.capabilityToken) {
         await releaseVideoCapability(target.id, target.capabilityToken);
       }
-      if (version !== workspaceVersion.current) return;
+      if (version !== workspaceVersion.current || (target.provider === "local" && workspaceToken !== localWorkspaceToken.current)) return;
       remoteVideoWork.current.delete(target.id);
       setJobs((current) => current.filter((candidate) => candidate.id !== target.id));
       if (selectedJobIdRef.current === target.id) {
@@ -2314,10 +2336,13 @@ export default function App() {
       }
       setJobAnnouncement(`${target.provider === "local" ? "Local h3.c" : "OpenRouter"} job ${active ? "aborted" : "deleted"}.`);
     } catch (removeError) {
-      if (version === workspaceVersion.current && selectedJobIdRef.current === target.id) setError(messageFrom(removeError));
+      if (version === workspaceVersion.current && selectedJobIdRef.current === target.id &&
+          (target.provider !== "local" || workspaceToken === localWorkspaceToken.current)) setError(messageFrom(removeError));
     } finally {
-      if (removingJobIdRef.current === target.id) removingJobIdRef.current = null;
-      if (version === workspaceVersion.current) setRemovingJobId(null);
+      if (removingJobIdRef.current === target.id) {
+        removingJobIdRef.current = null;
+        if (version === workspaceVersion.current) setRemovingJobId(null);
+      }
     }
   };
 
@@ -2346,13 +2371,14 @@ export default function App() {
     setForm((current) => ({ ...current, provider: selectedProvider }));
     setImageProvider(selectedImageProvider);
     const version = workspaceVersion.current;
+    const workspaceToken = localWorkspaceToken.current;
     setClearingWorkspace(true);
-    void discardLocalWorkspace(localWorkspaceToken.current)
+    void discardLocalWorkspace(workspaceToken)
       .then(() => {
-        if (version === workspaceVersion.current) localWorkspaceToken.current = crypto.randomUUID();
+        if (version === workspaceVersion.current && workspaceToken === localWorkspaceToken.current) localWorkspaceToken.current = crypto.randomUUID();
       })
       .catch(() => {
-        if (version === workspaceVersion.current) {
+        if (version === workspaceVersion.current && workspaceToken === localWorkspaceToken.current) {
           setLocalCleanupFailed(true);
           setError("Local workspace cleanup could not be confirmed. Clear again or restart the service before starting another local job.");
         }
@@ -3700,7 +3726,7 @@ export default function App() {
           )}
 
           <div className="border-t border-white/10 px-5 py-5 sm:px-8">
-            {job?.status === "completed" ? (
+            {job?.status === "completed" || job?.status === "failed" ? (
               <div className="flex flex-col gap-3 sm:flex-row">
                 {videoSource && (
                   <>

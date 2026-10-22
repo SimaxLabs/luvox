@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -10,7 +11,7 @@ import {
   removeSavedPrompt,
   saveSavedPrompt,
 } from "../server/savedPrompts.js";
-import type { SavedPrompt } from "../shared/savedPrompts.js";
+import { MAX_SAVED_PROMPTS, type SavedPrompt } from "../shared/savedPrompts.js";
 import { clearLegacySavedPrompts, readLegacySavedPrompts } from "../src/savedPrompts.js";
 
 const createdAt = "2026-09-07T12:00:00.000Z";
@@ -142,6 +143,43 @@ test("saved prompts persist on disk and update by id", async () => {
     }));
     await writeFile(getSavedPromptsFilePath(), "{bad json", "utf8");
     await assert.rejects(initializeSavedPrompts(), /not valid JSON/);
+  } finally {
+    if (previousDirectory === undefined) delete process.env.LUVOX_DATA_DIR;
+    else process.env.LUVOX_DATA_DIR = previousDirectory;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a full prompt library rejects additions without losing data and still permits updates", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "luvox-prompts-limit-"));
+  const previousDirectory = process.env.LUVOX_DATA_DIR;
+  process.env.LUVOX_DATA_DIR = directory;
+  try {
+    const existing = Array.from({ length: MAX_SAVED_PROMPTS - 1 }, (_, index) => ({
+      ...prompts[0], id: randomUUID(), name: `Saved ${index}`,
+    }));
+    await writeFile(getSavedPromptsFilePath(), JSON.stringify({ version: 1, prompts: existing }));
+    await initializeSavedPrompts();
+    const additions = await Promise.allSettled([
+      saveSavedPrompt({ ...prompts[0], id: randomUUID(), name: "Last free slot" }),
+      saveSavedPrompt({ ...prompts[0], id: randomUUID(), name: "One too many" }),
+    ]);
+    assert.equal(additions[0].status, "fulfilled");
+    assert.equal(additions[1].status, "rejected");
+    const before = await readFile(getSavedPromptsFilePath(), "utf8");
+    await assert.rejects(saveSavedPrompt({ ...prompts[0], id: randomUUID() }), /library is full/);
+    assert.equal(await readFile(getSavedPromptsFilePath(), "utf8"), before);
+    await initializeSavedPrompts();
+    assert.equal(getSavedPrompts().prompts.length, MAX_SAVED_PROMPTS);
+    for (const prompt of existing) assert.ok(getSavedPrompts().prompts.some((saved) => saved.id === prompt.id));
+
+    await saveSavedPrompt({ ...existing[0], name: "Updated at capacity" });
+    await initializeSavedPrompts();
+    assert.equal(getSavedPrompts().prompts[0].name, "Updated at capacity");
+    assert.equal(getSavedPrompts().prompts.length, MAX_SAVED_PROMPTS);
+    await removeSavedPrompt({ id: existing[0].id });
+    await saveSavedPrompt({ ...prompts[0], id: randomUUID() });
+    assert.equal(getSavedPrompts().prompts.length, MAX_SAVED_PROMPTS);
   } finally {
     if (previousDirectory === undefined) delete process.env.LUVOX_DATA_DIR;
     else process.env.LUVOX_DATA_DIR = previousDirectory;
