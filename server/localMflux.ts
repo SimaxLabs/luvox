@@ -138,14 +138,29 @@ function assertMfluxMayContinue(signal?: AbortSignal): void {
   throw new LocalMfluxError("MFLUX generation was stopped.", 499, "local_mflux_aborted", false);
 }
 
-function processDefinitelyStopped(pid: number): boolean {
+async function readProcessStartTime(pid: number): Promise<string | undefined> {
+  try {
+    const { stdout } = await execFileAsync("/bin/ps", ["-p", String(pid), "-o", "lstart="], {
+      encoding: "utf8", env: { ...childEnvironment(), LANG: "C", LC_ALL: "C", TZ: "UTC" },
+      maxBuffer: 8_192, timeout: 2_000,
+    });
+    return stdout.trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function processDefinitelyStopped(pid: number, startedAt: unknown): Promise<boolean> {
   if (!Number.isInteger(pid) || pid < 1) return false;
   try {
     process.kill(pid, 0);
-    return false;
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "ESRCH";
   }
+  // shortcut: legacy markers lack process identity; keep live-PID locks until ownership can be verified manually.
+  if (typeof startedAt !== "string" || !startedAt) return false;
+  const currentStartTime = await readProcessStartTime(pid);
+  return Boolean(currentStartTime && currentStartTime !== startedAt);
 }
 
 function processGroupExists(pid: number): boolean {
@@ -223,6 +238,7 @@ export async function initializeLocalMfluxStorage(): Promise<void> {
         kind?: unknown;
         version?: unknown;
         pid?: unknown;
+        serverStartedAt?: unknown;
         binary?: unknown;
       };
       if (
@@ -233,7 +249,7 @@ export async function initializeLocalMfluxStorage(): Promise<void> {
         owned = false;
         continue;
       }
-      if (!processDefinitelyStopped(owner.pid)) {
+      if (!await processDefinitelyStopped(owner.pid, owner.serverStartedAt)) {
         storageBlocked = true;
         continue;
       }
@@ -419,7 +435,11 @@ async function createMfluxDirectory(binary: string, kind: string): Promise<strin
   activeDirectories.add(directory);
   try {
     await chmod(directory, 0o700);
-    const owner = `${JSON.stringify({ kind, version: 1, pid: process.pid, binary })}\n`;
+    const serverStartedAt = await readProcessStartTime(process.pid);
+    if (!serverStartedAt) {
+      throw new LocalMfluxError("Could not identify the local MFLUX storage owner.", 503, "local_mflux_configuration_error", false);
+    }
+    const owner = `${JSON.stringify({ kind, version: 1, pid: process.pid, serverStartedAt, binary })}\n`;
     if (Buffer.byteLength(owner) > MFLUX_OWNER_MAX_BYTES) {
       throw new LocalMfluxError("The configured MFLUX executable path is too long.", 503, "local_mflux_configuration_error", false);
     }

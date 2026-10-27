@@ -3,6 +3,7 @@
 import argparse
 import base64
 import errno
+from dataclasses import asdict, dataclass, replace
 from functools import partial
 import json
 import os
@@ -64,6 +65,20 @@ class Image:
         subprocess.run(["/usr/bin/sips", "-z", str(self.options["height"]), str(self.options["width"]), str(output)], check=True, stdout=subprocess.DEVNULL)
 
 
+@dataclass(frozen=True)
+class TilingConfig:
+    vae_decode_tile_size: int = 512
+    vae_encode_tile_size: int = 512
+
+
+class CallbackManager:
+    @staticmethod
+    def _apply_vae_tiling(args, model):
+        # Match MFLUX 0.19.1: the CLI changes decoding, leaving encoding at its default.
+        if args.vae_tiling or args.vae_tile_size is not None:
+            model.tiling_config = replace(model.tiling_config or TilingConfig(), vae_decode_tile_size=args.vae_tile_size or 512)
+
+
 class Model:
     def __init__(self, **options):
         import huggingface_hub as hub
@@ -86,7 +101,7 @@ class Model:
         for reference in options.get("image_paths", []):
             assert Path(reference).is_file()
             assert not any(Path(reference).parent.glob("reference.*"))
-        record("generate", tile=self.tiling_config, **{key: [str(p) for p in value] if key == "image_paths" else value for key, value in options.items()})
+        record("generate", tile=asdict(self.tiling_config) if self.tiling_config else None, **{key: [str(p) for p in value] if key == "image_paths" else value for key, value in options.items()})
         if options["prompt"] == "fail":
             raise ValueError("private prompt must not escape")
         if options["prompt"] == "exit":
@@ -166,6 +181,7 @@ def snapshot_download(repo_id, *, local_files_only=False, tqdm_class=FakeProgres
 def cli(model_class):
     args = build_parser().parse_args()
     model = model_class(quantize=args.quantize, model_config=args.model)
+    CallbackManager._apply_vae_tiling(args, model)
     model.callbacks.register(5)
     options = dict(seed=args.seed[0], prompt=Path(args.prompt_file).read_text(), width=args.width,
                    height=args.height, num_inference_steps=args.steps,
@@ -187,8 +203,9 @@ module("huggingface_hub.errors", LocalEntryNotFoundError=LocalEntryNotFoundError
 module("tqdm.auto", tqdm=FakeProgress)
 module("mlx.core", clear_cache=lambda: None)
 module("mflux.callbacks.instances.battery_saver", BatterySaver=lambda limit: limit)
+module("mflux.callbacks.callback_manager", CallbackManager=CallbackManager)
 module("mflux.models.common.resolution.config_resolution", ConfigResolution=types.SimpleNamespace(resolve_restricted=resolve_restricted))
-module("mflux.models.common.vae.tiling_config", TilingConfig=lambda **options: options)
+module("mflux.models.common.vae.tiling_config", TilingConfig=TilingConfig)
 module("mflux.utils.prompt_util", PromptUtil=types.SimpleNamespace(read_prompt=lambda args: Path(args.prompt_file).read_text()))
 for name, class_name in [
     ("flux2.cli.flux2_generate", "Flux2Klein"),

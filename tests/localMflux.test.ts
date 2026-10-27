@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -38,8 +38,14 @@ test("MFLUX startup removes only stale owner-marked directories", {
     const orphaned = path.join(temporaryRoot, "luvox-mflux-orphaned");
     const worker = path.join(temporaryRoot, "luvox-mflux-worker");
     const live = path.join(temporaryRoot, "luvox-mflux-live");
+    const liveIdentity = path.join(temporaryRoot, "luvox-mflux-live-identity");
+    const reusedPid = path.join(temporaryRoot, "luvox-mflux-reused-pid");
     const unmarked = path.join(temporaryRoot, "luvox-mflux-unmarked");
-    await Promise.all([mkdir(stale), mkdir(orphaned), mkdir(worker), mkdir(live), mkdir(unmarked)]);
+    await Promise.all([stale, orphaned, worker, live, liveIdentity, reusedPid, unmarked].map((directory) => mkdir(directory)));
+    const serverStartedAt = execFileSync("/bin/ps", ["-p", String(process.pid), "-o", "lstart="], {
+      encoding: "utf8", env: { LANG: "C", LC_ALL: "C", TZ: "UTC" },
+    }).trim();
+    assert.ok(serverStartedAt);
     const orphanPrompt = path.join(orphaned, "prompt.txt");
     await writeFile(orphanPrompt, "test");
     const orphan = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", orphanPrompt], {
@@ -59,10 +65,12 @@ test("MFLUX startup removes only stale owner-marked directories", {
       writeFile(path.join(orphaned, ".luvox-owned"), `${JSON.stringify({ kind: "luvox-mflux-request", version: 1, pid: 2_147_483_647, binary: process.execPath })}\n`),
       writeFile(path.join(worker, ".luvox-owned"), `${JSON.stringify({ kind: "luvox-mflux-worker", version: 1, pid: 2_147_483_647, binary: process.execPath })}\n`),
       writeFile(path.join(live, ".luvox-owned"), `${JSON.stringify({ kind: "luvox-mflux-request", version: 1, pid: process.pid, binary: process.execPath })}\n`),
+      writeFile(path.join(liveIdentity, ".luvox-owned"), JSON.stringify({ kind: "luvox-mflux-worker", version: 1, pid: process.pid, serverStartedAt, binary: process.execPath })),
+      writeFile(path.join(reusedPid, ".luvox-owned"), JSON.stringify({ kind: "luvox-mflux-request", version: 1, pid: process.pid, serverStartedAt: "Mon Jan  1 00:00:00 2001", binary: process.execPath })),
     ]);
 
     await initializeLocalMfluxStorage();
-    assert.deepEqual((await readdir(temporaryRoot)).sort(), ["luvox-mflux-live", "luvox-mflux-unmarked"]);
+    assert.deepEqual((await readdir(temporaryRoot)).sort(), ["luvox-mflux-live", "luvox-mflux-live-identity", "luvox-mflux-unmarked"]);
     await assert.rejects(
       generateLocalMfluxImage(input({
         resolution: "1280x720",
@@ -312,6 +320,9 @@ test("MFLUX warm worker reuses weights, isolates requests, and releases memory o
     const entries = await readdir(temporaryRoot);
     assert.equal(entries.length, 1);
     assert.deepEqual((await readdir(path.join(temporaryRoot, entries[0]))).sort(), [".luvox-owned", "worker.py"]);
+    const owner = JSON.parse(await readFile(path.join(temporaryRoot, entries[0], ".luvox-owned"), "utf8"));
+    assert.equal(owner.pid, process.pid);
+    assert.ok(owner.serverStartedAt);
   };
 
   try {
@@ -346,8 +357,9 @@ test("MFLUX warm worker reuses weights, isolates requests, and releases memory o
     assert.notEqual(history.at(-1)?.pid, generations[0].pid);
     assert.throws(() => process.kill(generations[0].pid, 0), { code: "ESRCH" });
 
-    await request({ inputReference: referenceImage });
+    await request({ inputReference: referenceImage, vaeTiling: true, vaeTileSize: 256 });
     assert.equal((await events()).filter((event) => event.event === "load").at(-1)?.pipeline, "Flux2KleinEdit");
+    assert.equal((await events()).at(-1)?.tile.vae_encode_tile_size, 256);
     let previousPid = (await events()).at(-1)!.pid;
     for (const [model, inputReference, pipeline] of [
       ["flux2-klein-9b", referenceImage, "Flux2KleinEdit"],
@@ -382,13 +394,14 @@ test("MFLUX warm worker reuses weights, isolates requests, and releases memory o
     assert.equal(history.at(-1)?.height, 720);
     await assertIdleFiles();
     for (const inputReference of [undefined, referenceImage]) {
-      await request({ model: "flux2-klein-9b", inputReference, lowRam: true, resolution: "720x1280", generateMissing: Boolean(inputReference) });
+      await request({ model: "flux2-klein-9b", inputReference, lowRam: true, vaeTileSize: 256, resolution: "720x1280", generateMissing: Boolean(inputReference) });
       history = await events();
       const loaded = history.filter((event) => event.event === "load").at(-1)!;
       assert.equal(loaded.model_config, "flux2-klein-9b");
       assert.equal(loaded.pipeline, inputReference ? "Flux2KleinEdit" : "Flux2Klein");
       assert.equal(history.at(-1)?.low_ram, true);
       const generation = history.filter((event) => event.event === "generate").at(-1)!;
+      assert.equal(generation.tile.vae_encode_tile_size, 256);
       assert.equal(generation.prompt.includes("Canvas extension:"), Boolean(inputReference));
       if (inputReference) assert.ok(generation.prompt.includes("top and bottom"));
       assert.deepEqual(await readdir(temporaryRoot), []);
@@ -403,8 +416,14 @@ test("MFLUX warm worker reuses weights, isolates requests, and releases memory o
     await request();
     assert.ok((await readFile(path.join(directory, "mflux-cli.events"), "utf8")).includes('"low_ram": false'));
     assert.deepEqual(await readdir(temporaryRoot), []);
-    process.env.MFLUX_KEEP_ALIVE_MINUTES = "5";
     process.env.MFLUX_FLUX2_BINARY = binary;
+
+    await request({ inputReference: referenceImage, vaeTiling: true, vaeTileSize: 256 });
+    history = await events();
+    assert.equal(history.at(-1)?.low_ram, false);
+    assert.equal(history.filter((event) => event.event === "generate").at(-1)?.tile.vae_encode_tile_size, 256);
+    assert.deepEqual(await readdir(temporaryRoot), []);
+    process.env.MFLUX_KEEP_ALIVE_MINUTES = "5";
 
     for (const prompt of ["fail", "exit", "invalid output"]) {
       await assert.rejects(request({ prompt }), (error) => error instanceof LocalMfluxError && !error.message.includes("private prompt"));

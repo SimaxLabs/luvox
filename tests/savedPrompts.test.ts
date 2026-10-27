@@ -77,12 +77,12 @@ test("legacy browser prompts are validated for migration", () => {
   const persisted = JSON.parse(value!);
   persisted.prompts.push({ ...prompts[0], id: "not-a-uuid", secret: "must not survive validation" });
   value = JSON.stringify(persisted);
-  assert.deepEqual(readLegacySavedPrompts(storage), prompts);
+  assert.throws(() => readLegacySavedPrompts(storage), /original browser copy has been kept/);
 
   value = "{bad json";
-  assert.deepEqual(readLegacySavedPrompts(storage), []);
+  assert.throws(() => readLegacySavedPrompts(storage), /original browser copy has been kept/);
   value = JSON.stringify({ version: 2, prompts });
-  assert.deepEqual(readLegacySavedPrompts(storage), []);
+  assert.throws(() => readLegacySavedPrompts(storage), /original browser copy has been kept/);
 
   clearLegacySavedPrompts(storage);
   assert.equal(value, null);

@@ -327,6 +327,7 @@ function PromptLibrary({
   onLoad: (prompt: SavedPrompt) => string;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
+  const [open, setOpen] = useState(false);
   const [prompts, setPrompts] = useState<SavedPrompt[]>([]);
   const [name, setName] = useState("");
   const [includeSettings, setIncludeSettings] = useState(true);
@@ -336,7 +337,10 @@ function PromptLibrary({
   const [pending, setPending] = useState(false);
 
   useEffect(() => {
+    if (!open) return;
     const controller = new AbortController();
+    setLoading(true);
+    setStorageError(null);
     void (async () => {
       try {
         let file = await getSavedPrompts(controller.signal);
@@ -345,6 +349,7 @@ function PromptLibrary({
           for (const prompt of [...legacyPrompts].reverse()) {
             file = await saveSavedPrompt(prompt, controller.signal);
           }
+          if (controller.signal.aborted) return;
           if (legacyPrompts.length > 0) {
             clearLegacySavedPrompts();
             setStatus(`${legacyPrompts.length} browser ${legacyPrompts.length === 1 ? "prompt" : "prompts"} moved to PC storage.`);
@@ -362,7 +367,7 @@ function PromptLibrary({
       }
     })();
     return () => controller.abort();
-  }, []);
+  }, [open]);
 
   const save = async () => {
     const trimmedName = name.trim();
@@ -415,8 +420,8 @@ function PromptLibrary({
       <button
         aria-haspopup="dialog"
         className="border border-black/20 px-2.5 py-1 text-[9px] font-bold uppercase tracking-[0.12em] text-stone-600 transition hover:border-black hover:bg-black hover:text-[#d9ff72] disabled:cursor-not-allowed disabled:opacity-40"
-        disabled={disabled}
-        onClick={() => dialog.current?.showModal()}
+        disabled={disabled || pending}
+        onClick={() => { setOpen(true); dialog.current?.showModal(); }}
         type="button"
       >
         Saved prompts
@@ -424,6 +429,7 @@ function PromptLibrary({
       <dialog
         aria-labelledby="prompt-library-title"
         className="m-0 h-[100dvh] max-h-none w-full max-w-none bg-transparent p-0 text-[#191b18] backdrop:bg-black/80 sm:m-auto sm:h-auto sm:max-h-[90dvh] sm:w-[min(56rem,calc(100vw-3rem))]"
+        onClose={() => setOpen(false)}
         ref={dialog}
       >
         <div className="flex h-full max-h-[100dvh] flex-col bg-[#f0efe8] shadow-2xl sm:max-h-[90dvh]">

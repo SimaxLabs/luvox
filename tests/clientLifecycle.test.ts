@@ -6,6 +6,7 @@ import App from "../src/App.js";
 import { OPENROUTER_IMAGE_MODELS } from "../shared/imageModels.js";
 import { VIDEO_MODELS } from "../shared/videoModels.js";
 import type { VideoJob } from "../src/api.js";
+import type { SavedPrompt } from "../shared/savedPrompts.js";
 
 const image = { b64Json: "iVBORw0KGgo=", mediaType: "image/png" };
 const localId = "local_00000000-0000-4000-8000-000000000001";
@@ -16,6 +17,12 @@ const video = (id = "paid-video", status: VideoJob["status"] = "queued"): VideoJ
   ...(status === "completed" ? { videoUrl: `/api/video/content/${id}` } : {}),
 });
 const mfluxResult = () => new Response(`${JSON.stringify({ type: "result", result: image })}\n`);
+const config = (sessionId = "same-server") => ({
+  sessionId,
+  localH3: { supported: true, configured: false },
+  localMflux: { supported: true, models: ["flux2-klein-4b", "flux2-klein-9b"] },
+  openRouter: { revision: 0, images: OPENROUTER_IMAGE_MODELS, videos: VIDEO_MODELS, customImageIds: [], customVideoIds: [] },
+});
 type Call = { url: string; init: RequestInit; body?: Record<string, any> };
 
 async function mount(t: TestContext) {
@@ -28,10 +35,16 @@ async function mount(t: TestContext) {
   const root = createRoot(container);
   t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
   t.mock.method(dom.window, "confirm", () => true);
+  Object.assign(dom.window.HTMLDialogElement.prototype, {
+    showModal(this: HTMLDialogElement) { this.open = true; },
+    close(this: HTMLDialogElement) { this.open = false; this.dispatchEvent(new dom.window.Event("close")); },
+  });
   const objectUrls = t.mock.method(URL, "createObjectURL", () => "blob:http://localhost:3000/test-video");
   t.mock.method(URL, "revokeObjectURL", () => {});
   const calls: Call[] = [];
   const api = {
+    config: async (_call: Call) => Response.json(config()),
+    savedPrompts: async (_call: Call) => Response.json({ version: 1, prompts: [] }),
     generateVideo: async (_call: Call) => Response.json(video()),
     generateImage: async (call: Call) => call.body?.provider === "mflux" ? mfluxResult() : Response.json(image),
     poll: async (_call: Call) => Response.json(video()),
@@ -43,13 +56,8 @@ async function mount(t: TestContext) {
   t.mock.method(globalThis, "fetch", async (url, init: RequestInit = {}) => {
     const call: Call = { url: String(url), init, body: typeof init.body === "string" ? JSON.parse(init.body) : undefined };
     calls.push(call);
-    if (url === "/api/config") return Response.json({
-      sessionId: "same-server",
-      localH3: { supported: true, configured: false },
-      localMflux: { supported: true, models: ["flux2-klein-4b", "flux2-klein-9b"] },
-      openRouter: { revision: 0, images: OPENROUTER_IMAGE_MODELS, videos: VIDEO_MODELS, customImageIds: [], customVideoIds: [] },
-    });
-    if (url === "/api/saved-prompts") return Response.json({ version: 1, prompts: [] });
+    if (url === "/api/config") return api.config(call);
+    if (url === "/api/saved-prompts") return api.savedPrompts(call);
     if (url === "/api/local/workspace") return init.method === "PUT" ? api.renew(call) : api.discard(call);
     if (url === "/api/local/reference-image") return init.method === "POST" ? api.upload(call) : Response.json({ deleted: true });
     if (url === "/api/video/generate") return api.generateVideo(call);
@@ -99,6 +107,123 @@ async function mount(t: TestContext) {
   const generations = () => calls.filter((call) => call.url.endsWith("/generate"));
   return { dom, container, api, calls, objectUrls, button, click, fill, submit, selectJob, advance, generations };
 }
+
+test("prompt migration keeps the browser copy until every record is saved", async (t) => {
+  for (const scenario of ["complete", "invalid record", "save failure"]) {
+    await t.test(scenario, async (t) => {
+      const ui = await mount(t);
+      const prompt: SavedPrompt = { id: crypto.randomUUID(), name: "Browser prompt", prompt: "A red kite", createdAt: "2026-09-07T12:00:00.000Z" };
+      const records = [prompt, ...(scenario === "invalid record" ? [{ ...prompt, id: crypto.randomUUID(), settings: { kind: "mflux" } }] : [])];
+      const source = JSON.stringify({ version: 1, prompts: records });
+      ui.dom.window.localStorage.setItem("luvox.saved-prompts.v1", source);
+      let saved: SavedPrompt[] = [];
+      ui.api.savedPrompts = async (call) => {
+        if (call.init.method === "PUT") {
+          assert.deepEqual(call.body, prompt);
+          if (scenario === "save failure") return Response.json({ error: { message: "Disk full", retryable: false } }, { status: 500 });
+          saved = [prompt];
+        }
+        return Response.json({ version: 1, prompts: saved });
+      };
+      await ui.click("Saved prompts");
+      assert.equal(ui.dom.window.localStorage.getItem("luvox.saved-prompts.v1"), scenario === "complete" ? null : source);
+      const dialog = ui.container.querySelector<HTMLDialogElement>('dialog[aria-labelledby="prompt-library-title"]')!;
+      if (scenario === "invalid record") {
+        assert.match(dialog.textContent!, /Browser prompt data is invalid.*original browser copy has been kept/);
+        assert.deepEqual(saved, []);
+      } else if (scenario === "save failure") assert.match(dialog.textContent!, /could not be fully migrated.*Disk full/);
+      else assert.ok(dialog.textContent!.includes(prompt.name));
+    });
+  }
+});
+
+test("opening the prompt library refreshes additions and deletions and retries failed loads", async (t) => {
+  const ui = await mount(t);
+  const prompt: SavedPrompt = { id: crypto.randomUUID(), name: "Saved in another tab", prompt: "A red kite", createdAt: "2026-09-07T12:00:00.000Z" };
+  let saved: SavedPrompt[] = [];
+  const respond = async () => Response.json({ version: 1, prompts: saved });
+  ui.api.savedPrompts = respond;
+  const dialog = ui.container.querySelector<HTMLDialogElement>('dialog[aria-labelledby="prompt-library-title"]')!;
+  const close = async () => { await act(async () => dialog.querySelector<HTMLButtonElement>("button")!.click()); };
+  await ui.click("Saved prompts");
+  assert.match(dialog.textContent!, /No saved prompts yet/);
+  await close();
+  saved = [prompt];
+  await ui.click("Saved prompts");
+  assert.ok(dialog.textContent!.includes(prompt.name));
+  await close();
+  saved = [];
+  await ui.click("Saved prompts");
+  assert.ok(!dialog.textContent!.includes(prompt.name));
+  await close();
+  ui.api.savedPrompts = async () => Response.json({ error: { message: "Storage unavailable", retryable: false } }, { status: 503 });
+  await ui.click("Saved prompts");
+  assert.match(dialog.textContent!, /Storage unavailable/);
+  await close();
+  ui.api.savedPrompts = respond;
+  saved = [prompt];
+  await ui.click("Saved prompts");
+  assert.ok(dialog.textContent!.includes(prompt.name));
+  assert.ok(!dialog.textContent!.includes("Storage unavailable"));
+  assert.equal(ui.calls.filter((call) => call.url === "/api/saved-prompts").length, 5);
+});
+
+test("server restarts and sustained outages preserve paid locks and ignore late submissions", async (t) => {
+  for (const scenario of ["restart", "offline"]) {
+    await t.test(scenario, async (t) => {
+      const ui = await mount(t);
+      const pendingVideo = Promise.withResolvers<Response>();
+      const pendingImage = Promise.withResolvers<Response>();
+      ui.api.generateVideo = () => pendingVideo.promise;
+      ui.api.generateImage = () => pendingImage.promise;
+      await ui.fill("prompt", "Pending paid video");
+      await ui.submit();
+      await ui.click("Text to image");
+      await ui.fill("image-prompt", "Pending paid image");
+      await ui.submit();
+      if (scenario === "restart") {
+        ui.api.config = async () => Response.json(config("new-server"));
+      } else {
+        ui.api.config = async () => { throw new TypeError("API offline"); };
+        await ui.advance(3_000);
+        await ui.advance(3_000);
+        assert.ok(ui.generations().every((call) => !call.init.signal!.aborted), "Short outages must not reset the workspace");
+      }
+      await ui.advance(3_000);
+      assert.equal(ui.generations().length, 2);
+      assert.ok(ui.generations().every((call) => call.init.signal!.aborted));
+      assert.equal(ui.container.querySelector<HTMLTextAreaElement>("#prompt")!.value, "");
+      if (scenario === "offline") {
+        ui.api.config = async () => Response.json(config());
+        await ui.advance(3_000);
+      }
+      await ui.fill("prompt", "Duplicate paid video");
+      await ui.submit();
+      await ui.click("Text to image");
+      assert.equal(ui.container.querySelector<HTMLTextAreaElement>("#image-prompt")!.value, "");
+      await ui.fill("image-prompt", "Duplicate paid image");
+      await ui.submit();
+      assert.equal(ui.generations().length, 2);
+
+      await act(async () => {
+        pendingVideo.resolve(Response.json(video("late-paid-video", "completed")));
+        pendingImage.resolve(Response.json(image));
+      });
+      assert.ok(!ui.container.querySelector('a[download="openrouter-image.png"]'));
+      assert.ok(!ui.container.textContent!.includes("late-paid-video"));
+      await ui.submit();
+      await ui.click("Text to video");
+      await ui.submit();
+      assert.equal(ui.generations().length, 2, "Late success must not unlock either paid slot");
+      assert.ok(!ui.container.querySelector("video"));
+      await ui.click("Unlock retry");
+      ui.api.generateVideo = async () => Response.json(video("explicit-retry"));
+      await ui.fill("prompt", "Explicit retry");
+      await ui.submit();
+      assert.equal(ui.generations().length, 3);
+    });
+  }
+});
 
 test("all four client slots can overlap, reject duplicate submits, and keep submitted credentials", async (t) => {
   const ui = await mount(t);

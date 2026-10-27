@@ -2,6 +2,7 @@
 export const MFLUX_WORKER_SOURCE = String.raw`
 import gc
 import errno
+from dataclasses import replace
 import importlib
 import inspect
 import json
@@ -129,6 +130,18 @@ def main():
     command = importlib.import_module(module_name)
     model = None
 
+    if one_shot:
+        from mflux.callbacks.callback_manager import CallbackManager
+        apply_vae_tiling = CallbackManager._apply_vae_tiling
+
+        def apply_reference_tiling(args, model):
+            apply_vae_tiling(args, model)
+            # MFLUX 0.19.1 sets only decoder tiles; reference encoding has its own size.
+            if model.tiling_config is not None and args.vae_tile_size is not None:
+                model.tiling_config = replace(model.tiling_config, vae_encode_tile_size=args.vae_tile_size)
+
+        CallbackManager._apply_vae_tiling = staticmethod(apply_reference_tiling)
+
     def generate(arguments):
         global resource_error
         nonlocal model
@@ -149,7 +162,7 @@ def main():
             model.callbacks.register(BatterySaver(args.battery_percentage_stop_limit))
             # ponytail: one model per worker; Node restarts it when load settings change.
             # CLI MemorySaver deletes encoders, so do not register it in warm mode.
-            model.tiling_config = TilingConfig(vae_decode_tile_size=args.vae_tile_size or 512) if args.vae_tiling else None
+            model.tiling_config = TilingConfig(vae_decode_tile_size=args.vae_tile_size or 512, vae_encode_tile_size=args.vae_tile_size or 512) if args.vae_tiling else None
 
         resource_error = None
         emit("loading")
